@@ -3,6 +3,7 @@ import { ref, onBeforeUnmount, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
+import { accountAPI, errorMessage } from '../../api/accountManagement.js'
 import { usersAPI } from '../../api/users.js'
 import { useAppStore } from '../../stores/app.js'
 import { statusBadge, ROLE_MAP, USER_STATUS_MAP } from '../../utils/status.js'
@@ -10,6 +11,8 @@ import { statusBadge, ROLE_MAP, USER_STATUS_MAP } from '../../utils/status.js'
 const router = useRouter()
 const app = useAppStore()
 const users = ref([])
+const selected = ref([])
+const batchBusy = ref(false)
 const loading = ref(true)
 const total = ref(0)
 const page = ref(1)
@@ -28,6 +31,7 @@ function requestParams() {
 
 async function fetch() {
   loading.value = true
+  selected.value = []
   try {
     const res = await usersAPI.list(requestParams())
     users.value = res.data.items; total.value = res.data.total
@@ -55,10 +59,19 @@ async function toggleStatus(u) {
 }
 
 onMounted(fetch)
+async function resetSelected(allMatching = false) {
+  batchBusy.value = true
+  try {
+    const selection = allMatching ? { all_matching: true, q: filters.value.query.trim() || null, status_filter: filters.value.status || null } : { student_ids: selected.value }
+    const { data } = await accountAPI.previewReset(selection)
+    await router.push(`/admin/batches/${data.id}`)
+  } catch (e) { app.showToast(errorMessage(e), 'error') }
+  finally { batchBusy.value = false }
+}
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <!-- ── Page Head ─────────────────────────────────────────────────── -->
       <header class="page-head">
@@ -89,22 +102,27 @@ onMounted(fetch)
             <AppIcon name="close" :size="13" />
           </button>
         </label>
-        <select v-model="filters.role" @change="resetAndFetch">
+        <DsSelect v-model="filters.role" @change="resetAndFetch">
           <option value="">全部角色</option>
           <option value="student">学生</option>
           <option value="teacher">教师</option>
           <option value="admin">管理员</option>
-        </select>
-        <select v-model="filters.status" @change="resetAndFetch">
+        </DsSelect>
+        <DsSelect v-model="filters.status" @change="resetAndFetch">
           <option value="">全部状态</option>
           <option value="active">正常</option>
           <option value="disabled">已禁用</option>
-        </select>
+        </DsSelect>
         <div class="filter-count">
           共 {{ total }} 名用户
         </div>
       </div>
 
+      <div class="account-actions">
+        <RouterLink to="/admin/accounts">Excel 导入与批次记录</RouterLink>
+        <button :disabled="!selected.length || batchBusy" class="btn-ghost" @click="resetSelected(false)">预览重置已选 {{ selected.length }} 人</button>
+        <button :disabled="batchBusy || (filters.role && filters.role !== 'student')" class="btn-ghost" @click="resetSelected(true)">预览全部匹配学生</button>
+      </div>
       <!-- ── Loading ────────────────────────────────────────────────────── -->
       <div v-if="loading" class="card table-card">
         <div class="skeleton-row" v-for="i in 5" :key="i">
@@ -126,10 +144,11 @@ onMounted(fetch)
       <div v-else class="card table-card">
         <table class="ds-table">
           <thead>
-            <tr><th>ID</th><th>用户名</th><th>学号</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr>
+            <tr><th><input type="checkbox" aria-label="选择当前页学生" :checked="!!selected.length && selected.length === users.filter(u => u.role === 'student').length" @change="selected = $event.target.checked ? users.filter(u => u.role === 'student').map(u => u.id) : []" /></th><th>ID</th><th>用户名</th><th>学号</th><th>姓名</th><th>角色</th><th>状态</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="u in users" :key="u.id">
+              <td><input v-if="u.role === 'student'" v-model="selected" type="checkbox" :value="u.id" :aria-label="`选择 ${u.real_name}`" /></td>
               <td class="text-sm text-secondary">{{ u.id }}</td>
               <td>
                 <a class="user-link" @click="router.push(`/admin/users/${u.id}/edit`)">{{ u.username }}</a>
@@ -207,7 +226,7 @@ onMounted(fetch)
   max-width: 100%;
 }
 .user-searchbox .input { width: 100%; }
-.filter-bar select {
+.filter-bar .ds-select {
   min-width: 120px;
 }
 .filter-count {

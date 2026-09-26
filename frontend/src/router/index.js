@@ -3,6 +3,13 @@ import { useAuthStore } from '../stores/auth.js'
 import { homeForRole } from './roleHome.js'
 
 const routes = [
+  { path: '/account/password', name: 'ChangePassword', component: () => import('../views/ChangePasswordView.vue') },
+  { path: '/account/profile', name: 'Profile', component: () => import('../views/ProfileView.vue') },
+  { path: '/student/history', name: 'StudentHistory', component: () => import('../views/student/HistoryView.vue'), meta: { role: 'student' } },
+  { path: '/student/history/:kind/:id', name: 'StudentHistoryDetail', component: () => import('../views/student/HistoryView.vue'), meta: { role: 'student' } },
+  { path: '/admin/accounts', name: 'AdminAccounts', component: () => import('../views/admin/AccountOperationsView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/batches/:id', name: 'AdminBatch', component: () => import('../views/admin/BatchDetailView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/account-security', name: 'AdminAccountSecurity', component: () => import('../views/admin/AccountSecurityView.vue'), meta: { role: 'admin' } },
   { path: '/welcome', name: 'Welcome', component: () => import('../views/WelcomeView.vue'), meta: { guest: true } },
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { guest: true } },
 
@@ -84,7 +91,7 @@ router.beforeEach(async (to, from, next) => {
 
   // Guest-only pages (login/welcome)
   if (to.meta.guest) {
-    if (auth.isAuthenticated) return next(homeForRole(auth.role))
+    if (auth.isAuthenticated) return next(auth.user?.must_change_password ? '/account/password' : homeForRole(auth.role))
     return next()
   }
 
@@ -106,6 +113,9 @@ router.beforeEach(async (to, from, next) => {
     const u = await fetchMePromise
     if (!u) return next('/login')
   }
+
+  if (auth.user?.must_change_password && to.path !== '/account/password') return next('/account/password')
+  if (!auth.user?.must_change_password && to.path === '/account/password') return next('/account/profile')
 
   // Role check
   if (to.meta.role && to.meta.role !== auth.role) {

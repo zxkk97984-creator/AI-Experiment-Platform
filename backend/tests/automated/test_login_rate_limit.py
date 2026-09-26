@@ -154,3 +154,19 @@ def test_username_normalization_for_rate_limit_key(client, db_session_factory):
         assert login_attempt(client, "  EVE ", WRONG).status_code == 401
     # 规范化后同一账户被识别并限流
     assert login_attempt(client, "eve", RIGHT).status_code == 429
+
+
+def test_classroom_sixty_students_share_ip_without_collective_lockout(client, db_session_factory):
+    """Successful class logins do not consume the IP failure budget."""
+    from app.models import User
+    from app.security import hash_password
+    with db_session_factory() as db:
+        # Fixture-only reuse makes user setup cheap; production creation salts each account.
+        password_hash = hash_password(RIGHT)
+        db.add_all([User(username=f'classroom-{i}', student_no=f'CLASS-{i}', real_name=f'Student {i}',
+                         role='student', status='active', password_hash=password_hash) for i in range(60)])
+        db.commit()
+    for i in range(60):
+        if i % 5 == 0:
+            assert login_attempt(client, f'classroom-{i}', WRONG).status_code == 401
+        assert login_attempt(client, f'classroom-{i}').status_code == 200

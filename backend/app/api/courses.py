@@ -284,7 +284,6 @@ def _course_student_flags(courses, current_user: User, db: Session):
     enrollment_rows = db.scalars(
             select(CourseEnrollment).where(
                 CourseEnrollment.student_id == current_user.id,
-                CourseEnrollment.status == "enrolled",
                 CourseEnrollment.course_id.in_([c.id for c in courses]),
             )
         ).all()
@@ -292,8 +291,10 @@ def _course_student_flags(courses, current_user: User, db: Session):
     flags = []
     for course in courses:
         enrollment = enrollments.get(course.id)
-        is_enrolled = enrollment is not None
-        if is_enrolled:
+        is_enrolled = enrollment is not None and enrollment.status == "enrolled"
+        if enrollment and enrollment.origin == "manual" and enrollment.status == "dropped":
+            can_enroll = False
+        elif is_enrolled:
             can_enroll = False
         elif course.visibility in ("class", "public"):
             can_enroll = True
@@ -315,8 +316,14 @@ def _set_course_classes(db: Session, course: Course, class_ids: list[int]) -> No
         raise api_error(422, "INVALID_TEACHING_CLASSES", "包含不存在的教学班")
     if any(row.academic_term_id != course.academic_term_id for row in classes):
         raise api_error(422, "TEACHING_CLASS_TERM_MISMATCH", "教学班必须与课程属于同一学期")
-    if any(row.status != "active" for row in classes):
-        raise api_error(409, "TEACHING_CLASS_ARCHIVED", "已归档教学班不能绑定课程")
+    existing_ids = {link.teaching_class_id for link in course.teaching_class_links}
+    if any(row.status != "active" and row.id not in existing_ids for row in classes):
+        raise api_error(409, "TEACHING_CLASS_ARCHIVED", "已归档教学班不能新增绑定")
+    removed = existing_ids - set(class_ids)
+    if removed and db.scalar(select(TeachingClass.id).where(TeachingClass.id.in_(removed), TeachingClass.status == 'archived').limit(1)):
+        raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '已归档教学班关系已冻结')
+    if existing_ids == set(class_ids):
+        return
     for link in list(course.teaching_class_links):
         db.delete(link)
     db.flush()
@@ -380,6 +387,8 @@ def create_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = Course(
         title=payload.title,
         description=payload.description,
@@ -418,6 +427,11 @@ def get_course(course_id: int, db: Session = Depends(get_db), current_user: User
             course.visibility in ("public", "whitelist")
             or (course.visibility == "class" and is_student_in_course_class(course.id, current_user.id, db))
         )
+    denied = db.scalar(select(CourseEnrollment.id).where(CourseEnrollment.course_id == course.id,
+                       CourseEnrollment.student_id == current_user.id, CourseEnrollment.origin == 'manual',
+                       CourseEnrollment.status == 'dropped'))
+    if denied:
+        can_enroll = False
     origin = None
     if current_user.role == "student" and is_enrolled:
         enrollment = db.scalar(select(CourseEnrollment).where(CourseEnrollment.course_id == course.id, CourseEnrollment.student_id == current_user.id))
@@ -438,6 +452,8 @@ def update_course(
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
 ):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
@@ -482,6 +498,8 @@ def update_course(
 
 @router.delete("/courses/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
 def archive_course(course_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
@@ -496,6 +514,8 @@ def enroll_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db)
     _ensure_course_term_writable(course)
     if course.status != "published":
@@ -506,6 +526,10 @@ def enroll_course(
             CourseEnrollment.student_id == current_user.id,
         )
     )
+    if enrollment and enrollment.origin == 'manual' and enrollment.status == 'dropped':
+        raise api_error(403, 'COURSE_NOT_VISIBLE', '已被移出课程，请联系教师')
+    if enrollment and enrollment.status == 'enrolled':
+        return enrollment
     if course.visibility == "public":
         pass  # 所有学生可选
     elif course.visibility == "class":
@@ -515,9 +539,8 @@ def enroll_course(
         if not is_student_whitelisted(course.id, current_user.id, db):
             raise api_error(403, "COURSE_NOT_VISIBLE", "没有权限选修该课程")
     elif course.visibility == "private":
-        # 禁止从未选课学生首次自助选课；已有 enrollment 记录（含 dropped）可恢复
-        if enrollment is None or (enrollment.status == "dropped" and enrollment.origin == "manual"):
-            raise api_error(403, "COURSE_NOT_VISIBLE", "没有权限选修该课程")
+        # A historical dropped row never authorizes re-entry into a private course.
+        raise api_error(403, "COURSE_NOT_VISIBLE", "请联系教师重新授权该课程")
     else:
         raise api_error(403, "COURSE_NOT_VISIBLE", "没有权限选修该课程")
     if enrollment:
@@ -537,6 +560,8 @@ def drop_course(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db)
     _ensure_course_term_writable(course)
     enrollment = db.scalar(
@@ -546,7 +571,7 @@ def drop_course(
         )
     )
     if enrollment:
-        if enrollment.origin == "class":
+        if enrollment.origin in {"class", "manual"} or is_student_in_course_class(course_id, current_user.id, db):
             raise api_error(409, "CLASS_ENROLLMENT_REQUIRED", "班级统一加入的课程不能自行退选")
         enrollment.status = "dropped"
         db.commit()
@@ -618,11 +643,13 @@ async def import_course_students(
     current_user: User = Depends(get_current_user),
 ):
     """CSV 导入课程名单：按学号优先、账号兜底匹配 active 学生；不存在的行跳过并报告。"""
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
 
-    content = await file.read()
+    content = await file.read(2 * 1024 * 1024 + 1)
     if len(content) > 2 * 1024 * 1024:
         raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
     rows, error = _parse_student_csv(content)
@@ -642,16 +669,8 @@ async def import_course_students(
             ))
             result.skipped += 1
             continue
-        student = db.scalar(
-            select(User).where(
-                User.role == "student",
-                User.status == "active",
-                or_(
-                    User.student_no == student_no if student_no else User.id == -1,
-                    User.username == username if username else User.id == -1,
-                ),
-            )
-        )
+        from app.services.roster_service import resolve_student_identity
+        student = resolve_student_identity(db, student_no, username, real_name)
         if student is None:
             result.errors.append(CourseStudentImportRow(
                 row=index, student_no=student_no, username=username,
@@ -676,17 +695,28 @@ async def import_course_students(
             ))
             result.created += 1
         elif enrollment.status == "enrolled":
-            result.updated += 1
+            result.skipped += 1
+        elif enrollment.origin == "manual":
+            result.skipped += 1
+            result.errors.append(CourseStudentImportRow(
+                row=index, student_no=student_no, username=username,
+                status="skipped", message="学生已被人工移出，请通过单独添加操作重新授权",
+            ))
         else:
             enrollment.status = "enrolled"
             enrollment.origin = "manual"
             result.updated += 1
+    from app.services.account_service import audit
+    audit(db, current_user.id, 'course.csv_import', 'course', course.id,
+          changes={'created': result.created, 'updated': result.updated, 'skipped': result.skipped})
     db.commit()
     return result
 
 
 @router.post("/courses/{course_id}/students", response_model=CourseStudentRead, status_code=status.HTTP_201_CREATED)
 def add_course_student(course_id: int, payload: CourseStudentCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db); ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
     student = db.get(User, payload.student_id)
@@ -704,6 +734,8 @@ def add_course_student(course_id: int, payload: CourseStudentCreate, db: Session
 
 @router.delete("/courses/{course_id}/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_course_student(course_id: int, student_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     course = require_course(course_id, db); ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
     enrollment = db.scalar(select(CourseEnrollment).where(CourseEnrollment.course_id == course_id, CourseEnrollment.student_id == student_id))

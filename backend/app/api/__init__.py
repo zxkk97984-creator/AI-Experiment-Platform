@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from .account_management import router as account_management_router
 from .admin_logs import router as admin_logs_router
 from .ai_grading import router as ai_grading_router
 from .academics import router as academics_router
@@ -22,12 +23,14 @@ from .statistics import router as statistics_router
 from .search import router as search_router
 from .submissions import router as submissions_router
 from .notifications import router as notifications_router
+from .student_history import router as student_history_router
 from .users import router as users_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth_router)
 api_router.include_router(academics_router)
 api_router.include_router(announcements_router)
+api_router.include_router(student_history_router)
 api_router.include_router(users_router)
 api_router.include_router(courses_router)
 api_router.include_router(course_covers_router)
@@ -48,3 +51,5 @@ api_router.include_router(search_router)
 api_router.include_router(submissions_router)
 api_router.include_router(notifications_router)
 api_router.include_router(admin_logs_router)
+
+api_router.include_router(account_management_router)

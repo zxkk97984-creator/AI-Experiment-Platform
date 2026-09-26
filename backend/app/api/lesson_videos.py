@@ -123,7 +123,7 @@ async def put_lesson_video(
         )
 
     sig, expires_at = create_playback_signature(
-        lesson.id, current_user.id, lesson.video_storage_key, settings
+        lesson.id, current_user.id, lesson.video_storage_key, settings, session_version=current_user.session_version
     )
     return LessonVideoUploadRead(
         lesson=LessonRead.model_validate(lesson),
@@ -182,7 +182,7 @@ def get_lesson_video_playback_url(
         raise api_error(403, "FORBIDDEN", "没有权限访问该课程的视频")
 
     sig, expires_at = create_playback_signature(
-        lesson.id, current_user.id, lesson.video_storage_key, settings
+        lesson.id, current_user.id, lesson.video_storage_key, settings, session_version=current_user.session_version
     )
     return LessonVideoPlaybackRead(
         url=_playback_url(request, lesson.id, current_user.id, int(expires_at.timestamp()), sig),
@@ -205,13 +205,13 @@ def stream_lesson_video(
     if not lesson or lesson.video_source != "upload" or not lesson.video_storage_key:
         raise api_error(404, "VIDEO_NOT_FOUND", "视频文件不存在")
 
-    verify_playback_signature(
-        lesson.id, uid, expires, lesson.video_storage_key, sig, settings
-    )
-
     user = db.get(User, uid)
     if not user or user.status != "active":
         raise api_error(401, "UNAUTHORIZED", "账号已失效，无法播放视频")
+    from app.services.account_service import ensure_full_account
+    ensure_full_account(user)
+    verify_playback_signature(lesson.id, uid, expires, lesson.video_storage_key, sig, settings,
+                              session_version=user.session_version)
 
     # 重新执行课程访问权限检查（退课/移出白名单/课程不可见后立即失效）
     if not can_access_course_content(lesson.chapter.course, user, db):

@@ -354,6 +354,7 @@ def _run_alembic_command(db_path: Path, *args: str) -> subprocess.CompletedProce
     env["DAI_DATABASE_URL"] = f"sqlite:///{db_path}"
     env["DAI_ENVIRONMENT"] = "development"
     env["DAI_ALLOW_ENVIRONMENT_V2_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND_DIR,

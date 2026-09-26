@@ -24,7 +24,9 @@ def test_admin_can_create_user_and_logout_blacklists_token(client, db_session_fa
     )
     assert create_response.status_code == 201, create_response.text
     assert create_response.json()["username"] == "student001"
-    assert "password" not in create_response.text
+    assert 'password' not in create_response.json()
+    assert 'password_hash' not in create_response.json()
+    assert create_response.json()['must_change_password'] is True
 
     list_response = client.get("/api/v1/users", headers=auth_header(access_token))
     assert list_response.status_code == 200

@@ -14,9 +14,11 @@ def create_admin(username: str, password: str, real_name: str):
         raise SystemExit(f"密码不符合要求：{exc}") from exc
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        existing = db.scalar(select(User).where(User.username == username))
+        existing = db.scalar(select(User).where(User.username == username).with_for_update())
         if existing:
-            existing.password_hash = hash_password(password)
+            from app.services.account_service import change_credentials, audit
+            change_credentials(db, existing, hash_password(password))
+            audit(db, existing.id, 'password.cli_reset', 'user', existing.id)
             existing.real_name = real_name
             existing.role = "admin"
             existing.status = "active"
@@ -87,6 +89,7 @@ def seed_demo(reset: bool, reference_date: str | None, skip_env_check: bool, for
 def main():
     parser = argparse.ArgumentParser(description="DAI backend management commands")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("audit-student-identities", help="只读列出缺失学号或登录名与学号不一致的旧学生")
     admin_parser = subparsers.add_parser("create-admin")
     admin_parser.add_argument("--username", required=True)
     admin_parser.add_argument("--password", required=True)
@@ -103,7 +106,15 @@ def main():
     demo_parser.add_argument("--force-fixture", action="store_true",
                              help="强制全部提交使用 seed_fixture（不做真实 Docker 判题）")
     args = parser.parse_args()
-    if args.command == "create-admin":
+    if args.command == 'audit-student-identities':
+        import json
+        from sqlalchemy import or_
+        with SessionLocal() as db:
+            rows = db.scalars(select(User).where(User.role == 'student', or_(
+                User.student_no.is_(None), User.student_no == '', User.username != User.student_no))).all()
+            print(json.dumps([{'id': row.id, 'username': row.username, 'student_no': row.student_no}
+                              for row in rows], ensure_ascii=False))
+    elif args.command == "create-admin":
         create_admin(args.username, args.password, args.real_name)
     elif args.command == "seed-environments":
         seed_environments(args.enqueue)

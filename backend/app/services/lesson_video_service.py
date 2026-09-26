@@ -151,12 +151,13 @@ def create_playback_signature(
     storage_key: str,
     settings: Settings,
     now: datetime | None = None,
+    session_version: int = 1,
 ) -> tuple[str, datetime]:
     """生成短期签名播放参数 (sig, expires)。签名内容包含当前 storage key，
     替换/移除视频后已签发的旧地址立即失效。"""
     now = now or datetime.now(timezone.utc)
     expires = int((now + timedelta(seconds=settings.video_playback_url_ttl_seconds)).timestamp())
-    message = f"{lesson_id}:{user_id}:{expires}:{storage_key}"
+    message = f"{lesson_id}:{user_id}:{expires}:{storage_key}:{session_version}"
     digest = hmac.new(
         settings.secret_key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
     ).hexdigest()
@@ -170,12 +171,13 @@ def verify_playback_signature(
     storage_key: str,
     sig: str,
     settings: Settings,
+    session_version: int = 1,
 ) -> None:
     """校验签名与过期时间；任何不匹配即抛 401，防止被当作普通 404 探测。"""
     now_ts = int(datetime.now(timezone.utc).timestamp())
     if expires <= now_ts:
         raise api_error(401, "VIDEO_SIGNATURE_EXPIRED", "播放链接已过期")
-    message = f"{lesson_id}:{user_id}:{expires}:{storage_key}"
+    message = f"{lesson_id}:{user_id}:{expires}:{storage_key}:{session_version}"
     expected = hmac.new(
         settings.secret_key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256
     ).hexdigest()

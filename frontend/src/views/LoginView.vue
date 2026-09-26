@@ -22,7 +22,7 @@ async function handleLogin() {
   error.value = ''
   try {
     const user = await auth.login(username.value, password.value)
-    router.push(homeForRole(user.role))
+    router.push(user.must_change_password ? '/account/password' : homeForRole(user.role))
   } catch (e) {
     const detail = e.response?.data?.detail
     error.value = detail?.message || '登录失败，请检查用户名和密码'
@@ -427,5 +427,11 @@ function goWelcome() { router.push('/welcome') }
 @media (prefers-reduced-motion: reduce) {
   .login-card { animation: none; }
   .login-btn:hover:not(:disabled) { transform: none; }
+}
+
+@media (min-width: 921px) and (max-height: 800px) {
+  .login-card { padding-block: 28px; }
+  .card-foot { margin-top: 20px; }
+  .page-foot { margin-top: 20px; }
 }
 </style>

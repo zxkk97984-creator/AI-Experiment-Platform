@@ -97,8 +97,9 @@ describe('AppHeader 用户菜单', () => {
     trigger.element.focus()
     await trigger.trigger('click')
     await wrapper.vm.$nextTick()
-    const logoutBtn = wrapper.findAll('.user-menu button').find((b) => b.text().includes('退出'))
-    expect(document.activeElement).toBe(logoutBtn.element)
+    const firstItem = wrapper.get('.user-menu [role="menuitem"]')
+    expect(firstItem.text()).toContain('个人中心')
+    expect(document.activeElement).toBe(firstItem.element)
   })
 
   it('Escape 关闭菜单后焦点恢复到触发器（TASK-024）', async () => {

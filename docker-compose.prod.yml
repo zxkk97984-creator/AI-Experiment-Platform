@@ -120,9 +120,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    environment:
+    environment: &api_environment
       DAI_ENVIRONMENT: ${DAI_ENVIRONMENT:-production}
       DAI_DATABASE_URL: mysql+pymysql://${DAI_DB_USER:?DAI_DB_USER 未设置}:${DAI_DB_PASSWORD:?DAI_DB_PASSWORD 未设置}@mysql:3306/dai_platform
+      DAI_ACCOUNT_SECURITY_KEYS: ${DAI_ACCOUNT_SECURITY_KEYS:-}
+      DAI_ACCOUNT_WORKER_HASH_CONCURRENCY: ${DAI_ACCOUNT_WORKER_HASH_CONCURRENCY:-2}
       DAI_REDIS_URL: redis://redis:6379/0
       # 文件日志（管理员系统日志页直读；20MB×10 轮转）
       DAI_LOG_DIR: /app/logs
@@ -207,6 +209,32 @@ services:
       - video_data:/app/storage/videos
       - cover_data:/app/storage/covers
       - app_logs:/app/logs
+
+  account-worker:
+    build: *backend-build
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.account_worker"]
+    environment:
+      <<: *api_environment
+      # This process does not build environments or call AI; no Registry secret/socket needed.
+      DAI_ENVIRONMENT_EDITOR_V2_ENABLED: "false"
+      DAI_AI_ENABLED: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 512m
 
   worker:
     build: *backend-build

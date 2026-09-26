@@ -4,7 +4,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.dependencies import get_current_user, get_db, get_redis_client
+from app.dependencies import get_authenticated_user, get_current_user, get_db, get_redis_client
 from app.errors import api_error
 from app.models import User
 from app.schemas import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse, UserRead
@@ -207,5 +207,5 @@ def logout(
 
 
 @router.get("/me", response_model=UserRead)
-def me(current_user: User = Depends(get_current_user)):
+def me(current_user: User = Depends(get_authenticated_user)):
     return current_user

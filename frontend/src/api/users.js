@@ -1,6 +1,7 @@
 import client from './client.js'
 
 export const usersAPI = {
+  resetPassword(id, data) { return client.post(`/users/${id}/password-reset`, data) },
   getMyPreferences() { return client.get('/users/me/preferences') },
   updateMyPreferences(data) { return client.patch('/users/me/preferences', data) },
   list(params) { return client.get('/users', { params }) },

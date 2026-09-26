@@ -2,7 +2,7 @@
 
 - 所有密码入口共享同一形状校验：≥8 字符、UTF-8 ≤72 字节、不得全空白。
 - 密码不得等同规范化用户名。
-- 本人改密必须提交正确的 current_password；管理员重置无需旧密码。
+- 本人改密必须提交正确的 current_password；管理员重置需验证管理员当前密码，无需学生旧密码。
 """
 
 import pytest
@@ -84,14 +84,14 @@ def test_create_user_rejects_whitespace_only_password(client, db_session_factory
     assert resp.status_code == 422, resp.text
 
 
-def test_password_equal_username_rejected_on_create_and_change(client, db_session_factory):
+def test_teacher_password_equal_username_rejected_on_create(client, db_session_factory):
     admin_tok = _create_admin(client, db_session_factory)
     resp = client.post(
         f"{API}/users",
         headers=auth_header(admin_tok),
         json={
             "username": "samepw_1", "password": "samepw_1",
-            "real_name": "同名密码", "role": "student", "student_no": "S9004",
+            "real_name": "同名密码", "role": "teacher",
         },
     )
     assert resp.status_code == 422, resp.text
@@ -101,21 +101,21 @@ def test_password_equal_username_rejected_on_create_and_change(client, db_sessio
 def test_self_change_requires_correct_current_password(client, db_session_factory):
     token = _create_student(client, db_session_factory, "self_pw")
     me = client.get(f"{API}/auth/me", headers=auth_header(token)).json()
-    # 缺 current_password → 401
+    # 缺 current_password → 422
     resp = client.patch(
         f"{API}/users/{me['id']}/password",
         headers=auth_header(token),
         json={"password": "NewPass123!"},
     )
-    assert resp.status_code == 401, resp.text
+    assert resp.status_code == 422, resp.text
     assert resp.json()["detail"]["code"] == "CURRENT_PASSWORD_INVALID"
-    # 错误旧密码 → 401
+    # 错误旧密码 → 422
     resp = client.patch(
         f"{API}/users/{me['id']}/password",
         headers=auth_header(token),
         json={"password": "NewPass123!", "current_password": "WrongOld"},
     )
-    assert resp.status_code == 401, resp.text
+    assert resp.status_code == 422, resp.text
     # 正确旧密码 → 200，新密码可登录
     resp = client.patch(
         f"{API}/users/{me['id']}/password",
@@ -126,18 +126,28 @@ def test_self_change_requires_correct_current_password(client, db_session_factor
     assert login(client, "self_pw", password="NewPass123!")
 
 
-def test_admin_reset_without_old_password(client, db_session_factory):
+def test_admin_reset_requires_admin_password_but_not_student_password(client, db_session_factory):
     _create_student(client, db_session_factory, "rst_stu")
     admin_tok = _create_admin(client, db_session_factory)
     target = client.get(f"{API}/users", headers=auth_header(admin_tok), params={"role": "student"}).json()["items"]
     uid = next(u["id"] for u in target if u["username"] == "rst_stu")
-    resp = client.patch(
-        f"{API}/users/{uid}/password",
-        headers=auth_header(admin_tok),
+    legacy = client.patch(
+        f"{API}/users/{uid}/password", headers=auth_header(admin_tok),
         json={"password": "ResetPass1!"},
     )
+    assert legacy.status_code == 403, legacy.text
+    invalid = client.post(
+        f"{API}/users/{uid}/password-reset", headers=auth_header(admin_tok),
+        json={"current_password": "WrongPassword!", "reason": "Student requested reset"},
+    )
+    assert invalid.status_code == 422, invalid.text
+    resp = client.post(
+        f"{API}/users/{uid}/password-reset", headers=auth_header(admin_tok),
+        json={"current_password": RIGHT, "reason": "Student requested reset"},
+    )
     assert resp.status_code == 200, resp.text
-    assert login(client, "rst_stu", password="ResetPass1!")
+    token, _ = login(client, "rst_stu", password="tzcaicode")
+    assert client.get(f"{API}/auth/me", headers=auth_header(token)).json()["must_change_password"] is True
 
 
 def test_self_change_rejects_password_equal_username(client, db_session_factory):

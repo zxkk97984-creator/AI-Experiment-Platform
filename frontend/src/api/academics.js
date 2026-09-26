@@ -1,6 +1,9 @@
 import client from './client.js'
 
 export const academicsAPI = {
+  reopenTerm(id, data) { return client.post(`/academic-terms/${id}/reopen`, data) },
+  restoreClass(id, data) { return client.post(`/teaching-classes/${id}/restore`, data) },
+  transferStudents(id, data) { return client.post(`/teaching-classes/${id}/transfer`, data) },
   listTerms(params) { return client.get('/academic-terms', { params }) },
   createTerm(data) { return client.post('/academic-terms', data) },
   updateTerm(id, data) { return client.patch(`/academic-terms/${id}`, data) },

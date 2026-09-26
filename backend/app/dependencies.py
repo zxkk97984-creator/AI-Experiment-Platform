@@ -67,7 +67,7 @@ def get_current_payload(
     return payload
 
 
-def get_current_user(
+def get_authenticated_user(
     payload: dict = Depends(get_current_payload),
     db: Session = Depends(get_db),
 ) -> User:
@@ -80,6 +80,12 @@ def get_current_user(
     token_sv = payload.get("sv")
     if token_sv is None or int(token_sv) != user.session_version:
         raise api_error(401, "SESSION_REVOKED", "会话已失效，请重新登录")
+    return user
+
+
+def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
+    from app.services.account_service import ensure_full_account
+    ensure_full_account(user)
     return user
 
 

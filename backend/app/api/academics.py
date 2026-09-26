@@ -1,4 +1,7 @@
 from typing import Literal
+from pydantic import BaseModel, Field
+from app.services.account_service import audit, lock_policy
+from app.services.time_utils import utc_now
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, or_, select
@@ -44,6 +47,7 @@ def list_terms(pagination: PaginationParams = Depends(pagination), db: Session =
 
 @router.post("/academic-terms", response_model=AcademicTermRead, status_code=status.HTTP_201_CREATED)
 def create_term(payload: AcademicTermCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    lock_policy(db)
     term = AcademicTerm(**payload.model_dump())
     db.add(term)
     try:
@@ -57,6 +61,7 @@ def create_term(payload: AcademicTermCreate, db: Session = Depends(get_db), _: U
 
 @router.patch("/academic-terms/{term_id}", response_model=AcademicTermRead)
 def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    lock_policy(db)
     term = db.get(AcademicTerm, term_id)
     if not term:
         raise api_error(404, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
@@ -67,6 +72,7 @@ def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends
     end = updates.get("end_date", term.end_date)
     if end < start:
         raise api_error(422, "INVALID_TERM_DATES", "学期结束日期不能早于开始日期")
+    audit(db, _.id, 'term.update', 'academic_term', term_id, changes=updates)
     for key, value in updates.items():
         setattr(term, key, value)
     try:
@@ -80,9 +86,11 @@ def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends
 
 @router.delete("/academic-terms/{term_id}", response_model=AcademicTermRead)
 def close_term(term_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    lock_policy(db)
     term = db.get(AcademicTerm, term_id)
     if not term:
         raise api_error(404, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
+    audit(db, _.id, "term.close", "academic_term", term_id)
     term.status = "closed"
     db.commit(); db.refresh(term)
     return term
@@ -126,6 +134,7 @@ def list_classes(academic_term_id: int | None = None, q: str | None = None,
 
 @router.post("/teaching-classes", response_model=TeachingClassSummary, status_code=status.HTTP_201_CREATED)
 def create_class(payload: TeachingClassCreate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
+    lock_policy(db)
     term = db.get(AcademicTerm, payload.academic_term_id)
     if not term:
         raise api_error(404, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
@@ -143,10 +152,14 @@ def create_class(payload: TeachingClassCreate, db: Session = Depends(get_db), _:
 
 @router.patch("/teaching-classes/{class_id}", response_model=TeachingClassSummary)
 def update_class(class_id: int, payload: TeachingClassUpdate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    row = db.get(TeachingClass, class_id)
+    lock_policy(db)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
     _term_writable(row.academic_term)
+    if row.status == 'archived':
+        raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '已归档教学班不可修改')
+    audit(db, _.id, 'class.update', 'teaching_class', class_id, changes=payload.model_dump(exclude_unset=True))
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(row, key, value)
     try:
@@ -160,10 +173,12 @@ def update_class(class_id: int, payload: TeachingClassUpdate, db: Session = Depe
 
 @router.delete("/teaching-classes/{class_id}", response_model=TeachingClassSummary)
 def archive_class(class_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    row = db.get(TeachingClass, class_id)
+    lock_policy(db)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
     _term_writable(row.academic_term)
+    audit(db, _.id, "class.archive", "teaching_class", class_id)
     row.status = "archived"
     db.commit(); db.refresh(row)
     return _class_summary(db, row)
@@ -177,7 +192,7 @@ def _query_class_students(
     q: str | None = None,
 ) -> PaginatedResponse:
     """教学班学生名单分页查询（纯函数——供路由与内部调用复用，不依赖 FastAPI DI）。"""
-    row = db.get(TeachingClass, class_id)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
     filters = [TeachingClassStudent.teaching_class_id == class_id, TeachingClassStudent.status == "active"]
@@ -228,10 +243,13 @@ def list_class_students(
 
 @router.post("/teaching-classes/{class_id}/students", response_model=PaginatedResponse)
 def add_class_students(class_id: int, payload: TeachingClassStudentBatch, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    row = db.get(TeachingClass, class_id)
+    lock_policy(db)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
     _term_writable(row.academic_term)
+    if row.status == 'archived':
+        raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '已归档教学班不可修改')
     students = db.scalars(select(User).where(User.id.in_(payload.student_ids), User.role == "student", User.status == "active")).all()
     if len(students) != len(set(payload.student_ids)):
         raise api_error(422, "INVALID_STUDENTS", "名单包含不存在或不可用的学生")
@@ -241,19 +259,26 @@ def add_class_students(class_id: int, payload: TeachingClassStudentBatch, db: Se
     )).all()}
     for student_id in set(payload.student_ids):
         if student_id in existing:
-            existing[student_id].status = "active"
+            if existing[student_id].status != "active":
+                existing[student_id].status = "active"
+                existing[student_id].joined_at = utc_now()
+                existing[student_id].removed_at = None
         else:
-            db.add(TeachingClassStudent(teaching_class_id=class_id, student_id=student_id, status="active"))
+            db.add(TeachingClassStudent(teaching_class_id=class_id, student_id=student_id, status="active", joined_at=utc_now()))
+    audit(db, _.id, 'class.members_change', 'teaching_class', class_id)
     db.flush(); sync_courses_for_class(db, class_id); db.commit()
     return _query_class_students(class_id, db, page=1, page_size=20)
 
 
 @router.delete("/teaching-classes/{class_id}/students/{student_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_class_student(class_id: int, student_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    row = db.get(TeachingClass, class_id)
+    lock_policy(db)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
     _term_writable(row.academic_term)
+    if row.status == 'archived':
+        raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '已归档教学班不可修改')
     membership = db.scalar(select(TeachingClassStudent).where(
         TeachingClassStudent.teaching_class_id == class_id,
         TeachingClassStudent.student_id == student_id,
@@ -261,5 +286,79 @@ def remove_class_student(class_id: int, student_id: int, db: Session = Depends(g
     if not membership:
         raise api_error(404, "CLASS_STUDENT_NOT_FOUND", "学生不在该教学班")
     membership.status = "removed"
+    membership.removed_at = utc_now()
+    audit(db, _.id, 'class.members_change', 'teaching_class', class_id)
     db.flush(); sync_courses_for_class(db, class_id); db.commit()
     return None
+
+
+class AcademicAction(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class TransferRequest(AcademicAction):
+    target_class_id: int
+    student_ids: list[int] = Field(min_length=1, max_length=5000)
+
+
+@router.post('/academic-terms/{term_id}/reopen', response_model=AcademicTermRead)
+def reopen_term(term_id: int, payload: AcademicAction, db: Session = Depends(get_db),
+                actor: User = Depends(require_roles('admin'))):
+    lock_policy(db)
+    term = db.get(AcademicTerm, term_id)
+    if not term:
+        raise api_error(404, 'ACADEMIC_TERM_NOT_FOUND', '学期不存在')
+    term.status = 'active'
+    audit(db, actor.id, 'term.reopen', 'academic_term', term_id, reason=payload.reason)
+    db.commit()
+    return term
+
+
+@router.post('/teaching-classes/{class_id}/restore', response_model=TeachingClassSummary)
+def restore_class(class_id: int, payload: AcademicAction, db: Session = Depends(get_db),
+                  actor: User = Depends(require_roles('admin'))):
+    lock_policy(db)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
+    if not row:
+        raise api_error(404, 'TEACHING_CLASS_NOT_FOUND', '教学班不存在')
+    _term_writable(row.academic_term)
+    row.status = 'active'
+    audit(db, actor.id, 'class.restore', 'teaching_class', class_id, reason=payload.reason)
+    db.commit()
+    return _class_summary(db, row)
+
+
+@router.post('/teaching-classes/{class_id}/transfer')
+def transfer_students(class_id: int, payload: TransferRequest, db: Session = Depends(get_db),
+                      actor: User = Depends(require_roles('admin'))):
+    lock_policy(db)
+    source, target = db.get(TeachingClass, class_id), db.get(TeachingClass, payload.target_class_id)
+    if not source or not target or source.id == target.id:
+        raise api_error(422, 'INVALID_TRANSFER', '请选择不同的有效教学班')
+    for row in (source, target):
+        _term_writable(row.academic_term)
+        if row.status != 'active':
+            raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '归档班级不可转班')
+    if source.academic_term_id != target.academic_term_id:
+        raise api_error(422, 'CROSS_TERM_TRANSFER', '转班必须在同一学期内')
+    ids = set(payload.student_ids)
+    members = db.scalars(select(TeachingClassStudent).where(
+        TeachingClassStudent.teaching_class_id == class_id,
+        TeachingClassStudent.student_id.in_(ids), TeachingClassStudent.status == 'active')).all()
+    if len(members) != len(ids):
+        raise api_error(409, 'ROSTER_CHANGED', '源班级名单已变化')
+    for member in members:
+        member.status, member.removed_at = 'removed', utc_now()
+        link = db.scalar(select(TeachingClassStudent).where(
+            TeachingClassStudent.teaching_class_id == target.id, TeachingClassStudent.student_id == member.student_id))
+        if link is None:
+            link = TeachingClassStudent(teaching_class_id=target.id, student_id=member.student_id)
+            db.add(link)
+        link.status, link.joined_at, link.removed_at = 'active', utc_now(), None
+        audit(db, actor.id, 'class.transfer', 'user', member.student_id, reason=payload.reason,
+              changes={'from_class_id': class_id, 'to_class_id': target.id})
+    db.flush()
+    for row in (source, target):
+        sync_courses_for_class(db, row.id)
+    db.commit()
+    return {'transferred': len(ids)}

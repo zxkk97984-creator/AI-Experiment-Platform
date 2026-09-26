@@ -192,11 +192,13 @@ echo "$API_PORT" >"$RUN_DIR/api.port"
 
 launch judge "$PROJECT_DIR/backend" "$PY" -m app.worker.judge_worker
 launch envbuilder "$PROJECT_DIR/backend" "$PY" -m app.worker.environment_builder_worker
+launch accounts "$PROJECT_DIR/backend" "$PY" -m app.worker.account_worker
 
 # Worker 没有 HTTP 健康接口，至少确认启动后仍持续存活。
 sleep 1
 check_alive judge
 check_alive envbuilder
+check_alive accounts
 
 # ── 6. 前端 ───────────────────────────────────────────────────
 cd "$PROJECT_DIR/frontend"
@@ -227,6 +229,7 @@ wait_http frontend "http://127.0.0.1:${FRONTEND_PORT}/" 60 \
 check_alive api
 check_alive judge
 check_alive envbuilder
+check_alive accounts
 check_alive frontend
 
 printf '\n\033[32m✔ 全部启动完成，并已通过存活/HTTP 检查\033[0m\n'

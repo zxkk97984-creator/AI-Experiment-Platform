@@ -1,14 +1,17 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import AppLayout from '../../components/layout/AppLayout.vue'
+import { useRouter } from 'vue-router'
+import { accountAPI } from '../../api/accountManagement.js'
 import { usersAPI } from '../../api/users.js'
 import { useAppStore } from '../../stores/app.js'
 import { useAuthStore } from '../../stores/auth.js'
 
+const router = useRouter()
 const app = useAppStore()
 const auth = useAuthStore()
 
-const profile = reactive({ real_name: '', department: '' })
+const profile = reactive({ real_name: '', department: '', nickname: '' })
 const saving = ref(false)
 const password = reactive({ current_password: '', password: '', password_confirm: '' })
 const passwordSaving = ref(false)
@@ -20,6 +23,7 @@ const localPrefs = reactive({
 
 
 function loadProfile() {
+  profile.nickname = auth.user?.nickname || ''
   profile.real_name = auth.user?.real_name || ''
   profile.department = auth.user?.department || ''
 }
@@ -31,10 +35,7 @@ async function saveProfile() {
   }
   saving.value = true
   try {
-    const { data } = await usersAPI.update(auth.user.id, {
-      real_name: profile.real_name.trim(),
-      department: profile.department.trim() || null,
-    })
+    const { data } = await accountAPI.updateProfile({ nickname: profile.nickname })
     auth.setUser(data)
     app.showToast('个人信息已保存', 'success')
   } catch (error) {
@@ -99,7 +100,9 @@ async function savePassword() {
     password.current_password = ''
     password.password = ''
     password.password_confirm = ''
-    app.showToast('密码已修改', 'success')
+    app.showToast('密码已修改，请重新登录', 'success')
+    await auth.logout()
+    await router.replace('/login')
   } catch (error) {
     app.showToast(error.response?.data?.detail?.message || '修改失败', 'error')
   } finally {
@@ -114,8 +117,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <AppLayout>
-    <main class="settings-page">
+  <AppLayout content-mode="form">
+    <section class="settings-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">系统 / 设置</p>
@@ -128,13 +131,14 @@ onMounted(() => {
         <div class="panel-head"><div class="ph-label"><p class="eyebrow">Profile</p><h3>个人资料</h3></div></div>
         <div class="panel-body settings-form">
           <label class="field">
-            <span>姓名</span>
-            <input v-model="profile.real_name" type="text" maxlength="120" />
+            <span>正式姓名（联系管理员修改）</span>
+            <input v-model="profile.real_name" readonly type="text" maxlength="120" />
           </label>
           <label class="field">
             <span>院系</span>
-            <input v-model="profile.department" type="text" maxlength="120" placeholder="例如：计算机学院" />
+            <input v-model="profile.department" readonly type="text" maxlength="120" placeholder="例如：计算机学院" />
           </label>
+          <label class="field"><span>昵称</span><input v-model="profile.nickname" maxlength="80" /></label>
           <div><button type="button" class="btn btn-primary" :disabled="saving" @click="saveProfile">保存资料</button></div>
         </div>
       </section>
@@ -161,7 +165,7 @@ onMounted(() => {
           </button>
         </div>
       </section>
-    </main>
+    </section>
   </AppLayout>
 </template>
 
@@ -172,4 +176,8 @@ onMounted(() => {
 .preference-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .preference-row span { display: flex; flex-direction: column; gap: 4px; }
 .preference-row small { color: var(--muted); }
+
+.settings-page { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); align-items: start; }
+.settings-page > .page-head, .settings-page > .panel:last-child { grid-column: 1 / -1; }
+.settings-form { max-width: none; }
 </style>

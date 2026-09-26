@@ -649,3 +649,39 @@ input.check:focus-visible, input.radio:focus-visible { outline: 2px solid var(--
   .specimen-nav { position: static; }
   .spec-grid { grid-template-columns: 1fr; }
 }
+
+/* Desktop page composition. Color, type families and control tokens remain V2.
+   Explicit shell attributes keep these rules out of standalone/embedded content. */
+.shell[data-content-mode] { grid-template-columns: var(--sidebar-width) minmax(0, 1fr); }
+.shell[data-content-mode].is-collapsed { grid-template-columns: var(--sidebar-collapsed) minmax(0, 1fr); }
+.shell[data-content-mode] .content-inner { width: 100%; min-width: 0; max-width: none; }
+.shell[data-content-mode="form"] .content-inner { max-width: 960px; }
+.shell[data-content-mode="reading"] .content-inner { max-width: 1080px; }
+.shell[data-content-mode] .content-inner > :where(section, div, main) { min-width: 0; }
+.shell[data-content-mode] :where(.page-head, .page-header, .account-page > header) { margin-bottom: 0; gap: var(--space-4); }
+.shell[data-content-mode] :where(.page-head, .page-header, .account-page > header) h1 { font-size: var(--text-3xl); overflow-wrap: anywhere; }
+.shell[data-content-mode] :where(.page-head, .page-header) p { margin-block: var(--space-1) 0; }
+.shell[data-content-mode] .metric-strip { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.shell[data-content-mode] .metric-strip .metric { min-width: 0; padding: var(--space-3) var(--space-4); }
+.shell[data-content-mode] .teacher-metric-card { flex-direction: row; text-align: left; }
+.shell[data-content-mode] .teacher-metric-copy { align-items: flex-start; }
+.shell[data-content-mode] :where(.toolbar, .filter-bar) { min-width: 0; gap: var(--space-2); }
+.shell[data-content-mode] :where(.toolbar, .filter-bar) > :where(input, select, label) { min-width: 0; max-width: 100%; }
+.shell[data-content-mode] :where(.table-scroll, .table-wrap) { min-width: 0; max-width: 100%; }
+.shell[data-content-mode] :where(.table-scroll, .table-wrap) .col-actions { position: sticky; right: 0; z-index: 1; background: var(--surface); }
+.shell[data-content-mode] :where(.table-scroll, .table-wrap) th.col-actions { background: var(--surface-subtle); }
+.shell[data-content-mode] :where(.pagination-bar, .pagination-footer) { flex-wrap: wrap; gap: var(--space-2); }
+.shell[data-content-mode] :where(.header-search, .searchbox) input { min-width: 0; }
+.shell[data-content-mode] .header-search input { height: auto; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.shell[data-content-mode] :where(.page-sub, .page-subtitle, .lead) { overflow-wrap: anywhere; }
+
+/* A dialog owns one scrolling body; its actions must stay within a short screen. */
+:where([role="dialog"]) { max-width: calc(100vw - 48px); max-height: calc(100dvh - 48px); }
+:where(.modal, .modal-card, .modal-panel, .dialog-panel) { min-width: 0; }
+:where(.modal-head, .modal-header, .modal-foot, .modal-footer, .dialog-header, .dialog-footer) { flex-shrink: 0; }
+:where(.modal-body, .dialog-body) { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+:where(button, a, input, select, textarea, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+@media (max-width: 920px) {
+  .shell[data-content-mode], .shell[data-content-mode].is-collapsed { grid-template-columns: minmax(0, 1fr); }
+}

@@ -42,6 +42,21 @@ client.interceptors.response.use(
   (res) => res,
   async (error) => {
     const { config, response } = error
+    const code = response?.data?.detail?.code
+    if (code === 'PASSWORD_CHANGE_REQUIRED') {
+      const auth = useAuthStore()
+      auth.setUser({ ...auth.user, must_change_password: true })
+      const router = await getRouter()
+      router.replace('/account/password')
+      return Promise.reject(error)
+    }
+    if (code === 'TEMPORARY_PASSWORD_EXPIRED') {
+      const auth = useAuthStore()
+      await auth.logout()
+      const router = await getRouter()
+      router.replace('/login')
+      return Promise.reject(error)
+    }
     if (
       !response ||
       response.status !== 401 ||
@@ -103,12 +118,13 @@ client.interceptors.response.use(
       }
       // 更新 Pinia 内存中的 token
       auth.setAccessToken(newToken)
+      if (res.data.user) auth.setUser(res.data.user)
 
       resolveQueue(newToken)
       config.headers.Authorization = `Bearer ${newToken}`
       return client(config)
     } catch (refreshError) {
-      if (refreshError.response?.status === 401) {
+      if (refreshError.response?.status === 401 || refreshError.response?.data?.detail?.code === 'TEMPORARY_PASSWORD_EXPIRED') {
         rejectQueue(refreshError)
         if (
           auth.sessionGeneration === refreshGeneration &&

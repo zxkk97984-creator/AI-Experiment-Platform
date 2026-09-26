@@ -44,6 +44,13 @@ describe('管理员教务管理页', () => {
     expect(academicsAPI.listClassStudents).toHaveBeenCalledWith(2, { page: 1, page_size: 20 })
     expect(wrapper.text()).toContain('20260001')
     expect(wrapper.text()).toContain('陈同学')
+    expect(wrapper.find('.class-panel').exists()).toBe(false)
+    expect(wrapper.find('.back-to-classes').text()).toContain('返回教学班列表')
+
+    await wrapper.find('.back-to-classes').trigger('click')
+    expect(wrapper.find('.roster').exists()).toBe(false)
+    expect(wrapper.find('.class-panel').exists()).toBe(true)
+    expect(wrapper.text()).toContain('计算机一班')
   })
 
   it('使用后端 total 分页加载超过一页的教学班', async () => {
@@ -60,6 +67,8 @@ describe('管理员教务管理页', () => {
   it('创建学期后刷新教务数据', async () => {
     academicsAPI.createTerm.mockResolvedValue({ data: term })
     const wrapper = await mountPage()
+    academicsAPI.listTerms.mockClear()
+    academicsAPI.listTerms.mockResolvedValue({ data: { items: [term, { ...term, id: 4, code: '2027-SPRING', name: '2027 春季学期' }], total: 2 } })
     const inputs = wrapper.findAll('.grid article').at(0).findAll('input')
     await inputs[0].setValue('2027-SPRING')
     await inputs[1].setValue('2027 春季学期')
@@ -68,6 +77,9 @@ describe('管理员教务管理页', () => {
     await wrapper.findAll('.grid article').at(0).find('form').trigger('submit')
     await flushPromises()
     expect(academicsAPI.createTerm).toHaveBeenCalledWith(expect.objectContaining({ code: '2027-SPRING' }))
-    expect(academicsAPI.listTerms).toHaveBeenCalledTimes(2)
+    expect(academicsAPI.listTerms).toHaveBeenCalledWith({ page: 1, page_size: 20 })
+    expect(academicsAPI.listTerms).toHaveBeenCalledWith({ page: 1, page_size: 100 })
+    expect(wrapper.findAll('.rows')[0].text()).toContain('2027 春季学期')
+    expect(wrapper.findAll('option').some((option) => option.text().includes('2027 春季学期'))).toBe(true)
   })
 })

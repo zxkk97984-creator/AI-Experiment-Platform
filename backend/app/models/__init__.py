@@ -66,6 +66,12 @@ class User(TimestampMixin, Base):
         Integer, nullable=False, default=1, server_default="1"
     )
 
+    nickname: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    temporary_password_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credential_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
     teaching_class_memberships: Mapped[list["TeachingClassStudent"]] = relationship(
         back_populates="student", cascade="all, delete-orphan"
     )
@@ -253,6 +259,9 @@ class TeachingClassStudent(TimestampMixin, Base):
     teaching_class_id: Mapped[int] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"))
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(String(20), default="active")
+
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     teaching_class: Mapped[TeachingClass] = relationship(back_populates="student_memberships")
     student: Mapped[User] = relationship(back_populates="teaching_class_memberships")
@@ -1304,6 +1313,7 @@ class EnvironmentProfile(TimestampMixin, Base):
     __tablename__ = "environment_profiles"
     __table_args__ = (
         UniqueConstraint("slug", name="uq_env_profile_slug"),
+        Index("fk_env_profiles_current_version", "current_version_id"),
         # Profile.current_version_id 与 EnvironmentVersion.profile_id 形成循环
         # 外键；迁移中同样在表创建后单独建立此约束。
         ForeignKeyConstraint(
@@ -1490,6 +1500,7 @@ class EnvironmentDraft(TimestampMixin, Base):
             name="ck_env_drafts_state",
         ),
         Index("ix_env_drafts_candidate_version_id", "candidate_version_id"),
+        Index("fk_env_drafts_source_version", "source_version_id"),
         Index("ix_env_drafts_active_build_job_id", "active_build_job_id"),
     )
 
@@ -1562,6 +1573,7 @@ class EnvironmentPublication(TimestampMixin, Base):
         ),
         Index("ix_env_publications_profile_created", "profile_id", "created_at"),
         Index("ix_env_publications_version_id", "version_id"),
+        Index("fk_env_publications_previous_version", "previous_version_id"),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_PK, primary_key=True)
@@ -1584,3 +1596,65 @@ class EnvironmentPublication(TimestampMixin, Base):
     previous_version: Mapped["EnvironmentVersion | None"] = relationship(
         foreign_keys=[previous_version_id]
     )
+
+
+class AccountSecurityPolicy(TimestampMixin, Base):
+    __tablename__ = "account_security_policies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temporary_days: Mapped[int] = mapped_column(Integer, default=7, server_default="7")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
+class AdminBatch(TimestampMixin, Base):
+    __tablename__ = "admin_batches"
+    __table_args__ = (Index("ix_admin_batches_status_created", "status", "created_at"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), default="preview")
+    scope: Mapped[dict] = mapped_column(JSON, default=dict)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    preview_digest: Mapped[str] = mapped_column(String(64))
+    policy_version: Mapped[int] = mapped_column(Integer)
+    password_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
+class AdminBatchItem(Base):
+    __tablename__ = "admin_batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "row_number", name="uq_admin_batch_item_row"),
+        Index("ix_admin_batch_items_status", "batch_id", "status"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("admin_batches.id", ondelete="CASCADE"))
+    row_number: Mapped[int] = mapped_column(Integer)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    expected_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    prepared_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (Index("ix_audit_events_target_created", "target_type", "target_id", "created_at"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    target_type: Mapped[str] = mapped_column(String(40))
+    target_id: Mapped[str] = mapped_column(String(80))
+    batch_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    changes: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

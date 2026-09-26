@@ -46,7 +46,8 @@ def sync_course_class_enrollments(db: Session, course: Course) -> None:
                 course_id=course.id, student_id=student_id,
                 status="enrolled", origin="class",
             ))
-        elif enrollment.origin == "class":
+        elif enrollment.origin == "class" or (enrollment.origin == "self" and enrollment.status == "dropped"):
+            enrollment.origin = "class"
             enrollment.status = "enrolled"
 
     for student_id, enrollment in enrollments.items():
@@ -64,3 +65,18 @@ def sync_courses_for_class(db: Session, teaching_class_id: int) -> None:
         course = db.get(Course, course_id)
         if course:
             sync_course_class_enrollments(db, course)
+
+
+def resolve_student_identity(db, student_no, username=None, real_name=None):
+    """Never choose arbitrarily when the supplied identifiers disagree."""
+    from app.models import User
+    by_no = db.scalar(select(User).where(User.student_no == student_no)) if student_no else None
+    by_name = db.scalar(select(User).where(User.username == username)) if username else None
+    if student_no and username and (by_no is None or by_name is None or by_no.id != by_name.id):
+        return None
+    user = by_no if student_no else by_name
+    if not user or user.role != 'student' or user.status != 'active':
+        return None
+    if real_name and real_name.strip() != user.real_name:
+        return None
+    return user

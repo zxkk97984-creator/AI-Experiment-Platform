@@ -51,10 +51,10 @@ def test_refresh_token_revoked_after_admin_reset(client, db_session_factory):
     uid = client.get(
         f"{API}/users", headers=_me(admin_token), params={"role": "student"}
     ).json()["items"][0]["id"]
-    resp = client.patch(
-        f"{API}/users/{uid}/password",
+    resp = client.post(
+        f"{API}/users/{uid}/password-reset",
         headers=_me(admin_token),
-        json={"password": "AdminReset1!"},
+        json={"current_password": RIGHT, "reason": "Requested reset"},
     )
     assert resp.status_code == 200, resp.text
 

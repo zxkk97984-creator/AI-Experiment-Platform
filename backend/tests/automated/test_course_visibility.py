@@ -586,8 +586,8 @@ def test_private_enrolled_student_keeps_access(client, db_session_factory):
     assert _chapters(client, s_tok, cid).status_code == 200
 
 
-def test_private_dropped_student_can_reenroll(client, db_session_factory):
-    """存量 private 课程的 dropped enrollment 可通过直接地址恢复选课"""
+def test_private_dropped_student_cannot_use_history_to_reenroll(client, db_session_factory):
+    """历史选课记录不授予重新进入私有课程的权限。"""
     t_tok = _token(client, db_session_factory, "t_prd")
     s_tok = _token(client, db_session_factory, "s_prd", "student")
     cid = create_course_db(db_session_factory, teacher_username="t_prd", title="可见范围课程", status="published", visibility="public")
@@ -603,10 +603,10 @@ def test_private_dropped_student_can_reenroll(client, db_session_factory):
     # 退课后 private 课程从列表消失
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok))
     assert resp.json()["total"] == 0
-    # 但可通过直接地址恢复
+    # Direct requests cannot bypass the current authorization decision.
     resp = _enroll(client, s_tok, cid)
-    assert resp.status_code == 201
-    assert _chapters(client, s_tok, cid).status_code == 200
+    assert resp.status_code == 403
+    assert _chapters(client, s_tok, cid).status_code == 403
 
 
 def test_private_never_enrolled_student_denied(client, db_session_factory):

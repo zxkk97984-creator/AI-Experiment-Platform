@@ -96,6 +96,9 @@ class UserRead(BaseModel):
     department: str | None = None
     role: UserRole
     status: str
+    nickname: str | None = None
+    must_change_password: bool = False
+    temporary_password_expires_at: datetime | None = None
 
 
 class TokenResponse(BaseModel):
@@ -107,25 +110,28 @@ class TokenResponse(BaseModel):
 
 
 class UserCreate(BaseModel):
-    username: str
-    password: str
-    real_name: str
-    department: str | None = None
-    student_no: str | None = None
+    username: str = Field(default="", max_length=80)
+    password: str | None = None
+    real_name: str = Field(min_length=1, max_length=120)
+    department: str | None = Field(default=None, max_length=120)
+    student_no: str | None = Field(default=None, max_length=80)
     role: UserRole
     status: Literal["active", "disabled"] = "active"
 
     @field_validator("password")
     @classmethod
-    def _limit_password(cls, v: str) -> str:
-        validate_password_rules(v)
+    def _limit_password(cls, v: str | None) -> str | None:
+        if v is not None:
+            validate_password_rules(v)
         return v
 
 
 class UserUpdate(BaseModel):
-    real_name: str | None = None
-    department: str | None = None
-    student_no: str | None = None
+    model_config = ConfigDict(extra="forbid")
+    reason: str | None = Field(default=None, max_length=500)
+    real_name: str | None = Field(default=None, min_length=1, max_length=120)
+    department: str | None = Field(default=None, max_length=120)
+    student_no: str | None = Field(default=None, max_length=80)
     role: UserRole | None = None
     status: Literal["active", "disabled"] | None = None
 
@@ -143,6 +149,7 @@ class PasswordUpdate(BaseModel):
 
 
 class StatusUpdate(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
     status: Literal["active", "disabled"]
 
 

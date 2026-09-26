@@ -10,6 +10,11 @@ const app = useAppStore()
 const auth = useAuthStore()
 
 const props = defineProps({
+  contentMode: {
+    type: String,
+    default: 'list',
+    validator: value => ['list', 'form', 'reading', 'workspace'].includes(value),
+  },
   variant: {
     type: String,
     default: 'default',
@@ -41,6 +46,8 @@ onMounted(async () => {
 <template>
   <div
     class="shell"
+    :data-content-mode="contentMode"
+    :data-role="auth.role"
     :class="{
       'student-workspace-shell': isStudentWorkspace,
       'teacher-workspace-shell': isTeacherWorkspace,

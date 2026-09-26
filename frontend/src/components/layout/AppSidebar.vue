@@ -41,6 +41,7 @@ const menuItems = computed(() => {
     key: 'home',
   })
   const base = [
+    { path: '/student/history', label: '学习记录', sub: 'History', icon: 'clipboard', key: 'history' },
     { path: '/student/courses',     label: '课程',     sub: 'Courses',     icon: 'course',     key: 'courses' },
     { path: '/student/assignments', label: '作业',     sub: 'Assignments', icon: 'assignment', key: 'assignments' },
     { path: '/student/exams',       label: '考试',     sub: 'Exams',       icon: 'exam',       key: 'exams' },
@@ -60,6 +61,8 @@ const menuItems = computed(() => {
     { path: '/teacher/settings',       label: '设置',       sub: 'Settings',      icon: 'settings',    key: 'settings' },
   ]
   if (auth.isAdmin) return [
+    { path: '/admin/accounts', label: '名单与批次', sub: 'Batches', icon: 'clipboard', key: 'accounts' },
+    { path: '/admin/account-security', label: '账号安全与审计', sub: 'Security', icon: 'settings', key: 'security' },
     { path: '/admin/users',         label: '用户管理', sub: 'Users',       icon: 'user',       key: 'users' },
     { path: '/admin/academics',     label: '教务管理', sub: 'Academics',   icon: 'course',     key: 'academics' },
     { path: '/admin/courses',       label: '课程管理', sub: 'Courses',     icon: 'course',     key: 'courses' },
@@ -86,13 +89,13 @@ const navGroups = computed(() => {
     return [
       { label: '教务', items: pick(['users', 'academics', 'courses', 'experiments']) },
       { label: '评分', items: pick(['ai-grading']) },
-      { label: '系统', items: pick(['environments', 'logs']) },
+      { label: '系统', items: pick(['environments', 'logs', 'accounts', 'security']) },
     ]
   }
   return [{ label: '学习', items }]
 })
 
-const displayName = computed(() => auth.user?.real_name || auth.user?.username || '同学')
+const displayName = computed(() => auth.user?.nickname || auth.user?.real_name || auth.user?.username || '同学')
 const avatarText = computed(() => displayName.value.trim().slice(0, 1))
 const roleText = computed(() => {
   const map = { student: '学生', teacher: '教师', admin: '管理员' }

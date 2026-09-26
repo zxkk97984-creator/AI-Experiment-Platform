@@ -24,6 +24,18 @@ describe('useAuthStore logout', () => {
     setActivePinia(createPinia())
   })
 
+  it('刷新会话用服务端强制改密状态覆盖本地旧资料', async () => {
+    const auth = useAuthStore()
+    auth.setUser({ id: 1, role: 'student', must_change_password: false })
+    const refreshed = { id: 1, role: 'student', must_change_password: true, temporary_password_expires_at: '2026-10-01T00:00:00' }
+    mocks.refresh.mockResolvedValue({ data: { access_token: 'refreshed-token', user: refreshed } })
+
+    await expect(auth.tryRestoreSession()).resolves.toBe(true)
+    expect(auth.user).toEqual(refreshed)
+    expect(JSON.parse(localStorage.getItem('user'))).toEqual(refreshed)
+    expect(auth.accessToken).toBe('refreshed-token')
+  })
+
   it('用 access token 快照发起服务端退出，并立即清除本地会话', async () => {
     let resolveLogout
     mocks.logout.mockImplementation(

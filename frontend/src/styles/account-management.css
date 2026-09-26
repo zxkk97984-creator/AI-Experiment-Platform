@@ -1,0 +1,36 @@
+.account-page { display:grid; gap:var(--space-5); min-width:0; }
+.account-page h1 { margin:0 0 8px; font-size:var(--text-3xl); }
+.account-page h2 { margin:0 0 16px; font-size:20px; }
+.account-page p { line-height:1.65; }
+.account-panel { padding:var(--space-5); border:1px solid var(--border); border-radius:var(--radius-lg); background:var(--surface); min-width:0; }
+.account-form { display:grid; gap:16px; max-width:560px; }
+.account-form label { display:grid; gap:8px; font-weight:500; }
+.account-form input,.account-form select,.account-form textarea { width:100%; min-width:0; }
+.account-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.account-muted { color:var(--muted); }
+.account-error { color:var(--danger); padding:12px; border:1px solid var(--danger); border-radius:var(--radius-md); overflow-wrap:anywhere; }
+.account-notice { padding:16px; background:var(--accent-soft); border-radius:var(--radius-md); }
+.account-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:16px; }
+.account-data { width:100%; border-collapse:collapse; table-layout:fixed; }
+.account-data th,.account-data td { padding:12px 8px; border-bottom:1px solid var(--border); text-align:left; overflow-wrap:anywhere; }
+.account-data th { color:var(--muted); font-weight:500; }
+.account-code { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-subtle); padding:16px; border-radius:var(--radius-md); }
+.account-tags { display:flex; flex-wrap:wrap; gap:8px; }
+.account-tags span { padding:8px 12px; border-radius:var(--radius-md); background:var(--surface-subtle); }
+@media(max-width:600px) { .account-panel { padding:16px; } .account-data th,.account-data td { padding:8px 4px; } }
+
+.account-form input[type=checkbox] { width:auto; }
+
+.account-page > header p { margin: 4px 0 0; }
+.account-panel > p { margin: 8px 0 16px; }
+.account-form > button { justify-self: start; }
+.account-form > .account-actions { justify-content: flex-start; }
+.account-panel dl { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px 16px; margin: 0 0 20px; }
+.account-panel dt { color: var(--muted); }
+.account-panel dd { margin: 0; overflow-wrap: anywhere; }
+.account-data th:first-child { width: 12%; }
+.account-data td p { margin: 4px 0 0; color: var(--muted); font-size: var(--text-sm); }
+.account-data td { padding-block: 10px; }
+.account-code { max-height: 420px; overflow: auto; }
+.account-actions label { display: flex; align-items: center; gap: 8px; }
+.account-grid { align-items: start; }

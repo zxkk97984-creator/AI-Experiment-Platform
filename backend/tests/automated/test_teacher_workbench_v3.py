@@ -362,8 +362,9 @@ def test_course_student_csv_import(client, db_session_factory):
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["created"] + body["updated"] == 1
-    assert body["skipped"] == 1
+    # Existing enrolled students are unchanged, not reported as updates.
+    assert body["created"] + body["updated"] == 0
+    assert body["skipped"] == 2
     assert body["errors"][0]["row"] == 2
 
     roster = client.get(

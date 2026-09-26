@@ -204,6 +204,10 @@ class Settings(BaseSettings):
         return Path(self.cover_storage_dir).resolve()
 
     # ── 登录限流 ──
+    account_security_keys: str = ""  # Comma-separated Fernet keys, newest first; separate from JWT.
+    account_worker_hash_concurrency: int = Field(default=2, ge=1, le=8)
+    account_batch_retention_days: int = Field(default=90, ge=1)
+    account_audit_retention_days: int = Field(default=365, ge=90)
     login_rate_limit_window_seconds: int = Field(default=900, ge=60)
     login_rate_limit_user_max_failures: int = Field(default=10, ge=1)
     login_rate_limit_ip_max_attempts: int = Field(default=30, ge=1)

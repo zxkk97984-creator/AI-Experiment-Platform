@@ -81,6 +81,8 @@ def authenticate_user(db: Session, username: str, password: str) -> User:
 
 
 def issue_token_pair(user: User, redis_client, settings: Settings) -> TokenResponse:
+    from app.services.account_service import ensure_password_session
+    ensure_password_session(user)
     if not is_supported_role(user.role):
         raise api_error(403, "ROLE_NOT_SUPPORTED", "账号角色不受支持，请联系管理员")
     access_token = create_token(

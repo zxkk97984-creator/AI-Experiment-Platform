@@ -420,15 +420,8 @@ def import_audience_students(
             result["skipped"] += 1
             result["errors"].append({"row": index, "student_no": student_no, "username": username, "status": "skipped", "message": "缺少学号或账号列"})
             continue
-        student = db.scalar(
-            select(User).where(
-                User.role == "student", User.status == "active",
-                or_(
-                    User.student_no == student_no if student_no else User.id == -1,
-                    User.username == username if username else User.id == -1,
-                ),
-            )
-        )
+        from app.services.roster_service import resolve_student_identity
+        student = resolve_student_identity(db, student_no, username, real_name)
         if student is None:
             result["skipped"] += 1
             result["errors"].append({"row": index, "student_no": student_no, "username": username, "status": "skipped", "message": f"学生不存在或不可用（{real_name or student_no or username}）"})

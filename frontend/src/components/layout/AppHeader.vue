@@ -41,11 +41,13 @@ const wrapEl = ref(null)
 const triggerEl = ref(null)
 const menuEl = ref(null)
 
-const displayName = computed(() => auth.user?.real_name || auth.user?.username || '同学')
+const displayName = computed(() => auth.user?.nickname || auth.user?.real_name || auth.user?.username || '同学')
 const avatarText = computed(() => displayName.value.trim().slice(0, 1))
 const roleBadge = computed(() => statusBadge(ROLE_MAP, auth.role))
 
 const PAGE_TITLES = {
+  AdminAccounts: '名单与批次', AdminBatch: '批次详情', AdminAccountSecurity: '账号安全与审计',
+  StudentHistory: '学习记录', StudentHistoryDetail: '历史提交', Profile: '个人中心',
   StudentHome: '工作台',
   StudentCourses: '课程',
   StudentCourseDetail: '课程详情',
@@ -320,6 +322,7 @@ onBeforeUnmount(() => {
             <span class="user-menu-role">{{ roleBadge.label }}</span>
           </div>
           <div class="user-menu-sep"></div>
+          <button type="button" class="user-menu-item" role="menuitem" @click="open = false; router.push('/account/profile')">个人中心</button>
           <button type="button" class="user-menu-item" role="menuitem" @click="handleLogout">
             <AppIcon name="logout" :size="16" />
             <span>退出登录</span>
