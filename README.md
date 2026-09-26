@@ -160,6 +160,8 @@ npm run build
 上述流程用于验证代码、数据库结构和 Demo 主链路，不是生产发布证据。需要真实 Docker
 判题时，再按下文构建 Judge/Kernel 和 basic 环境镜像。
 
+账号、Excel 导入、批量重置、独立账号 Worker 和迁移说明见 [账号与名单管理](docs/account-management.md)。
+
 ## 本地开发
 
 ### 1. 安装后端依赖与开发配置
@@ -232,6 +234,18 @@ docker build -t dai-kernel-python:latest backend/docker/kernel
 ```
 
 ### 3. 推荐：一键启动完整开发栈
+
+在项目根目录可直接使用统一入口：
+
+```bash
+./start.sh                 # 启动并打开浏览器
+./start.sh --no-browser    # 启动但不打开浏览器
+./start.sh status          # 查看状态
+./start.sh logs api        # 查看 API 日志
+./start.sh stop            # 停止项目
+```
+
+`start.sh` 会复用下方的 `scripts/dev-up.sh` / `scripts/dev-down.sh`，两种入口行为一致。
 
 > **平台兼容性说明**：该脚本仅支持 Linux。它依赖 Linux 特有的 `setsid` 命令创建独立进程组，并用 `/proc/<pid>/cwd` 校验进程归属；macOS 没有内置 `setsid`，也没有 `/proc` 文件系统，Windows 原生 shell 两者皆无，因此这两个平台无法直接运行此脚本。macOS 用户请使用第 4 节的手动模式（命令完全一致）；Windows 用户建议在 WSL2 内按本节执行（Docker Desktop 启用 WSL2 后端后，WSL2 内可直接使用 `docker compose` 和 `npm`）。
 
