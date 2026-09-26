@@ -519,11 +519,11 @@ const privateImportError = ref('')
       <!-- 分页条 -->
       <div v-if="rows.length > 0" class="qe-cases__pager">
         <span class="qe-cases__pager-info">每页</span>
-        <select v-model.number="pageSize" class="qe-cases__pager-size">
+        <DsSelect v-model.number="pageSize" class="qe-cases__pager-size">
           <option :value="10">10</option>
           <option :value="20">20</option>
           <option :value="50">50</option>
-        </select>
+        </DsSelect>
         <span class="qe-cases__pager-info">条</span>
         <button type="button" class="qe-cases__pager-btn" :disabled="page <= 1" @click="page--">‹</button>
         <span class="qe-cases__pager-info">{{ page }} / {{ pageCount }}</span>
@@ -636,11 +636,11 @@ const privateImportError = ref('')
 
         <div v-if="privateRows.length > 0" class="qe-cases__pager">
           <span class="qe-cases__pager-info">每页</span>
-          <select v-model.number="pageSize" class="qe-cases__pager-size">
+          <DsSelect v-model.number="pageSize" class="qe-cases__pager-size">
             <option :value="10">10</option>
             <option :value="20">20</option>
             <option :value="50">50</option>
-          </select>
+          </DsSelect>
           <span class="qe-cases__pager-info">条</span>
           <button type="button" class="qe-cases__pager-btn" :disabled="privatePage <= 1" @click="privatePage--">‹</button>
           <span class="qe-cases__pager-info">{{ privatePage }} / {{ privatePageCount }}</span>

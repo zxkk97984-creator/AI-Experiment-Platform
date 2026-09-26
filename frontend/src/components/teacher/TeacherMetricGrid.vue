@@ -33,8 +33,8 @@ defineProps({
 
 <style scoped>
 /* 指标条视觉来自全局 .metric-strip/.metric；图标仅作弱化辅助标记。 */
-.teacher-metric-grid.columns-3 { grid-template-columns: repeat(3, 1fr); }
-.teacher-metric-card { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.teacher-metric-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.teacher-metric-card { display: flex; align-items: center; justify-content: space-between; flex-direction: row; gap: var(--space-3); }
 .teacher-metric-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .teacher-metric-icon {
   display: inline-flex;

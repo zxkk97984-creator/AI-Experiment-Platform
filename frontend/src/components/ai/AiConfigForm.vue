@@ -3,11 +3,11 @@
     <!-- 评分模式 -->
     <div class="form-group">
       <label>评分模式</label>
-      <select v-model="config.grading_mode" @change="emitUpdate">
+      <DsSelect v-model="config.grading_mode" @change="emitUpdate">
         <option value="legacy">legacy — 传统判题（仅通过/不通过）</option>
         <option value="shadow">shadow — AI 评分仅教师可见，正式分用旧规则</option>
         <option value="active">active — AI 评分计入正式成绩</option>
-      </select>
+      </DsSelect>
     </div>
 
     <!-- 测试组（F/R） -->
@@ -31,10 +31,10 @@
         <div class="group-row">
           <input v-model="g.id" placeholder="ID (如 F1)" class="input-sm" @change="emitUpdate" />
           <input v-model="g.name" placeholder="名称" class="input-sm" @change="emitUpdate" />
-          <select v-model="g.dimension" class="input-sm" @change="emitUpdate">
+          <DsSelect v-model="g.dimension" class="input-sm" @change="emitUpdate">
             <option value="F">F 功能 (满分合计 60)</option>
             <option value="R">R 鲁棒性 (满分合计 10)</option>
-          </select>
+          </DsSelect>
           <input v-model.number="g.max_score" type="number" placeholder="满分" class="input-sm input-num" @change="emitUpdate" />
           <button class="btn-sm btn-danger-text" @click="removeGroup(i)">删除</button>
         </div>
@@ -79,13 +79,13 @@
       <div v-if="!config.score_cap_rules?.length" class="hint">无上限规则。</div>
       <div v-for="(r, i) in config.score_cap_rules" :key="i" class="cap-row">
         <input v-model="r.id" placeholder="ID" class="input-sm" @change="emitUpdate" />
-        <select v-model="r.condition_code" class="input-sm" @change="emitUpdate">
+        <DsSelect v-model="r.condition_code" class="input-sm" @change="emitUpdate">
           <option value="off_topic">偏题</option>
           <option value="hardcoded_public_examples">硬编码样例</option>
           <option value="required_algorithm_missing">缺失要求算法</option>
           <option value="required_complexity_missing">复杂度不达标</option>
           <option value="dangerous_operation">危险操作</option>
-        </select>
+        </DsSelect>
         <input v-model="r.description" placeholder="描述（必填）" class="input-sm" @change="emitUpdate" style="width:120px" />
         <input v-model.number="r.cap" type="number" placeholder="上限分" class="input-sm input-num" @change="emitUpdate" />
         <button class="btn-sm btn-danger-text" @click="removeCapRule(i)">删除</button>
@@ -186,7 +186,7 @@ const validationMsg = computed(() => {
 <style scoped>
 .form-group { margin: 12px 0; }
 .form-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: var(--muted); }
-.form-group select { width: 100%; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
+.form-group .ds-select { width: 100%; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
 .section { margin: 16px 0; }
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .section-header h5 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); }

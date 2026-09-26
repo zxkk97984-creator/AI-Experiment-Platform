@@ -34,10 +34,7 @@ const state = computed(() => reviewState(detail.value))
 const blocks = computed(() => feedbackBlocks(detail.value?.ai_result?.student_feedback))
 const summary = computed(() => testSummary(detail.value?.deterministic_details?.groups))
 
-const pageTitle = computed(() => {
-  const t = detail.value?.question_title
-  return t ? `${t} · 评分详情` : `提交 #${gradeId} · 评分详情`
-})
+const pageTitle = computed(() => `提交 #${gradeId} · 评分详情`)
 
 const testScore = computed(() => {
   const groups = detail.value?.deterministic_details?.groups || []
@@ -157,7 +154,7 @@ onMounted(fetchDetail)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="grading-workspace">
       <div v-if="loading" class="empty"><div class="empty-mark"><span class="skeleton" style="width: 20px; height: 20px;"></span></div><h3>正在加载评分详情</h3></div>
 
@@ -183,6 +180,8 @@ onMounted(fetchDetail)
             <button v-if="detail.raw_response" type="button" class="btn btn-secondary btn-sm" @click="copyRaw">复制原始 JSON</button>
           </div>
         </section>
+
+        <details v-if="detail.question_title" class="question-context"><summary>查看完整题目</summary><p>{{ detail.question_title }}</p></details>
 
         <section class="row-wrap evidence-legend" aria-label="评分证据图例">
           <span class="evidence-tag deterministic">▣ 确定性证据 · 测试结果</span>
@@ -448,4 +447,8 @@ onMounted(fetchDetail)
 @media (max-width: 820px) {
   .advanced-info__grid { grid-template-columns: 1fr; }
 }
+
+.question-context { margin-block: 8px 16px; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.question-context summary { cursor: pointer; color: var(--muted); }
+.question-context p { margin: 12px 0 0; max-width: 85ch; line-height: 1.7; }
 </style>

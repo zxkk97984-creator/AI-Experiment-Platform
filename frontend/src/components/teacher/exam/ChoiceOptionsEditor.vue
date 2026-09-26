@@ -143,10 +143,10 @@ defineExpose({ validate })
 
     <div v-if="questionType === 'multi_choice'" class="scoring-box">
       <label>多选题计分方式</label>
-      <select v-model="scoringMode">
+      <DsSelect v-model="scoringMode">
         <option value="all_or_nothing">完全匹配才得分</option>
         <option value="partial_no_wrong">无错选时按正确项比例得分</option>
-      </select>
+      </DsSelect>
       <p v-if="scoringMode === 'partial_no_wrong'">学生只要选择任一错误项，本题计 0 分；没有错选时按选对比例计分。</p>
     </div>
 
@@ -187,7 +187,7 @@ defineExpose({ validate })
 .remove-option:disabled { color:var(--faint); cursor:not-allowed; }
 .scoring-box { margin-top:14px; padding:14px; border-radius: var(--radius-md); background:var(--surface-sunken); }
 .scoring-box label { display:block; font-size:13px; font-weight:600; margin-bottom:6px; }
-.scoring-box select { width:100%; margin-bottom:6px; }
+.scoring-box .ds-select { width:100%; margin-bottom:6px; }
 .json-import { margin-top:22px; padding-top:16px; border-top:1px dashed var(--border); }
 .json-toggle { border:0; background:none; color:var(--accent); padding:0; cursor:pointer; font-weight:600; }
 .json-panel { margin-top:10px; padding:14px; border:1px solid var(--border); border-radius: var(--radius-md); background:var(--surface-sunken); }

@@ -644,4 +644,8 @@ async function handlePublish() {
 }
 .error-card h2 { margin: 0 0 8px; font-size: 18px; color: var(--fg); }
 .error-card p { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+
+.editor-header { position: sticky; top: var(--header-height); z-index: 15; background: var(--bg); }
+.editor-page { max-width: 1100px; margin-inline: auto; }
+video { max-height: calc(100dvh - 320px); width: 100%; }
 </style>

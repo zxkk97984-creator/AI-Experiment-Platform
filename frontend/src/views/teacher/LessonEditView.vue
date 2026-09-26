@@ -162,7 +162,7 @@ onMounted(loadLesson)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="lesson-edit-page">
       <!-- 加载骨架屏（复用全局 .skeleton） -->
       <div v-if="loading" class="loading-card">
@@ -202,10 +202,10 @@ onMounted(loadLesson)
           <p v-if="!fallbackEnvOptions.length" class="fallback-hint env-warn">暂无可用环境，请联系管理员</p>
           <div class="fallback-field">
             <label class="fallback-field-label" for="fallback-import-policy">导入规则</label>
-            <select id="fallback-import-policy" v-model="fallbackPolicy" class="fallback-select">
+            <DsSelect id="fallback-import-policy" v-model="fallbackPolicy" class="fallback-select">
               <option value="unrestricted">不限制</option>
               <option value="restricted">限定白名单</option>
-            </select>
+            </DsSelect>
           </div>
           <div v-if="fallbackPolicy === 'restricted'" class="fallback-chips">
             <label v-for="name in fallbackImportCandidates" :key="name" class="fallback-chip">

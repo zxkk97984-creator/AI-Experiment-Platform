@@ -7,7 +7,7 @@ const templateId = route.params.lid
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <StudioEditor :template-id="templateId" />
   </AppLayout>
 </template>

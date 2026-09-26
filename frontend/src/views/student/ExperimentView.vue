@@ -94,7 +94,7 @@ onBeforeUnmount(() => { clearTimeout(searchTimer); requestGuard.invalidate() })
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="experiment-page">
       <header class="page-head">
         <div>

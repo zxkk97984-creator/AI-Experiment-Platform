@@ -163,7 +163,7 @@ onUnmounted(() => {
   gap: 32px;
   max-width: 1180px;
   margin: 0 auto;
-  padding: 12px 56px;
+  padding: 12px 24px;
 }
 
 .w-nav-brand {
@@ -236,7 +236,7 @@ onUnmounted(() => {
 
 .w-footer {
   border-top: 1px solid var(--border);
-  padding: 24px 56px 32px;
+  padding: 24px 24px 32px;
 }
 
 .w-footer-inner {

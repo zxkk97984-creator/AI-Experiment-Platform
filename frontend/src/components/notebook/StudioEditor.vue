@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import CodeCell from './CodeCell.vue'
@@ -530,10 +531,10 @@ function handleMarkdownEdit(cellId) {
         </div>
         <div>
           <label class="env-panel-label">导入规则</label>
-          <select v-model="envDraftPolicy" class="env-panel-select">
+          <DsSelect v-model="envDraftPolicy" class="env-panel-select">
             <option value="unrestricted">不限制（学生可导入任何库）</option>
             <option value="restricted">限定白名单（教学规则）</option>
-          </select>
+          </DsSelect>
         </div>
       </div>
       <div v-if="envDraftPolicy === 'restricted'" class="env-panel-chips">
@@ -615,8 +616,8 @@ function handleMarkdownEdit(cellId) {
       </div>
     </div>
     <div v-if="showHistory" class="modal-overlay" @click.self="showHistory = false">
-      <div class="modal-content history-modal">
-        <div class="modal-header"><h3>版本历史</h3><button class="modal-close" @click="showHistory = false">✕</button></div>
+      <div v-dialog-focus class="modal-content history-modal" role="dialog" aria-modal="true" aria-label="版本历史" @keydown.esc="showHistory = false">
+        <div class="modal-header"><h3>版本历史</h3><button class="modal-close" aria-label="关闭版本历史" @click="showHistory = false">✕</button></div>
         <div class="modal-body">
           <p v-if="history.length === 0" class="text-secondary">暂无已发布版本</p>
           <div v-for="v in history" :key="v.id" class="history-item">
@@ -658,7 +659,7 @@ function handleMarkdownEdit(cellId) {
 .studio-loading { padding: var(--space-6); }
 .skeleton-bar { height: 16px; margin-bottom: var(--space-3); background: var(--border); border-radius: var(--radius-sm); animation: pulse 1.2s infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.8; } }
-.studio-editor { max-width: 960px; margin: 0 auto; }
+.studio-editor { max-width: 1280px; margin: 0 auto; }
 .studio-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3) 0; margin-bottom: var(--space-3); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .toolbar-left { display: flex; align-items: center; gap: var(--space-2); }
 .studio-name { font-size: var(--text-lg); font-weight: 600; margin: 0; }
@@ -760,4 +761,14 @@ body.dragging-cells { user-select: none; -webkit-user-select: none; cursor: grab
 @media (max-width: 768px) { .env-panel-grid { grid-template-columns: 1fr; } }
 .version-sha { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .version-date { color: var(--muted); flex: 1; }
+
+.studio-toolbar { position: sticky; top: var(--header-height); z-index: 15; background: var(--bg); padding-block: 12px; }
+.toolbar-left { min-width: 0; flex: 1 1 280px; }
+.studio-name { overflow-wrap: anywhere; }
+.toolbar-right { border-left: 1px solid var(--border); padding-left: 12px; }
+.cell-actions { flex-wrap: wrap; justify-content: flex-end; }
+.cell-toolbar { gap: 8px; }
+.modal-content { display: flex; flex-direction: column; overflow: hidden; }
+.modal-body { overflow: auto; }
+.modal-header { flex: none; }
 </style>

@@ -25,8 +25,8 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
-    <main class="env-page">
+  <AppLayout content-mode="list">
+    <section class="env-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">系统 / 环境</p>
@@ -63,7 +63,7 @@ onMounted(load)
           </div>
         </article>
       </div>
-    </main>
+    </section>
   </AppLayout>
 </template>
 

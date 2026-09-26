@@ -246,7 +246,7 @@ onMounted(fetchAll)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <!-- Loading -->
     <div v-if="loading" class="detail-loading">
       <div class="skeleton" style="height:166px;width:100%;margin-bottom:16px"></div>

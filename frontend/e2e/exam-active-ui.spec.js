@@ -1,5 +1,11 @@
 import { expect, test } from '@playwright/test'
 
+test.beforeEach(async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 })
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({ status: 200, contentType: 'text/css', body: '' }))
+  await page.route('https://fonts.gstatic.com/**', route => route.fulfill({ status: 200, contentType: 'text/css', body: '' }))
+})
+
 const serverNow = '2026-08-14T10:00:00Z'
 const questions = [
   { id: 1, question_type: 'single_choice', prompt: '第一题', options: { A: 'A', B: 'B' }, points: 5 },
@@ -10,7 +16,7 @@ const questions = [
   { id: 6, question_type: 'fill_blank', prompt: '结果是 [[blank:value]]', points: 5 },
 ]
 
-test('进行中考试倒计时、题号布局、编程题自测和未完成确认保持一致', async ({ page }) => {
+test('进行中考试倒计时、题号布局、编程题自测和未完成确认保持一致', async ({ page }, testInfo) => {
   await page.route('**/api/v1/auth/refresh', route => route.fulfill({
     json: { access_token: 'browser-test-token', user: { id: 9, username: 'student', real_name: '验收学生', role: 'student' } },
   }))
@@ -69,9 +75,12 @@ test('进行中考试倒计时、题号布局、编程题自测和未完成确�
   await expect(page.getByText('当前尚有未完成的题目，确定交卷吗')).toBeVisible()
   await expect(page.getByRole('button', { name: '确定' })).toBeVisible()
   await expect(page.getByRole('button', { name: '取消' })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('submit-confirm.png'), fullPage: true })
+  await page.getByRole('button', { name: '取消' }).click()
+  await page.screenshot({ path: testInfo.outputPath('active-exam.png'), fullPage: true })
 })
 
-test('考试讲评按题型展示选项和可运行的编程题参考代码', async ({ page }) => {
+test('考试讲评按题型展示选项和可运行的编程题参考代码', async ({ page }, testInfo) => {
   const consoleErrors = []
   page.on('console', message => {
     if (message.type() === 'error') consoleErrors.push(message.text())
@@ -114,4 +123,5 @@ test('考试讲评按题型展示选项和可运行的编程题参考代码', as
   expect(standardAnswers).not.toContain('"correct"')
   expect(standardAnswers).not.toContain('"blanks"')
   expect(consoleErrors).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('exam-review.png'), fullPage: true })
 })

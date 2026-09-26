@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { marked } from 'marked'
@@ -695,7 +696,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="catalog-page">
       <!-- 顶部课程概览 -->
       <section class="course-overview">
@@ -913,11 +914,11 @@ onBeforeUnmount(() => {
           </label>
           <label>
             课程状态
-            <select v-model="settings.status">
+            <DsSelect v-model="settings.status">
               <option value="draft">草稿</option>
               <option value="published">已发布</option>
               <option value="archived">已归档</option>
-            </select>
+            </DsSelect>
           </label>
           <div v-if="publishMissingFields.length" class="publish-requirements" role="alert">
             <strong>发布前还需完善</strong>
@@ -926,10 +927,10 @@ onBeforeUnmount(() => {
           <div class="settings-grid">
             <label>
               所属学期
-              <select v-model="settings.academic_term_id" @change="settings.teaching_class_ids = []">
+              <DsSelect v-model="settings.academic_term_id" @change="settings.teaching_class_ids = []">
                 <option :value="null">未设置学期</option>
                 <option v-for="term in academicTerms" :key="term.id" :value="term.id" :disabled="term.status === 'closed'">{{ term.name }}</option>
-              </select>
+              </DsSelect>
             </label>
             <label>
               开课时间
@@ -959,11 +960,11 @@ onBeforeUnmount(() => {
           <div class="settings-grid">
             <label>
               课程可见范围
-              <select v-model="settings.visibility" data-testid="visibility-select">
+              <DsSelect v-model="settings.visibility" data-testid="visibility-select">
                 <option value="private">仅自己可见</option>
                 <option value="class">教学班可见</option>
                 <option value="whitelist">指定学生可见</option>
-              </select>
+              </DsSelect>
             </label>
             <label>
               默认评分设置
@@ -1001,7 +1002,7 @@ onBeforeUnmount(() => {
 
     <!-- 添加课时两步弹窗 -->
     <div v-if="createWizard" class="modal-backdrop create-backdrop" @click.self="createWizard = null">
-      <div class="create-panel" role="dialog" aria-modal="true" aria-label="添加课时">
+      <div class="create-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="添加课时">
         <header class="create-heading">
           <strong>添加课时</strong>
           <button class="create-close" type="button" aria-label="关闭" @click="createWizard = null">
@@ -1048,10 +1049,10 @@ onBeforeUnmount(() => {
             <p v-if="!notebookEnvOptions.length" class="create-hint env-warn">暂无可用环境，请联系管理员</p>
             <label class="create-field">
               <span>导入规则</span>
-              <select v-model="notebookPolicy" class="import-policy-select">
+              <DsSelect v-model="notebookPolicy" class="import-policy-select">
                 <option value="unrestricted">不限制</option>
                 <option value="restricted">限定白名单</option>
-              </select>
+              </DsSelect>
             </label>
             <div v-if="notebookPolicy === 'restricted'" class="import-candidates">
               <label v-for="name in notebookImportCandidates" :key="name" class="import-chip">
@@ -1074,7 +1075,7 @@ onBeforeUnmount(() => {
 
     <!-- 添加章节弹窗 -->
     <div v-if="chapterDialog" class="modal-backdrop create-backdrop" @click.self="chapterDialog = false">
-      <form class="create-panel" role="dialog" aria-modal="true" aria-label="添加章节" @submit.prevent="createChapter">
+      <form class="create-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="添加章节" @submit.prevent="createChapter">
         <header class="create-heading">
           <strong>添加章节</strong>
           <button class="create-close" type="button" aria-label="关闭" @click="chapterDialog = false">
@@ -1096,7 +1097,7 @@ onBeforeUnmount(() => {
 
     <!-- 学生视角预览 -->
     <div v-if="previewLesson" class="modal-backdrop preview-backdrop" @click.self="previewLesson = null">
-      <div class="preview-panel" role="dialog" aria-modal="true" aria-label="课时预览">
+      <div class="preview-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="课时预览">
         <header class="preview-header">
           <div>
             <p class="panel-eyebrow">学生视角预览</p>
@@ -1149,7 +1150,7 @@ onBeforeUnmount(() => {
 
     <!-- 删除确认弹窗 -->
     <div v-if="deleteTarget" class="modal-backdrop confirm-backdrop" @click.self="deleteTarget = null">
-      <div class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
+      <div class="confirm-panel" v-dialog-focus role="dialog" aria-modal="true" aria-labelledby="delete-confirm-title">
         <h2 id="delete-confirm-title">确认删除{{ deleteTarget.kind === 'chapter' ? '章节' : '课时' }}？</h2>
         <p>
           {{ deleteTarget.kind === 'chapter' ? '章节' : '课时' }}“{{ deleteTarget.title }}”删除后将无法恢复。
@@ -1194,15 +1195,15 @@ onBeforeUnmount(() => {
 
     <!-- 移动到其他章节弹窗 -->
     <div v-if="movingLesson" class="modal-backdrop confirm-backdrop" @click.self="movingLesson = null">
-      <form class="confirm-panel" role="dialog" aria-modal="true" aria-label="移动到其他章节" @submit.prevent="confirmMoveLesson">
+      <form class="confirm-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="移动到其他章节" @submit.prevent="confirmMoveLesson">
         <h2>移动课时</h2>
         <p>课时“{{ movingLesson.title }}”将移动到：</p>
         <label class="move-select">
-          <select v-model="moveTargetChapterId">
+          <DsSelect v-model="moveTargetChapterId">
             <option v-for="chapter in chapters" :key="chapter.id" :value="chapter.id">
               {{ chapter.title }}
             </option>
-          </select>
+          </DsSelect>
         </label>
         <div class="confirm-actions">
           <button class="button button-secondary" type="button" @click="movingLesson = null">取消</button>
@@ -1411,7 +1412,7 @@ onBeforeUnmount(() => {
 
 /* 移动课时弹窗 */
 .move-select { display: block; margin: 0 0 20px; }
-.move-select select { width: 100%; border-radius: var(--radius-md); }
+.move-select .ds-select { width: 100%; border-radius: var(--radius-md); }
 
 /* ── 课时列表 ─────────────────────────────────────────────────────── */
 .chapter-body { padding: 0 18px; }
@@ -1673,7 +1674,7 @@ onBeforeUnmount(() => {
 }
 .course-settings-content input,
 .course-settings-content textarea,
-.course-settings-content select {
+.course-settings-content .ds-select {
   width: 100%;
   border-radius: var(--radius-md);
 }

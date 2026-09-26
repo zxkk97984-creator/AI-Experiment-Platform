@@ -109,7 +109,8 @@ function goLesson(id, lesson) { router.push(`/student/courses/${id}/lessons/${le
 
 function metaText(row) {
   const term = row.course.academic_term?.name || '未设置学期'
-  const classes = row.course.teaching_classes?.map((item) => item.name).join('、') || '未设置教学班'
+  const list = row.course.teaching_classes || []
+  const classes = list.length ? `${list[0].code || list[0].name}${list.length > 1 ? ` 等 ${list.length} 个班` : ''}` : '未设置教学班'
   return `${term} · ${classes}`
 }
 
@@ -123,7 +124,7 @@ onMounted(fetchCourses)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <!-- 页头 -->
       <section class="page-head">

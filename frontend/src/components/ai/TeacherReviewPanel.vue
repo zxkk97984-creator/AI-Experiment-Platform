@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 // TeacherReviewPanel：教师复核卡。只负责表单、校验、总分预览、确认弹窗与本地草稿；
 // 通过 emit('submit', payload) 提交，API 调用由页面负责。
 // 模式：review_required 默认编辑；completed 默认只读 + "调整评分"入口（保留纠错能力）。
@@ -203,7 +204,7 @@ const historyRows = computed(() => {
 
     <!-- 调整评分弹窗：字段与原先内嵌表单一致，仅从页面内嵌改为弹窗填写 -->
     <div v-if="editing" class="confirm-overlay" @click.self="editing = false">
-      <div class="review-dialog" role="dialog" aria-modal="true" aria-label="教师复核调整">
+      <div class="review-dialog" v-dialog-focus role="dialog" aria-modal="true" aria-label="教师复核调整">
         <h3 class="review-dialog__title">{{ isReview ? '教师复核' : '调整评分' }}</h3>
 
         <div class="review-form">
@@ -268,7 +269,7 @@ const historyRows = computed(() => {
 
     <!-- 确认弹窗 -->
     <div v-if="confirmOpen" class="confirm-overlay confirm-overlay--above" @click.self="confirmOpen = false">
-      <div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="确认覆盖评分">
+      <div class="confirm-dialog" v-dialog-focus role="dialog" aria-modal="true" aria-label="确认覆盖评分">
         <h3 class="confirm-dialog__title">确认{{ confirmTitle }}？</h3>
         <dl class="confirm-dialog__list">
           <div class="confirm-row">

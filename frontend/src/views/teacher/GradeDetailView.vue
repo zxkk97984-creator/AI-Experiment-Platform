@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
@@ -103,8 +104,8 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
-    <main v-if="!loading" class="detail-page">
+  <AppLayout content-mode="workspace">
+    <section v-if="!loading" class="detail-page">
       <button class="back-link" @click="router.push(`/teacher/exams/${route.params.id}/grades`)"><AppIcon name="back" :size="17" />返回成绩总览</button>
       <header class="page-head"><div><h1>学生成绩详情</h1><p>考试名称：{{ payload.exam.title }}</p></div></header>
 
@@ -149,7 +150,7 @@ onMounted(load)
       </section>
 
       <div v-if="scoreDialog" class="modal-backdrop" @click.self="cancelScoreChange">
-        <div class="score-dialog" role="dialog" aria-modal="true" aria-label="确认修改分数">
+        <div class="score-dialog" v-dialog-focus role="dialog" aria-modal="true" aria-label="确认修改分数">
           <h2>确认修改分数</h2>
           <p class="score-dialog__summary">
             第 {{ scoreDialog.number }} 题：将得分从
@@ -169,8 +170,8 @@ onMounted(load)
       </div>
 
       <footer class="action-footer"><button @click="printReport"><AppIcon name="clipboard" :size="18" />打印 / 保存 PDF</button><button class="btn-primary" @click="router.push(`/teacher/exams/${route.params.id}/grades`)">返回成绩总览</button></footer>
-    </main>
-    <main v-else class="detail-loading"><span v-for="i in 6" :key="i" class="skeleton"></span></main>
+    </section>
+    <section v-else class="detail-loading"><span v-for="i in 6" :key="i" class="skeleton"></span></section>
   </AppLayout>
 </template>
 

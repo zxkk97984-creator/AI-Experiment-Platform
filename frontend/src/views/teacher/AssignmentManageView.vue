@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
@@ -314,7 +315,7 @@ onMounted(() => { fetch(); fetchCourses() })
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page teacher-management-page">
       <!-- ── Page Head ─────────────────────────────────────────────────── -->
       <TeacherPageHeader title="作业管理" subtitle="布置作业、编写判题题目与测试用例" action-label="布置作业" @action="openCreateModal" />
@@ -323,10 +324,10 @@ onMounted(() => { fetch(); fetchCourses() })
       <section class="table-wrap data-panel">
         <div class="toolbar filter-bar">
           <label class="searchbox" :class="{ 'has-value': query }" style="width: 260px;"><AppIcon name="search" :size="15" /><input v-model="query" type="search" class="input" placeholder="搜索作业名称" aria-label="搜索作业名称" @input="resetPage" /><button v-if="query" type="button" class="clear" aria-label="清空搜索" @click="query = ''; resetPage()"><AppIcon name="close" :size="13" /></button></label>
-          <select v-model="statusFilter" aria-label="发布状态筛选" @change="resetPage"><option value="all">发布：全部</option><option value="published">已发布</option><option value="draft">草稿</option></select>
-          <select v-model="deadlineFilter" aria-label="时限状态筛选" @change="resetPage"><option value="all">时限：全部</option><option value="open">进行中</option><option value="ended">已截止</option><option value="none">无截止</option></select>
-          <select v-model="courseFilter" aria-label="课程筛选" @change="resetPage"><option value="all">课程：全部课程</option><option v-for="course in courses" :key="course.id" :value="String(course.id)">{{ course.title }}</option></select>
-          <select v-model="sortOrder" aria-label="排序" @change="resetPage"><option value="updated">排序：最近更新</option><option value="title">排序：作业名称</option></select>
+          <DsSelect v-model="statusFilter" aria-label="发布状态筛选" @change="resetPage"><option value="all">发布：全部</option><option value="published">已发布</option><option value="draft">草稿</option></DsSelect>
+          <DsSelect v-model="deadlineFilter" aria-label="时限状态筛选" @change="resetPage"><option value="all">时限：全部</option><option value="open">进行中</option><option value="ended">已截止</option><option value="none">无截止</option></DsSelect>
+          <DsSelect v-model="courseFilter" aria-label="课程筛选" @change="resetPage"><option value="all">课程：全部课程</option><option v-for="course in courses" :key="course.id" :value="String(course.id)">{{ course.title }}</option></DsSelect>
+          <DsSelect v-model="sortOrder" aria-label="排序" @change="resetPage"><option value="updated">排序：最近更新</option><option value="title">排序：作业名称</option></DsSelect>
         </div>
         <div v-if="loading" class="loading-list"><span v-for="i in 6" :key="i" class="skeleton"></span></div>
         <div v-else-if="filteredAssignments.length === 0" class="empty-state"><AppIcon name="assignment" :size="32" /><strong>暂无符合条件的作业</strong><p>调整筛选条件，或布置一份新作业。</p></div>
@@ -365,7 +366,7 @@ onMounted(() => { fetch(); fetchCourses() })
     </div>
 
     <div v-if="scheduleTarget" class="modal-backdrop create-backdrop" @click.self="closeSchedule">
-      <div class="create-panel schedule-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
+      <div class="create-panel schedule-modal" v-dialog-focus role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
         <header class="create-heading">
           <div><strong id="schedule-modal-title">发布与截止</strong><small>{{ scheduleTarget.title }}</small></div>
           <button class="create-close" type="button" aria-label="关闭" @click="closeSchedule">
@@ -392,7 +393,7 @@ onMounted(() => { fetch(); fetchCourses() })
 
     <!-- ── 创建作业弹窗（点「布置作业」打开：基本信息 + 环境配置，确定后创建并跳转题目编辑页） ── -->
     <div v-if="createOpen" class="modal-backdrop create-backdrop" @click.self="closeCreateModal">
-      <div class="create-panel create-modal" role="dialog" aria-modal="true" aria-label="创建作业">
+      <div class="create-panel create-modal" v-dialog-focus role="dialog" aria-modal="true" aria-label="创建作业">
         <header class="create-heading">
           <strong>创建作业</strong>
           <button class="create-close" type="button" aria-label="关闭" @click="closeCreateModal">
@@ -430,10 +431,10 @@ onMounted(() => { fetch(); fetchCourses() })
 
           <div class="form-group">
             <label>导入规则</label>
-            <select v-model="importPolicy" class="import-policy-select">
+            <DsSelect v-model="importPolicy" class="import-policy-select">
               <option value="unrestricted">不限制（学生可导入任何库）</option>
               <option value="restricted">限定白名单（教学规则）</option>
-            </select>
+            </DsSelect>
             <p class="form-hint">导入检查是教学反馈，不是安全边界；安全由运行容器隔离负责</p>
           </div>
 
@@ -459,7 +460,7 @@ onMounted(() => { fetch(); fetchCourses() })
 
     <!-- ── 课程选择弹窗 ──────────────────────────────────────────────── -->
     <div v-if="courseModalOpen" class="modal-backdrop create-backdrop" @click.self="closeCourseModal">
-      <div class="create-panel course-picker-panel" role="dialog" aria-modal="true" aria-label="选择课程">
+      <div class="create-panel course-picker-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="选择课程">
         <header class="create-heading">
           <strong>选择课程</strong>
           <button class="create-close" type="button" aria-label="关闭" @click="closeCourseModal">
@@ -789,15 +790,15 @@ onMounted(() => { fetch(); fetchCourses() })
   .page-head { flex-direction: column; }
   .page-title { font-size: 24px; }
 }
-.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;margin-bottom:22px}.metric-card{display:flex;align-items:center;gap:18px;min-height:106px;padding:20px;border:1px solid var(--border);border-radius: var(--radius-lg);background:var(--surface);box-shadow:none}.metric-icon{display:grid;place-items:center;width:54px;height:54px;border-radius:15px}.metric-icon.blue{color:var(--accent);background:var(--accent-soft)}.metric-icon.green{color:var(--success);background:var(--success-bg)}.metric-icon.orange{color:var(--warning);background:var(--warning-bg)}.metric-icon.purple{color:var(--info);background:var(--info-bg)}.metric-card span:last-child{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}.metric-card small{width:100%;color:var(--muted);font-size:14px}.metric-card strong{color:var(--fg);font-size:27px;line-height:1}.metric-card em{color:var(--muted);font-size:13px;font-style:normal}.data-panel{overflow:hidden;border:1px solid var(--border);border-radius: var(--radius-lg);background:var(--surface);box-shadow:none}.filter-bar{display:grid;grid-template-columns:minmax(220px,1.4fr) repeat(3,minmax(150px,.8fr));gap:14px;padding:18px;border-bottom:1px solid var(--border)}.search-control{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--border);border-radius: var(--radius-md);color:var(--faint)}.search-control input{min-width:0;padding:0;border:0;box-shadow:none!important}.filter-bar select{height:44px;min-width:0}.table-scroll{overflow-x:auto}.table-scroll table{width:100%;min-width:1000px;margin:0}.table-scroll th{height:44px;background:var(--surface-subtle)}.table-scroll td{height:68px;padding:10px 16px}.table-scroll td small{display:block;margin-top:3px;color:var(--faint);font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status-pill{display:inline-flex;padding:4px 11px;border-radius: var(--radius-full);font-size:12px;font-weight:600}.status-pill.published{color:var(--success);background:var(--success-bg)}.status-pill.draft{color:var(--warning);background:var(--warning-bg)}.status-pill.ended{color:var(--info);background:var(--info-bg)}.text-action,.publish-action,.delete-action{padding:5px 7px;border:0;background:transparent;color:var(--accent);font-size:13px;white-space:nowrap}.publish-action{color:var(--warning)}.delete-action{color:var(--danger)}.pagination-bar{display:flex;justify-content:space-between;padding:14px 18px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}.active-page{display:inline-grid;place-items:center;width:30px;height:30px;border-radius: var(--radius-md);color:var(--surface);background:var(--accent)}.loading-list{display:grid;gap:1px;background:var(--border)}.loading-list .skeleton{height:68px}@media(max-width:1100px){.metric-grid{grid-template-columns:repeat(2,1fr)}.filter-bar{grid-template-columns:1fr 1fr}}@media(max-width:700px){.metric-grid{grid-template-columns:1fr 1fr;gap:10px}.filter-bar{grid-template-columns:1fr}.table-scroll table{min-width:900px}}
+.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;margin-bottom:22px}.metric-card{display:flex;align-items:center;gap:18px;min-height:106px;padding:20px;border:1px solid var(--border);border-radius: var(--radius-lg);background:var(--surface);box-shadow:none}.metric-icon{display:grid;place-items:center;width:54px;height:54px;border-radius:15px}.metric-icon.blue{color:var(--accent);background:var(--accent-soft)}.metric-icon.green{color:var(--success);background:var(--success-bg)}.metric-icon.orange{color:var(--warning);background:var(--warning-bg)}.metric-icon.purple{color:var(--info);background:var(--info-bg)}.metric-card span:last-child{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}.metric-card small{width:100%;color:var(--muted);font-size:14px}.metric-card strong{color:var(--fg);font-size:27px;line-height:1}.metric-card em{color:var(--muted);font-size:13px;font-style:normal}.data-panel{overflow:hidden;border:1px solid var(--border);border-radius: var(--radius-lg);background:var(--surface);box-shadow:none}.filter-bar{display:grid;grid-template-columns:minmax(220px,1.4fr) repeat(3,minmax(150px,.8fr));gap:14px;padding:18px;border-bottom:1px solid var(--border)}.search-control{display:flex;align-items:center;gap:9px;padding:0 13px;border:1px solid var(--border);border-radius: var(--radius-md);color:var(--faint)}.search-control input{min-width:0;padding:0;border:0;box-shadow:none!important}.filter-bar .ds-select{height:44px;min-width:0}.table-scroll{overflow-x:auto}.table-scroll table{width:100%;min-width:1000px;margin:0}.table-scroll th{height:44px;background:var(--surface-subtle)}.table-scroll td{height:68px;padding:10px 16px}.table-scroll td small{display:block;margin-top:3px;color:var(--faint);font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status-pill{display:inline-flex;padding:4px 11px;border-radius: var(--radius-full);font-size:12px;font-weight:600}.status-pill.published{color:var(--success);background:var(--success-bg)}.status-pill.draft{color:var(--warning);background:var(--warning-bg)}.status-pill.ended{color:var(--info);background:var(--info-bg)}.text-action,.publish-action,.delete-action{padding:5px 7px;border:0;background:transparent;color:var(--accent);font-size:13px;white-space:nowrap}.publish-action{color:var(--warning)}.delete-action{color:var(--danger)}.pagination-bar{display:flex;justify-content:space-between;padding:14px 18px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}.active-page{display:inline-grid;place-items:center;width:30px;height:30px;border-radius: var(--radius-md);color:var(--surface);background:var(--accent)}.loading-list{display:grid;gap:1px;background:var(--border)}.loading-list .skeleton{height:68px}@media(max-width:1100px){.metric-grid{grid-template-columns:repeat(2,1fr)}.filter-bar{grid-template-columns:1fr 1fr}}@media(max-width:700px){.metric-grid{grid-template-columns:1fr 1fr;gap:10px}.filter-bar{grid-template-columns:1fr}.table-scroll table{min-width:900px}}
 /* 侧栏展开时以内容容器宽度为准，避免作业列表被固定最小宽度推出可视区。
    teacher-management 桥接样式会把 .filter-bar 置为 flex，这里恢复 grid，
    否则筛选 select 会以默认/100% 宽度在 flex 行中挤压或换行。 */
 body .teacher-management-page .filter-bar{display:grid}
 .data-panel{min-width:0}
 .filter-bar{min-width:0}
-.filter-bar select,.search-control{min-width:0}
-.filter-bar select{width:100%}
+.filter-bar .ds-select,.search-control{min-width:0}
+.filter-bar .ds-select{width:100%}
 .search-control input{flex:1 1 0;width:100%;min-width:0}
 .table-scroll{min-width:0;overflow-x:hidden}
 .table-scroll table{width:100%;min-width:0!important;table-layout:fixed}

@@ -323,4 +323,9 @@ function handleUpdateSource(cellId, source) {
   .notebook-player { max-width: 100%; padding: 0 var(--space-2); }
   .player-title { font-size: var(--text-base); }
 }
+
+.notebook-player { max-width: 1180px; }
+.player-topbar { position: sticky; top: var(--header-height); z-index: 15; padding: 12px 0; background: var(--bg); }
+.player-title { font-size: 24px; white-space: normal; overflow-wrap: anywhere; }
+.player-description { max-width: 80ch; line-height: 1.7; }
 </style>

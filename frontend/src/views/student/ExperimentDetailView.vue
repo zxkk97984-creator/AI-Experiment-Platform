@@ -9,7 +9,7 @@ const moduleId = computed(() => route.params.id)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <NotebookPlayer mode="module" :entry-id="moduleId" />
   </AppLayout>
 </template>

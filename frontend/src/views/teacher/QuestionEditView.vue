@@ -546,7 +546,7 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="qe-page">
       <!-- ── 顶部：面包屑 + 标题 + 保存状态 ─────────────────────── -->
       <header class="qe-topbar">
@@ -673,10 +673,10 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
               </div>
               <div class="form-group qe-side-assignment-policy">
                 <label>作业导入规则</label>
-                <select v-model="assignmentPolicy" class="import-policy-select" :disabled="!assignmentDraft">
+                <DsSelect v-model="assignmentPolicy" class="import-policy-select" :disabled="!assignmentDraft">
                   <option value="unrestricted">不限制</option>
                   <option value="restricted">限定白名单</option>
-                </select>
+                </DsSelect>
               </div>
               <div v-if="assignmentPolicy === 'restricted'" class="form-group qe-side-imports">
                 <label>作业允许导入（白名单）</label>
@@ -1434,7 +1434,7 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
 
 .qe-page button:focus-visible,
 .qe-page input:focus-visible,
-.qe-page select:focus-visible,
+.qe-page .ds-select-trigger:focus-visible,
 .qe-page textarea:focus-visible {
   outline: 2px solid oklch(0.52 0.095 158 / 0.45);
   outline-offset: 2px;
@@ -1933,5 +1933,15 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
   .qe-schedule-copy { grid-column: auto; }
   .qe-schedule-meta { grid-template-columns: 1fr; }
   .qe-schedule-save { width: 100%; }
+}
+
+@media (min-width: 1100px) {
+  .qe-page { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+  .qe-topbar, .qe-schedule-card { grid-column: 1 / -1; }
+  .qe-list-card, .qe-body { grid-column: 1; min-width: 0; }
+  .qe-side { grid-column: 2; grid-row: 3 / span 2; margin: 0; position: sticky; top: 72px; max-height: calc(100dvh - 340px); overflow: auto; overscroll-behavior: contain; }
+  .qe-side-body { display: flex; flex-direction: column; }
+  .qe-side-sec { width: 100%; min-width: 0; }
+  .qe-side-sec + .qe-side-sec { border-left: 0; border-top: 1px solid var(--border); }
 }
 </style>

@@ -100,8 +100,9 @@ function jumpToPage() {
 <style scoped>
 /* 分页视觉来自全局 .pagination / .pg-btn；仅保留组件扩展（跳页输入）。 */
 .teacher-pagination.pagination-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
   align-items: center;
   gap: 16px;
   min-height: 58px;
@@ -124,7 +125,7 @@ function jumpToPage() {
 .teacher-pagination-controls button:hover:not(:disabled) { background: var(--surface-sunken); color: var(--fg); }
 .teacher-pagination-controls button.active { background: var(--accent); color: var(--surface); font-weight: 600; }
 .teacher-pagination-controls button:disabled { opacity: .35; }
-.teacher-pagination-jump { display: flex; align-items: center; justify-self: end; gap: 14px; white-space: nowrap; }
+.teacher-pagination-jump { display: flex; flex-wrap: wrap; align-items: center; justify-self: end; gap: 14px; white-space: nowrap; }
 .teacher-pagination-jump-field { display: inline-flex; align-items: center; gap: 5px; }
 .teacher-pagination-jump input {
   width: 52px;

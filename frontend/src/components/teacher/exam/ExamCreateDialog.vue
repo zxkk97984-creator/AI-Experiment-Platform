@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../../directives/dialogFocus.js'
 /** 创建考试弹窗：表单与课程选择在组件内，save 上抛规范化载荷，完整校验与 API 由父组件负责。 */
 import { computed, ref } from 'vue'
 import AppIcon from '../../ui/AppIcon.vue'
@@ -52,7 +53,7 @@ function save() {
 
 <template>
   <div v-if="open" class="modal-backdrop create-backdrop" @click.self="emit('close')">
-    <div class="create-panel create-form" role="dialog" aria-modal="true" aria-label="创建考试">
+    <div class="create-panel create-form" v-dialog-focus role="dialog" aria-modal="true" aria-label="创建考试">
       <header class="create-heading"><strong>创建考试</strong><button class="create-close" aria-label="关闭" @click="emit('close')"><AppIcon name="close" :size="18" /></button></header>
       <div class="form-group"><label>考试名称</label><input v-model="form.title" name="title" placeholder="输入考试名称" /></div>
       <div class="grid-2"><div class="form-group"><label>课程</label><button type="button" class="course-picker" @click="openCourseModal"><span v-if="selectedCourse">{{ selectedCourse.title }}（ID: {{ selectedCourse.id }}）</span><span v-else-if="form.course_id">课程 ID: {{ form.course_id }}</span><span v-else class="placeholder">选择课程</span><AppIcon name="chevron-down" :size="17" /></button></div><div class="form-group"><label>时长（分钟）</label><input v-model.number="form.duration_minutes" name="duration-minutes" type="number" min="1" /></div></div>
@@ -62,7 +63,7 @@ function save() {
     </div>
 
     <div v-if="courseModalOpen" class="modal-backdrop create-backdrop" @click.self="closeCourseModal">
-      <div class="create-panel course-picker-panel" role="dialog" aria-modal="true" aria-label="选择课程">
+      <div class="create-panel course-picker-panel" v-dialog-focus role="dialog" aria-modal="true" aria-label="选择课程">
         <header class="create-heading"><strong>选择课程</strong><button class="create-close" aria-label="关闭" @click="closeCourseModal"><AppIcon name="close" :size="18" /></button></header>
         <div class="manual-row"><input v-model="manualCourseId" class="course-id-input" placeholder="输入课程 ID" @keyup.enter="confirmManualCourse" /><button class="btn-primary manual-confirm" :disabled="!manualCourseId.trim()" @click="confirmManualCourse">确定</button></div>
         <div class="course-list"><button v-for="course in courses" :key="course.id" class="course-item" :class="{ active: String(course.id) === form.course_id }" @click="pickCourse(course)">{{ course.title }}（ID: {{ course.id }}）</button><p v-if="courses.length === 0" class="empty-tip">暂无课程，可直接输入课程 ID</p></div>

@@ -122,7 +122,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); requestGuard.invalidat
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="submissions-page">
       <section class="page-head">
         <div class="ph-title">
@@ -149,32 +149,32 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); requestGuard.invalidat
           </label>
 
           <label class="select" style="width: 150px;">
-            <select v-model="filters.courseId" aria-label="按课程筛选">
+            <DsSelect v-model="filters.courseId" aria-label="按课程筛选">
               <option value="">全部课程</option>
               <option v-for="course in filterOptions.courses" :key="course.id" :value="String(course.id)">{{ course.name }}</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 170px;">
-            <select v-model="filters.entryId" aria-label="按实验筛选">
+            <DsSelect v-model="filters.entryId" aria-label="按实验筛选">
               <option value="">全部实验</option>
               <option v-for="entry in filterOptions.entries" :key="entry.id" :value="String(entry.id)">{{ entry.name }}</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 140px;">
-            <select v-model="filters.reviewStatus" aria-label="按评分状态筛选">
+            <DsSelect v-model="filters.reviewStatus" aria-label="按评分状态筛选">
               <option value="">全部状态</option>
               <option value="pending">待评分</option>
               <option value="graded">已评分</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 160px;">
-            <select v-model="filters.sort" aria-label="提交记录排序">
+            <DsSelect v-model="filters.sort" aria-label="提交记录排序">
               <option value="submitted_desc">提交时间（最新）</option>
               <option value="submitted_asc">提交时间（最早）</option>
-            </select>
+            </DsSelect>
           </label>
 
           <div class="grow"></div>

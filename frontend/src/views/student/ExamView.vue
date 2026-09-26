@@ -459,10 +459,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div v-if="loading" class="loading-card"><div class="skeleton title-line"></div><div class="skeleton text-line"></div></div>
 
-    <main v-else-if="exam" class="exam-page">
+    <section v-else-if="exam" class="exam-page">
       <header class="exam-heading">
         <div>
           <button type="button" class="back-link" @click="router.push('/student/exams')">← 返回考试中心</button>
@@ -578,7 +578,7 @@ onBeforeUnmount(() => {
           </article>
         </section>
       </div>
-    </main>
+    </section>
 
     <ConfirmDialog
       v-if="dialog"
@@ -607,4 +607,11 @@ onBeforeUnmount(() => {
 @keyframes pulse{50%{transform:scale(1.025)}}
 @media(max-width:860px){.workspace{grid-template-columns:1fr}.exam-sidebar{position:static;height:auto;grid-column:auto;grid-row:auto}.questions-column{grid-column:auto;grid-row:auto;margin-top:14px}.exam-sidebar nav{flex:0 0 auto;grid-template-columns:repeat(8,1fr)}.exam-sidebar nav button{min-height:0;aspect-ratio:1}.result-panel{grid-template-columns:auto 1fr}.result-panel dl{grid-column:1/-1;padding-top:15px;border-top:1px solid var(--border)}}
 @media(max-width:620px){.exam-heading{align-items:flex-start;flex-direction:column}.workspace{display:block}.exam-sidebar{height:auto}.questions-column{margin-top:14px}.exam-sidebar nav{grid-template-columns:repeat(6,1fr)}.question-card{padding:18px}.result-panel{grid-template-columns:1fr;text-align:center}.result-mark{margin:auto}.minute-warning{align-items:flex-start;flex-direction:column;gap:4px}.start-panel{padding:28px 20px}.fill-prompt input{width:120px}}
+
+@media (min-width: 1100px) {
+  .exam-sidebar { top: calc(var(--header-height) + 16px); max-height: calc(100dvh - var(--header-height) - 32px); }
+  .prompt, .fill-prompt { font-size: 16px; line-height: 1.7; }
+  .options span { font-size: 14px; }
+  .question-card { padding: 20px 24px; }
+}
 </style>

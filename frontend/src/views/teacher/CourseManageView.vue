@@ -4,6 +4,7 @@
 
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import ClassSummary from '../../components/common/ClassSummary.vue'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import CourseCreateModal from '../../components/teacher/CourseCreateModal.vue'
@@ -23,6 +24,7 @@ const page = ref(1)
 const pageSize = 10
 const serverSummary = ref({ total: 0, published: 0, draft: 0, archived: 0 })
 const loading = ref(true)
+const loadError = ref('')
 const showCreate = ref(false)
 const query = ref('')
 const statusFilter = ref('all')
@@ -36,13 +38,13 @@ const courseUpdated = (course) => course.updated_at || course.created_at || cour
 const summary = computed(() => serverSummary.value)
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const managePath = (course) => `${router.currentRoute?.value?.path?.startsWith('/admin') ? '/admin' : '/teacher'}/courses/${course.id}/manage`
-const classLabel = (course) => course.teaching_classes?.map((item) => item.name).join('、') || '未设置班级'
 
 function resetPage() { page.value = 1; fetchCourses() }
 function goToPage(next) { page.value = next; fetchCourses() }
 
 async function fetchCourses() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await coursesAPI.list({
       page: page.value, page_size: pageSize,
@@ -55,6 +57,7 @@ async function fetchCourses() {
     total.value = res.data.total || 0
     serverSummary.value = res.data.summary || serverSummary.value
   } catch {
+    loadError.value = '课程暂时无法加载，请稍后重试。'
     app.showToast('加载失败', 'error')
   } finally {
     loading.value = false
@@ -97,8 +100,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <AppLayout>
-    <main class="course-page">
+  <AppLayout content-mode="list">
+    <section class="course-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">教学 / 课程</p>
@@ -130,24 +133,24 @@ onMounted(async () => {
             </button>
           </label>
           <label class="select" style="width: 150px;">
-            <select v-model="statusFilter" aria-label="状态筛选" @change="resetPage">
+            <DsSelect v-model="statusFilter" aria-label="状态筛选" @change="resetPage">
               <option value="all">全部状态</option>
               <option value="published">已发布</option>
               <option value="draft">草稿</option>
               <option value="archived">已归档</option>
-            </select>
+            </DsSelect>
           </label>
           <label class="select" style="width: 160px;">
-            <select v-model="termFilter" aria-label="学期筛选" @change="resetPage">
+            <DsSelect v-model="termFilter" aria-label="学期筛选" @change="resetPage">
               <option value="all">全部学期</option>
               <option v-for="term in terms" :key="term.id" :value="String(term.id)">{{ term.name }}</option>
-            </select>
+            </DsSelect>
           </label>
           <label class="select" style="width: 160px;">
-            <select v-model="sortOrder" aria-label="排序" @change="resetPage">
+            <DsSelect v-model="sortOrder" aria-label="排序" @change="resetPage">
               <option value="updated">按最近更新排序</option>
               <option value="title">按课程名称排序</option>
-            </select>
+            </DsSelect>
           </label>
           <div class="grow"></div>
           <button v-if="query || statusFilter !== 'all' || termFilter !== 'all'" type="button" class="btn btn-ghost btn-sm" @click="query = ''; statusFilter = 'all'; termFilter = 'all'; resetPage()">清除筛选</button>
@@ -157,6 +160,7 @@ onMounted(async () => {
           <div v-for="i in 6" :key="i" class="course-skeleton"><span class="skeleton"></span></div>
         </div>
 
+        <div v-else-if="loadError" class="error-panel" role="alert"><div class="grow">{{ loadError }}</div><button type="button" class="btn btn-secondary" @click="fetchCourses">重试</button></div>
         <div v-else-if="courses.length === 0" class="empty">
           <div class="empty-mark"><AppIcon name="course" :size="20" /></div>
           <h3>暂无符合条件的课程</h3>
@@ -166,7 +170,8 @@ onMounted(async () => {
 
         <template v-else>
           <div class="table-scroll">
-            <table class="ds-table">
+            <table class="ds-table course-table">
+              <colgroup><col style="width:27%" /><col style="width:15%" /><col style="width:12%" /><col style="width:8%" /><col style="width:6%" /><col style="width:8%" /><col style="width:12%" /><col style="width:12%" /></colgroup>
               <thead>
                 <tr>
                   <th>课程</th>
@@ -183,10 +188,10 @@ onMounted(async () => {
                 <tr v-for="course in courses" :key="course.id">
                   <td>
                     <button type="button" class="cell-main course-link" @click="router.push(managePath(course))">{{ course.title }}</button>
-                    <div class="cell-sub">{{ course.description || '课程教学内容与安排' }}</div>
+                    <div class="cell-sub" :title="course.description">{{ course.description || '课程教学内容与安排' }}</div>
                   </td>
-                  <td>{{ course.academic_term?.name || '未设置学期' }}</td>
-                  <td class="cell-ellipsis">{{ classLabel(course) }}</td>
+                  <td class="term-cell">{{ course.academic_term?.name || '未设置学期' }}</td>
+                  <td><ClassSummary :classes="course.teaching_classes || []" /></td>
                   <td class="cell-num">{{ course.chapter_count }} / {{ course.lesson_count }}</td>
                   <td class="cell-num">{{ course.student_count }}</td>
                   <td><span class="badge" :class="`badge-${badgeTone(courseStatus(course))}`"><span class="dot"></span>{{ courseLabel(courseStatus(course)) }}</span></td>
@@ -211,7 +216,7 @@ onMounted(async () => {
       </section>
 
       <CourseCreateModal v-if="showCreate" :terms="terms" @close="showCreate = false" @created="handleCourseCreated" />
-    </main>
+    </section>
   </AppLayout>
 </template>
 
@@ -233,4 +238,14 @@ onMounted(async () => {
 .course-skeleton { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .course-skeleton .skeleton { display: block; width: 55%; height: 15px; }
 .course-actions { width: auto; white-space: nowrap; }
+
+.course-table { table-layout: fixed; min-width: 0; }
+.course-table td { white-space: normal; vertical-align: middle; padding-block: 10px; overflow-wrap: anywhere; }
+.course-table .cell-sub { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
+.course-table .course-link { max-width: 100%; width: 100%; white-space: normal; text-align: left; }
+.course-table .term-cell { font-size: var(--text-sm); }
+.course-table .course-actions { white-space: normal; }
+.course-table .course-actions button { padding-inline: 8px; }
+
+.course-table th { white-space: normal; overflow-wrap: normal; line-height: 1.4; padding-block: 8px; }
 </style>

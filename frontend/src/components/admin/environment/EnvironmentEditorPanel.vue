@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../../directives/dialogFocus.js'
 // V2 环境编辑器：列表与单个草稿编辑器保持在同一页面，旧 PackageCatalog 写流程不参与。
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { environmentsAPI } from '../../../api/environments.js'
@@ -11,6 +12,34 @@ const props = defineProps({
 const emit = defineEmits(['refresh'])
 
 const app = useAppStore()
+const profileList = ref(null)
+let listFrame = 0
+let listResizeObserver = null
+function updateListHeight() {
+  cancelAnimationFrame(listFrame)
+  listFrame = requestAnimationFrame(() => {
+    const list = profileList.value
+    if (!list) return
+    const top = Math.max(72, list.getBoundingClientRect().top)
+    list.style.setProperty('--profile-list-height', `${Math.max(180, window.innerHeight - top - 24)}px`)
+  })
+}
+onMounted(() => {
+  window.addEventListener('scroll', updateListHeight, { passive: true })
+  window.addEventListener('resize', updateListHeight)
+  if (typeof ResizeObserver !== 'undefined') {
+    listResizeObserver = new ResizeObserver(updateListHeight)
+    if (profileList.value?.parentElement) listResizeObserver.observe(profileList.value.parentElement)
+  }
+  updateListHeight()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('scroll', updateListHeight)
+  window.removeEventListener('resize', updateListHeight)
+  listResizeObserver?.disconnect()
+  cancelAnimationFrame(listFrame)
+})
+
 const options = ref(null)
 const readiness = ref(null)
 const selectedId = ref(null)
@@ -526,7 +555,6 @@ function selectProfile(profile) {
   <div class="v2-editor">
     <section class="v2-toolbar">
       <div>
-        <p class="eyebrow">ENVIRONMENT EDITOR V2</p>
         <h2>环境列表</h2>
         <p class="muted">声明依赖、构建不可变镜像，检查报告后再发布给教师。</p>
       </div>
@@ -545,7 +573,7 @@ function selectProfile(profile) {
     <div v-if="showCreate" class="modal-backdrop create-env-backdrop" @click.self="closeCreateModal">
       <form
         class="modal create-env-modal"
-        role="dialog"
+        v-dialog-focus role="dialog"
         aria-modal="true"
         aria-labelledby="create-env-title"
         @keydown.esc="closeCreateModal"
@@ -578,7 +606,7 @@ function selectProfile(profile) {
     </div>
 
     <div class="v2-layout">
-      <section class="card profile-list" aria-labelledby="profile-list-title">
+      <section ref="profileList" class="card profile-list" aria-labelledby="profile-list-title">
         <div class="section-head">
           <h3 id="profile-list-title">环境</h3>
           <span class="muted text-sm">{{ profiles.length }} 个</span>
@@ -670,9 +698,9 @@ function selectProfile(profile) {
               <div class="form-grid three">
                 <div class="form-group">
                   <label for="v2-python">Python 版本</label>
-                  <select id="v2-python" v-model="draftForm.python_version" :disabled="!capabilities.can_edit_draft">
+                  <DsSelect id="v2-python" v-model="draftForm.python_version" :disabled="!capabilities.can_edit_draft">
                     <option v-for="version in (options?.python_versions || ['3.10', '3.11', '3.12'])" :key="version" :value="version">Python {{ version }}</option>
-                  </select>
+                  </DsSelect>
                 </div>
                 <div class="form-group">
                   <label for="v2-memory">最小内存（MB）</label>
@@ -806,10 +834,11 @@ function selectProfile(profile) {
 .eyebrow { margin: 0 0 4px; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .1em; }
 .muted { color: var(--muted); }
 .text-sm { font-size: var(--text-sm, 13px); }
-.v2-layout { display: grid; grid-template-columns: minmax(250px, .7fr) minmax(0, 1.8fr); gap: 16px; align-items: start; }
+.v2-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
 .profile-list, .editor-card, .create-card { padding: 16px; }
 .profile-list { display: flex; flex-direction: column; gap: 8px; }
-.profile-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid transparent; background: transparent; border-radius: var(--radius-control, 8px); padding: 11px 10px; text-align: left; color: var(--fg); cursor: pointer; }
+.profile-list > .section-head { flex-shrink: 0; }
+.profile-row { flex-shrink: 0; min-height: 84px; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid transparent; background: transparent; border-radius: var(--radius-control, 8px); padding: 11px 10px; text-align: left; color: var(--fg); cursor: pointer; }
 .profile-row:hover { background: var(--surface-subtle); }
 .profile-row.selected { border-color: var(--accent); background: var(--accent-soft); }
 .profile-row-main, .profile-row-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -818,7 +847,7 @@ function selectProfile(profile) {
 .profile-row-details { font-size: 11px; }
 .profile-row-meta { align-items: flex-end; white-space: nowrap; }
 .vnum { padding: 2px 6px; border-radius: var(--radius-sm, 5px); background: var(--accent-soft); color: var(--accent); font-size: 12px; }
-.editor-card { min-height: 500px; }
+.editor-card { min-height: 0; }
 .editor-content { display: flex; flex-direction: column; gap: 18px; }
 .editor-section, .report-section { border-top: 1px solid var(--border); padding-top: 16px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
@@ -863,4 +892,10 @@ function selectProfile(profile) {
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 @media (max-width: 900px) { .v2-layout { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .form-grid, .form-grid.three, .report-facts { grid-template-columns: 1fr; } .add-row { flex-wrap: wrap; } .add-row input { min-width: 40%; } .v2-toolbar { align-items: flex-start; } }
+
+@media (min-width: 1100px) {
+  .profile-list { position: sticky; top: 72px; height: var(--profile-list-height, calc(100dvh - 96px)); overflow-y: auto; overscroll-behavior: contain; }
+  .v2-toolbar { gap: 8px; }
+  .v2-toolbar h2 { font-size: var(--text-lg); }
+}
 </style>

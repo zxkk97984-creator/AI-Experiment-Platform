@@ -70,11 +70,11 @@ function actionLabel(value) {
         </label>
         <label class="sort-select">
           <span class="sr-only">实验排序</span>
-          <select :value="sortBy" @change="emit('update:sort-by', $event.target.value)">
+          <DsSelect :value="sortBy" @change="emit('update:sort-by', $event.target.value)">
             <option value="default">默认排序</option>
             <option value="recent_desc">最近学习</option>
             <option value="name_asc">名称排序</option>
-          </select>
+          </DsSelect>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"></path></svg>
         </label>
       </div>
@@ -240,7 +240,7 @@ function actionLabel(value) {
   stroke-linejoin: round;
 }
 
-.sort-select select {
+.sort-select .ds-select {
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -254,7 +254,7 @@ function actionLabel(value) {
   box-shadow: none;
 }
 
-.sort-select select:focus { box-shadow: none; }
+.sort-select .ds-select:focus { box-shadow: none; }
 
 .sort-select {
   position: relative;
@@ -262,7 +262,7 @@ function actionLabel(value) {
   padding: 0 10px 0 12px;
 }
 
-.sort-select select {
+.sort-select .ds-select {
   appearance: none;
   cursor: pointer;
   padding-right: 18px;

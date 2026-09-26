@@ -97,7 +97,7 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="detail-page">
       <button type="button" class="back-button" @click="goBack">
         <AppIcon name="back" :size="17" />
@@ -199,7 +199,7 @@ onMounted(load)
 .status-pill.pending { border-color: var(--warning-bg); background: var(--warning-bg); color: var(--warning); }
 .status-pill.graded { border-color: var(--success-bg); background: var(--success-bg); color: var(--success); }
 
-.workspace-grid { display: grid; grid-template-columns: minmax(0, 1.04fr) minmax(400px, .96fr); align-items: start; gap: 18px; }
+.workspace-grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; align-items: start; gap: 18px; }
 .snapshot-panel, .review-panel { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: none; }
 .panel-head { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 18px; border-bottom: 1px solid var(--border); }
 .panel-head h2 { margin: 0 0 3px; color: var(--fg); font-size: 15px; }

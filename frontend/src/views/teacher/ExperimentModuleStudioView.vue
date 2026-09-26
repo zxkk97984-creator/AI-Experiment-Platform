@@ -11,7 +11,7 @@ const backTo = computed(() => `${prefix.value}/experiments`)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <StudioEditor :template-id="templateId" :back-to="backTo" />
   </AppLayout>
 </template>

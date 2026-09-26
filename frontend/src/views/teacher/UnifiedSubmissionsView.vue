@@ -123,7 +123,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); requestGuard.invalidat
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="submissions-page">
       <section class="page-head">
         <div class="ph-title">
@@ -152,43 +152,43 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); requestGuard.invalidat
           </label>
 
           <label class="select" style="width: 150px;">
-            <select v-model="filters.courseId" aria-label="按课程筛选">
+            <DsSelect v-model="filters.courseId" aria-label="按课程筛选">
               <option value="">全部课程</option>
               <option v-for="course in filterOptions.courses" :key="'c' + course.id" :value="String(course.id)">{{ course.name }}</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 160px;">
-            <select v-model="filters.kind" aria-label="按提交类型筛选">
+            <DsSelect v-model="filters.kind" aria-label="按提交类型筛选">
               <option value="all">全部类型</option>
               <option value="experiment">实验</option>
               <option value="assignment">作业</option>
               <option value="exam">考试</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 190px;">
-            <select v-model="filters.entryId" aria-label="按任务筛选">
+            <DsSelect v-model="filters.entryId" aria-label="按任务筛选">
               <option value="">全部实验 / 作业 / 考试</option>
               <option v-for="entry in filterOptions.entries" :key="entry.kind + '-' + entry.id" :value="String(entry.id)">{{ entry.name }}</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 140px;">
-            <select v-model="filters.status" aria-label="按状态筛选">
+            <DsSelect v-model="filters.status" aria-label="按状态筛选">
               <option value="all">全部状态</option>
               <option value="pending_grading">待评分</option>
               <option value="graded">已评分</option>
               <option value="review_required">待复核</option>
               <option value="failed">失败</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 170px;">
-            <select v-model="filters.sort" aria-label="排序">
+            <DsSelect v-model="filters.sort" aria-label="排序">
               <option value="submitted_desc">提交时间（最新）</option>
               <option value="submitted_asc">提交时间（最早）</option>
-            </select>
+            </DsSelect>
           </label>
 
           <div class="grow"></div>

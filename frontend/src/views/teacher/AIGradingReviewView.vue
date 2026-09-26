@@ -1,6 +1,6 @@
 <template>
-  <AppLayout>
-    <main class="ai-grading-review">
+  <AppLayout content-mode="list">
+    <section class="ai-grading-review">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">评分 / AI 评分</p>
@@ -26,15 +26,15 @@
           </label>
 
           <label class="select" style="width: 140px;">
-            <select v-model="filterKind" aria-label="评分类型" @change="applyFilters">
+            <DsSelect v-model="filterKind" aria-label="评分类型" @change="applyFilters">
               <option value="">全部类型</option>
               <option value="assignment">作业</option>
               <option value="exam">考试</option>
-            </select>
+            </DsSelect>
           </label>
 
           <label class="select" style="width: 150px;">
-            <select v-model="filterStatus" aria-label="评分状态" @change="applyFilters">
+            <DsSelect v-model="filterStatus" aria-label="评分状态" @change="applyFilters">
               <option value="">全部状态</option>
               <option value="pending">等待中</option>
               <option value="queued">排队中</option>
@@ -42,7 +42,7 @@
               <option value="completed">已完成</option>
               <option value="review_required">需复核</option>
               <option value="system_error">系统错误</option>
-            </select>
+            </DsSelect>
           </label>
 
           <button class="btn btn-secondary" type="button" @click="applyFilters">查询</button>
@@ -117,7 +117,7 @@
           <div v-if="hasFilters" class="empty-actions"><button type="button" class="btn btn-secondary btn-sm" @click="resetFilters">清除筛选</button></div>
         </div>
       </section>
-    </main>
+    </section>
   </AppLayout>
 </template>
 

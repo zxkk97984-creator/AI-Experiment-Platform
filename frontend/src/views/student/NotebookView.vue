@@ -10,7 +10,7 @@ const lessonId = computed(() => route.params.lid)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <NotebookPlayer mode="lesson" :entry-id="lessonId" :course-id="courseId" />
   </AppLayout>
 </template>

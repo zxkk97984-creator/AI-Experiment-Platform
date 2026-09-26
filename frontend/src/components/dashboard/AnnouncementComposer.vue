@@ -123,11 +123,11 @@ async function submit() {
       <form class="composer-form" @submit.prevent="submit">
         <label class="field">
           <span class="field-label">课程</span>
-          <select v-model="form.course_id" required>
+          <DsSelect v-model="form.course_id" required>
             <option v-for="course in courses" :key="course.id" :value="course.id">
               {{ course.title }}
             </option>
-          </select>
+          </DsSelect>
         </label>
         <label class="field">
           <span class="field-label">标题</span>
@@ -153,11 +153,11 @@ async function submit() {
         <div class="field-row">
           <label class="field">
             <span class="field-label">优先级</span>
-            <select v-model="form.priority">
+            <DsSelect v-model="form.priority">
               <option value="normal">普通</option>
               <option value="important">重要</option>
               <option value="urgent">紧急</option>
-            </select>
+            </DsSelect>
           </label>
           <label class="field">
             <span class="field-label">过期时间（可选）</span>
@@ -182,7 +182,7 @@ async function submit() {
 .field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
 .field-row { display: flex; gap: 12px; }
 .field-label { font-size: var(--text-sm); font-weight: 500; color: var(--muted); }
-.field input, .field select, .field textarea {
+.field input, .field .ds-select, .field textarea {
   width: 100%;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -191,7 +191,7 @@ async function submit() {
   font-family: var(--font-body);
   font-size: var(--text-md);
 }
-.field input, .field select { height: var(--h-input); padding: 0 11px; }
+.field input, .field .ds-select { height: var(--h-input); padding: 0 11px; }
 .field textarea { min-height: 88px; padding: 9px 11px; resize: vertical; }
 .composer-error { margin: 0; font-size: var(--text-sm); color: var(--danger); }
 </style>

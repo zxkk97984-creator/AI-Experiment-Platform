@@ -157,10 +157,10 @@ onMounted(fetch)
         </div>
         <div class="form-group">
           <label>来源</label>
-          <select v-model="createForm.source_key" name="source_key">
+          <DsSelect v-model="createForm.source_key" name="source_key">
             <option value="pypi">PyPI</option>
             <option value="pytorch_cpu">PyTorch CPU（官方 CPU index）</option>
-          </select>
+          </DsSelect>
         </div>
       </div>
       <div class="form-actions">
@@ -184,10 +184,10 @@ onMounted(fetch)
         </div>
         <div class="form-group">
           <label>状态</label>
-          <select v-model="editForm.status" name="status">
+          <DsSelect v-model="editForm.status" name="status">
             <option value="active">正常</option>
             <option value="inactive">停用</option>
-          </select>
+          </DsSelect>
         </div>
       </div>
       <div class="form-actions">

@@ -181,14 +181,15 @@ function submit() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  height: calc(100vh - 96px);
-  min-height: 620px;
+  height: calc(100dvh - 320px);
+  min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: none;
 }
+.review-panel > * { flex-shrink: 0; }
 .panel-head {
   min-height: 58px;
   display: flex;

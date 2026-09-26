@@ -85,7 +85,7 @@ defineExpose({ fetchOptions })
 <template>
   <div class="env-picker">
     <label v-if="label" class="env-picker-label">{{ label }}</label>
-    <select
+    <DsSelect
       class="env-picker-select"
       :value="modelValue ?? ''"
       :disabled="loading || isEmpty || disabled"
@@ -95,7 +95,7 @@ defineExpose({ fetchOptions })
       <option v-for="opt in options" :key="opt.environment_version_id" :value="opt.environment_version_id" :disabled="opt.historical">
         {{ optionLabel(opt) }}
       </option>
-    </select>
+    </DsSelect>
     <p v-if="loadError" class="env-picker-hint env-picker-error">加载失败，请刷新重试</p>
     <p v-else-if="isEmpty" class="env-picker-hint">暂无可用环境，请联系管理员</p>
   </div>
@@ -128,7 +128,7 @@ defineExpose({ fetchOptions })
   font-size: var(--text-sm, 13px);
   line-height: 1.4;
 }
-.env-picker-select:disabled {
+.env-picker-select.is-disabled {
   background: var(--surface-raised, var(--surface-subtle));
   color: var(--faint);
 }

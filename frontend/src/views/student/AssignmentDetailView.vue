@@ -344,7 +344,7 @@ function stopSubmitPolling() {
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div v-if="!assignment" class="empty-state">
       <p class="skeleton" style="width:240px;height:28px;margin:0 auto 12px"></p>
       <p class="skeleton" style="width:360px;height:14px;margin:0 auto"></p>
@@ -382,21 +382,22 @@ function stopSubmitPolling() {
         <small v-if="deadlineClosed">教师延长截止时间后，重新聚焦或刷新页面即可继续自测和提交。</small>
       </div>
 
+      <div class="assignment-workspace">
       <!-- ── Problem Description ─────────────────────────────────────── -->
       <div class="problem-card" :class="{ collapsed: !showProblem }">
-        <div class="problem-header" @click="showProblem = !showProblem">
+        <button type="button" class="problem-header" :aria-expanded="showProblem" @click="showProblem = !showProblem">
           <div class="problem-label">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M2 3h12v10H2z"/><path d="M5 6h6M5 9h4"/>
             </svg>
             题目描述
           </div>
-          <button class="btn-ghost btn-sm collapse-btn" :title="showProblem ? '收起' : '展开'">
+          <span class="btn-ghost btn-sm collapse-btn" :title="showProblem ? '收起' : '展开'">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path :d="showProblem ? 'M3 9l4-4 4 4' : 'M3 5l4 4 4-4'"/>
             </svg>
-          </button>
-        </div>
+          </span>
+        </button>
         <transition name="problem-collapse">
           <div v-if="showProblem" class="problem-body">
             <div class="problem-desc" v-if="descriptionHtml"
@@ -478,6 +479,35 @@ function stopSubmitPolling() {
         <div class="editor-resize-handle" @mousedown="onEditorDragStart">
           <div class="editor-resize-grip"></div>
         </div>
+
+      <!-- ── Action Buttons ───────────────────────────────────────────── -->
+      <div class="action-bar" v-if="questions.length > 0">
+        <div v-if="currentCompleted" class="completed-badge">✓ 已完成</div>
+        <template v-else>
+        <button
+          class="btn-self-test"
+          :disabled="testing || submitting || deadlineClosed"
+          @click="handleSelfTest"
+        >
+          <svg v-if="!testing" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 2.5L1.5 8 5 13.5"/><path d="M11 2.5l3.5 5.5L11 13.5"/><path d="M9 1.5l-2 13"/>
+          </svg>
+          <span v-if="testing" class="spinner-sm"></span>
+          {{ testing ? '运行中...' : '自测' }}
+        </button>
+        <button
+          class="btn-submit-code"
+          :disabled="testing || submitting || deadlineClosed"
+          @click="handleSubmit"
+        >
+          <svg v-if="!submitting" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 1.5v9M3.5 6.5L8 11l4.5-4.5"/><path d="M2.5 13.5v1.5h11V13.5"/>
+          </svg>
+          <span v-if="submitting" class="spinner-sm"></span>
+          {{ submitting ? '提交中...' : '提交代码' }}
+        </button>
+        </template>
+      </div>
 
         <!-- Bottom action tabs -->
         <div class="bottom-section">
@@ -592,33 +622,6 @@ function stopSubmitPolling() {
         </div>
       </div>
 
-      <!-- ── Action Buttons ───────────────────────────────────────────── -->
-      <div class="action-bar" v-if="questions.length > 0">
-        <div v-if="currentCompleted" class="completed-badge">✓ 已完成</div>
-        <template v-else>
-        <button
-          class="btn-self-test"
-          :disabled="testing || submitting || deadlineClosed"
-          @click="handleSelfTest"
-        >
-          <svg v-if="!testing" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 2.5L1.5 8 5 13.5"/><path d="M11 2.5l3.5 5.5L11 13.5"/><path d="M9 1.5l-2 13"/>
-          </svg>
-          <span v-if="testing" class="spinner-sm"></span>
-          {{ testing ? '运行中...' : '自测' }}
-        </button>
-        <button
-          class="btn-submit-code"
-          :disabled="testing || submitting || deadlineClosed"
-          @click="handleSubmit"
-        >
-          <svg v-if="!submitting" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M8 1.5v9M3.5 6.5L8 11l4.5-4.5"/><path d="M2.5 13.5v1.5h11V13.5"/>
-          </svg>
-          <span v-if="submitting" class="spinner-sm"></span>
-          {{ submitting ? '提交中...' : '提交代码' }}
-        </button>
-        </template>
       </div>
     </template>
   </AppLayout>
@@ -1279,4 +1282,20 @@ function stopSubmitPolling() {
   .btn-self-test,
   .btn-submit-code { width: 100%; justify-content: center; }
 }
+
+/* The task and editor share the desktop viewport; output never displaces actions. */
+.assignment-workspace { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr); gap: var(--space-4); align-items: start; }
+.assignment-workspace > * { min-width: 0; }
+.assignment-workspace .problem-card { margin: 0; max-height: calc(100dvh - 200px); overflow: auto; overscroll-behavior: contain; }
+.problem-header { width: 100%; border: 0; border-radius: 0; justify-content: space-between; text-align: left; }
+.assignment-workspace .problem-body { padding: var(--space-4); }
+.assignment-workspace .problem-desc { font-size: 16px; line-height: 1.7; }
+.assignment-workspace .editor-panel { margin: 0; min-width: 0; }
+.assignment-workspace .editor-body { min-height: 300px; max-height: max(300px, calc(100dvh - 360px)); }
+.assignment-workspace .editor-textarea { min-width: 0; }
+.assignment-workspace .action-bar { margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--border); justify-content: flex-end; }
+.assignment-workspace .bottom-section { max-height: max(120px, calc(100dvh - 610px)); overflow: auto; overscroll-behavior: contain; }
+.assignment-workspace .file-tab { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assignment-workspace .meta-code { overflow-x: auto; max-width: 100%; }
+@media (max-width: 920px) { .assignment-workspace { grid-template-columns: 1fr; } .assignment-workspace .problem-card { max-height: none; } }
 </style>

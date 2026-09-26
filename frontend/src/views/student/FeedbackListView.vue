@@ -108,7 +108,7 @@ onMounted(loadFeedback)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <!-- 页头 -->
       <section class="page-head">
@@ -145,17 +145,17 @@ onMounted(loadFeedback)
       <div class="toolbar filter-row">
         <label class="filter-field">
           <span class="filter-label">课程</span>
-          <select v-model="filters.courseId" class="filter-course" aria-label="按课程筛选" @change="page = 1">
+          <DsSelect v-model="filters.courseId" class="filter-course" aria-label="按课程筛选" @change="page = 1">
             <option value="">全部课程</option>
             <option v-for="c in courseOptions" :key="c.id" :value="c.id">{{ c.title }}</option>
-          </select>
+          </DsSelect>
         </label>
         <label class="filter-field">
           <span class="filter-label">时间</span>
-          <select v-model="filters.time" class="filter-time" aria-label="按时间筛选" @change="page = 1">
+          <DsSelect v-model="filters.time" class="filter-time" aria-label="按时间筛选" @change="page = 1">
             <option value="all">全部时间</option>
             <option value="week">近 7 天</option>
-          </select>
+          </DsSelect>
         </label>
         <label class="searchbox search-box" style="width: 280px;">
           <AppIcon name="search" :size="15" />
@@ -214,11 +214,11 @@ onMounted(loadFeedback)
           </span>
           <label class="page-size-field">
             每页
-            <select v-model="pageSize" class="page-size" aria-label="每页条数" @change="onPageSizeChange">
+            <DsSelect v-model="pageSize" class="page-size" aria-label="每页条数" @change="onPageSizeChange">
               <option :value="10">10</option>
               <option :value="20">20</option>
               <option :value="50">50</option>
-            </select>
+            </DsSelect>
             条
           </label>
           <div class="page-nav">
@@ -238,7 +238,7 @@ onMounted(loadFeedback)
 .status-tabs { height: 42px; background: transparent; border: 0; border-radius: 0; box-shadow: none; overflow-x: auto; }
 .filter-row { padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
 .filter-field { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: var(--text-sm); font-weight: 500; }
-.filter-field select { height: var(--h-input); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); }
+.filter-field .ds-select { height: var(--h-input); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); }
 .search-box { flex: none; }
 .search-input { height: 30px; border: 0; box-shadow: none !important; }
 .result-count { margin: -8px 0 0; font-size: var(--text-sm); color: var(--muted); font-variant-numeric: tabular-nums; }

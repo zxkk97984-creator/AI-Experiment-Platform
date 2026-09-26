@@ -3,6 +3,7 @@
 // 面包屑 + 课程封面（或占位）+ 课程身份 + 低对比元数据 chips + 进度 + CTA。
 
 import { computed, ref, watch } from 'vue'
+import ClassSummary from '../common/ClassSummary.vue'
 import AppIcon from '../ui/AppIcon.vue'
 import UiProgress from '../ui/UiProgress.vue'
 import { getCourseCoverUrl } from '../../utils/courseCover.js'
@@ -56,7 +57,7 @@ watch(() => props.course?.cover, () => { coverFailed.value = false })
 
       <div class="hero-meta">
         <span class="hero-chip">{{ course.academic_term?.name || '未设置学期' }}</span>
-        <span class="hero-chip">{{ course.teaching_classes?.map((item) => item.name).join('、') || '未设置教学班' }}</span>
+        <ClassSummary :classes="course.teaching_classes || []" />
         <span class="hero-chip">{{ totalChapters }} 章节</span>
         <span class="hero-chip">{{ totalLessons }} 课时</span>
         <div class="hero-progress">
@@ -231,4 +232,10 @@ watch(() => props.course?.cover, () => { coverFailed.value = false })
   .hero-cta { align-self: stretch; }
   .hero-cta .btn-primary { width: 100%; }
 }
+
+.hero-body { grid-template-columns: 88px minmax(0, 1fr) minmax(240px, .8fr) auto; gap: 16px; }
+.hero-cover { width: 88px; height: 88px; }
+.hero-identity { min-width: 0; }
+.hero-title { font-size: var(--text-3xl); white-space: normal; overflow-wrap: anywhere; }
+.hero-meta { min-width: 0; }
 </style>

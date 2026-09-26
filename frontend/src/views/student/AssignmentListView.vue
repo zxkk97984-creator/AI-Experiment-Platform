@@ -162,7 +162,7 @@ onMounted(loadAssignments)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <section class="page-head">
         <div class="ph-title">
@@ -212,24 +212,24 @@ onMounted(loadAssignments)
             </button>
           </label>
           <label class="select" style="width: 150px;">
-            <select v-model="filters.courseId" class="filter-course" aria-label="按课程筛选">
+            <DsSelect v-model="filters.courseId" class="filter-course" aria-label="按课程筛选">
               <option value="">全部课程</option>
               <option v-for="c in courseOptions" :key="c.id" :value="c.id">{{ c.title }}</option>
-            </select>
+            </DsSelect>
           </label>
           <label class="select" style="width: 140px;">
-            <select v-model="filters.time" class="filter-time" aria-label="按时间筛选">
+            <DsSelect v-model="filters.time" class="filter-time" aria-label="按时间筛选">
               <option value="all">全部时间</option>
               <option value="today">今天截止</option>
               <option value="week">未来 7 天</option>
-            </select>
+            </DsSelect>
           </label>
           <label class="select" style="width: 140px;">
-            <select v-model="filters.sort" class="filter-sort" aria-label="排序方式">
+            <DsSelect v-model="filters.sort" class="filter-sort" aria-label="排序方式">
               <option value="due">按截止时间</option>
               <option value="course">按课程</option>
               <option value="title">按标题</option>
-            </select>
+            </DsSelect>
           </label>
           <div class="grow"></div>
           <button type="button" class="btn btn-ghost btn-sm reset-btn" @click="resetFilters">重置</button>

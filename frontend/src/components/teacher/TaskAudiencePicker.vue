@@ -132,11 +132,11 @@ watch(() => props.courseId, loadCourseClasses)
   <section class="audience-picker" aria-label="发布范围">
     <label class="audience-mode">
       <span>发布范围</span>
-      <select v-model="mode" :disabled="disabled">
+      <DsSelect v-model="mode" :disabled="disabled">
         <option value="all_enrolled">课程内全部学生</option>
         <option value="selected_classes">指定教学班</option>
         <option value="whitelist_only">仅白名单学生</option>
-      </select>
+      </DsSelect>
     </label>
 
     <div v-if="mode === 'selected_classes'" class="audience-block">
@@ -209,7 +209,7 @@ watch(() => props.courseId, loadCourseClasses)
 <style scoped>
 .audience-picker { display: flex; flex-direction: column; gap: var(--space-4); }
 .audience-mode { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: var(--text-sm); }
-.audience-mode select { width: 100%; }
+.audience-mode .ds-select { width: 100%; }
 .audience-block { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-sunken); }
 .audience-block strong { color: var(--fg); }
 .audience-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }

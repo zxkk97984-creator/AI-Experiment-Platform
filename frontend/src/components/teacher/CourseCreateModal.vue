@@ -327,12 +327,12 @@ onBeforeUnmount(() => {
 
             <label class="course-create-field">
               <span>所属学期 <small>可选</small></span>
-              <select v-model="form.academic_term_id" :disabled="isBusy">
+              <DsSelect v-model="form.academic_term_id" :disabled="isBusy">
                 <option :value="null">暂不设置</option>
                 <option v-for="term in props.terms" :key="term.id" :value="term.id" :disabled="term.status === 'closed'">
                   {{ term.name }}{{ term.status === 'closed' ? '（已关闭）' : '' }}
                 </option>
-              </select>
+              </DsSelect>
             </label>
 
             <label class="course-create-field">
@@ -359,11 +359,11 @@ onBeforeUnmount(() => {
 
             <label class="course-create-field">
               <span>课程可见范围</span>
-              <select v-model="form.visibility" data-testid="course-create-visibility" :disabled="isBusy">
+              <DsSelect v-model="form.visibility" data-testid="course-create-visibility" :disabled="isBusy">
                 <option value="private">仅自己可见</option>
                 <option value="class">教学班可见</option>
                 <option value="whitelist">指定学生可见</option>
-              </select>
+              </DsSelect>
             </label>
 
             <label class="course-create-field">
@@ -443,7 +443,7 @@ onBeforeUnmount(() => {
 .course-create-field > span, .course-create-field-label > span { display: flex; align-items: baseline; gap: 5px; }
 .course-create-field > span small, .course-create-field-label > small, .course-create-field-label > span small { color: var(--faint); font-size: var(--text-sm); font-weight: 400; }
 .course-create-field em { color: var(--danger); font-style: normal; }
-.course-create-field input, .course-create-field textarea, .course-create-field select { width: 100%; min-width: 0; border-color: var(--border-strong); border-radius: var(--radius-md); font-size: var(--text-md); }
+.course-create-field input, .course-create-field textarea, .course-create-field .ds-select { width: 100%; min-width: 0; border-color: var(--border-strong); border-radius: var(--radius-md); font-size: var(--text-md); }
 .course-create-hint, .course-cover-file { margin: 0; color: var(--faint); font-size: var(--text-sm); font-weight: 400; }
 .course-create-error { margin: 0; color: var(--danger); font-size: var(--text-sm); font-weight: 400; }
 .course-create-form-error { margin-top: 16px; }

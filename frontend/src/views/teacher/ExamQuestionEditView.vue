@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
@@ -227,7 +228,7 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="page">
       <!-- ── Page Head ─────────────────────────────────────────────────── -->
       <header class="page-head">
@@ -253,7 +254,7 @@ onMounted(load)
       </div>
 
       <div v-else class="editor-shell">
-        <main class="question-workspace">
+        <section class="question-workspace">
           <section class="question-section" aria-labelledby="question-section-title">
             <div class="section-toolbar">
               <div>
@@ -308,7 +309,7 @@ onMounted(load)
               </article>
             </div>
           </section>
-        </main>
+        </section>
 
         <aside class="control-rail" aria-label="考试设置与发布检查">
           <section class="rail-section settings-panel" aria-labelledby="exam-settings-title">
@@ -373,18 +374,18 @@ onMounted(load)
               </div>
               <div class="form-group">
                 <label for="score-visibility">成绩公开方式</label>
-                <select id="score-visibility" v-model="scoreVisibility">
+                <DsSelect id="score-visibility" v-model="scoreVisibility">
                   <option value="hidden">暂不公开</option>
                   <option value="after_grading">评分完成后公开总成绩</option>
-                </select>
+                </DsSelect>
               </div>
               <div class="form-group">
                 <label for="review-visibility">讲评公开范围</label>
-                <select id="review-visibility" v-model="reviewVisibility">
+                <DsSelect id="review-visibility" v-model="reviewVisibility">
                   <option value="hidden">暂不公开题目与答案</option>
                   <option value="questions_only">仅公开题目</option>
                   <option value="questions_and_answers">公开题目与标准答案</option>
-                </select>
+                </DsSelect>
               </div>
               <p class="strategy-note">讲评范围仅在教师手动发布讲评后生效。</p>
             </div>
@@ -421,7 +422,7 @@ onMounted(load)
 
       <!-- ── Modal Form ─────────────────────────────────────────────────── -->
       <div v-if="showForm" class="modal-overlay" @click.self="showForm = false">
-        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="exam-question-title">
+        <div class="modal-card" v-dialog-focus role="dialog" aria-modal="true" aria-labelledby="exam-question-title">
           <div class="modal-header">
             <div>
               <h3 id="exam-question-title" class="modal-title">{{ editingQ ? '编辑题目' : '新建题目' }}</h3>
@@ -436,12 +437,12 @@ onMounted(load)
 
           <div class="form-group">
             <label>题目类型</label>
-            <select v-model="form.question_type" class="modal-field" @change="form.grading_mode = form.question_type === 'code' ? 'active' : 'legacy'">
+            <DsSelect v-model="form.question_type" class="modal-field" @change="form.grading_mode = form.question_type === 'code' ? 'active' : 'legacy'">
               <option value="single_choice">单选题</option>
               <option value="multi_choice">多选题</option>
               <option value="fill_blank">填空题</option>
               <option value="code">编程题</option>
-            </select>
+            </DsSelect>
           </div>
           <div v-if="form.question_type !== 'fill_blank'" class="form-group">
             <label>题目内容</label>
@@ -609,7 +610,7 @@ onMounted(load)
 .badge-mode.incomplete { background:var(--warning-bg); color:var(--danger); }
 
 /* ── Settings rail ─────────────────────────────────────────────────── */
-.control-rail { position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; }
+.control-rail { position:sticky; top:calc(var(--header-height) + 16px); max-height:calc(100dvh - 230px); overflow:auto; overscroll-behavior:contain; }
 .rail-section { padding:20px; }
 .rail-section + .rail-section { border-top:1px solid var(--border); }
 .rail-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px; }
@@ -618,7 +619,7 @@ onMounted(load)
 .rail-form { display:grid; gap:13px; }
 .rail-form .form-group,.strategy-section .form-group { margin:0; }
 .rail-form label,.strategy-section label { display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:600; }
-.rail-form input,.strategy-section select { width:100%; min-height:38px; box-sizing:border-box; font-size:12px; }
+.rail-form input,.strategy-section .ds-select { width:100%; min-height:38px; box-sizing:border-box; font-size:12px; }
 .rail-form input:disabled { background:var(--surface-subtle); color:var(--muted); }
 .timing-note { display:flex; align-items:flex-start; gap:8px; margin:15px 0 0; padding:10px 11px; border-radius: var(--radius-md); background:var(--warning-bg); color:var(--danger); font-size:10px; line-height:1.55; }
 .timing-note .app-icon { flex:none; margin-top:1px; }

@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 import AppIcon from '../ui/AppIcon.vue'
 
 const props = defineProps({
@@ -22,7 +23,7 @@ function requestClose() {
   <div class="modal-backdrop course-form-backdrop" @click.self="requestClose">
     <form
       :class="['modal course-form-panel', panelClass]"
-      role="dialog"
+      v-dialog-focus role="dialog"
       aria-modal="true"
       :aria-labelledby="titleId"
       @submit.prevent="$emit('submit')"

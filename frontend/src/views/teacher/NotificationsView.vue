@@ -66,8 +66,8 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
-    <main class="notifications-page">
+  <AppLayout content-mode="list">
+    <section class="notifications-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">系统 / 通知</p>
@@ -98,7 +98,7 @@ onMounted(load)
           </div>
         </div>
       </section>
-    </main>
+    </section>
   </AppLayout>
 </template>
 

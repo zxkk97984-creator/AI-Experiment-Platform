@@ -35,7 +35,7 @@ onMounted(fetch)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <!-- ── Page Head ─────────────────────────────────────────────────── -->
       <header class="page-head">

@@ -94,7 +94,7 @@ onMounted(fetch)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <header class="page-head">
         <div>
@@ -123,9 +123,9 @@ onMounted(fetch)
             @click="source = s; resetAndFetch()"
           >{{ s === 'api' ? 'API 服务' : '判题 Worker' }}</button>
         </div>
-        <select v-model="level" @change="resetAndFetch" aria-label="日志级别">
+        <DsSelect v-model="level" host-class="level-select" aria-label="日志级别" @change="resetAndFetch">
           <option v-for="opt in LEVEL_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-        </select>
+        </DsSelect>
         <label class="searchbox" :class="{ 'has-value': query }">
           <AppIcon name="search" :size="15" />
           <input v-model="query" type="search" class="input" placeholder="按关键词、logger 或 request_id 过滤" aria-label="搜索日志">
@@ -191,16 +191,19 @@ onMounted(fetch)
 .source-tabs { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
 .source-tabs button { padding: 6px 14px; border: 0; border-radius: calc(var(--radius-md) - 2px); background: transparent; color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
 .source-tabs button.active { background: var(--fg); color: var(--surface); }
-.filter-bar select { min-width: 130px; }
+.level-select { flex: 0 0 176px; }
 .searchbox { flex: 1; min-width: 220px; }
 .filter-count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-.log-card { overflow: hidden; }
+/* This card is the scrollport: card padding would leave a strip above sticky headers. */
+.log-card { padding: 0; max-height: calc(100dvh - 230px); overflow: auto; }
+.log-table th { position: sticky; top: 0; z-index: 1; background: var(--surface-subtle); }
 .log-table { table-layout: fixed; }
-.log-table th, .log-table td { vertical-align: top; }
-.col-time { width: 158px; }
-.col-level { width: 92px; }
-.col-logger { width: 170px; }
+.log-table th { vertical-align: middle; }
+.log-table td { overflow-wrap: anywhere; vertical-align: top; }
+.col-time { width: 170px; }
+.col-level { width: 80px; }
+.col-logger { width: 180px; }
 .col-logger small { display: block; margin-top: 3px; color: var(--faint); font-size: 10px; }
 .log-message p { margin: 0; color: var(--fg); font-size: 12.5px; line-height: 1.6; word-break: break-word; white-space: pre-wrap; }
 .log-message pre {
@@ -222,4 +225,5 @@ onMounted(fetch)
 .badge-warn { color: var(--warning); background: var(--warning-bg); }
 .badge-info { color: var(--accent-hover); background: var(--accent-soft); }
 .badge-muted { color: var(--muted); background: var(--surface-subtle); }
+
 </style>

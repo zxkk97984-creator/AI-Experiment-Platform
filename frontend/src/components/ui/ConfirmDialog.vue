@@ -1,4 +1,5 @@
 <script setup>
+import { vDialogFocus } from '../../directives/dialogFocus.js'
 // ConfirmDialog：V2 共享确认弹窗（映射 dai-ds-v2.css 的 .modal）。
 // 交互契约不变：遮罩点击（@click.self）与 Escape 均触发 cancel。
 
@@ -28,7 +29,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 <template>
   <div class="modal-backdrop confirm-backdrop" @click.self="emit('cancel')">
-    <section class="modal confirm-modal confirm-panel" role="dialog" aria-modal="true" :aria-label="title">
+    <section class="modal confirm-modal confirm-panel" v-dialog-focus role="dialog" aria-modal="true" :aria-label="title">
       <header class="modal-head">
         <h2>{{ title }}</h2>
       </header>

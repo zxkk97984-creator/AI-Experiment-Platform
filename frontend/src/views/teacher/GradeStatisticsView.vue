@@ -29,8 +29,8 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
-    <main class="stats-page">
+  <AppLayout content-mode="list">
+    <section class="stats-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">评分 / 统计</p>
@@ -77,7 +77,7 @@ onMounted(load)
           </table>
         </div>
       </section>
-    </main>
+    </section>
   </AppLayout>
 </template>
 

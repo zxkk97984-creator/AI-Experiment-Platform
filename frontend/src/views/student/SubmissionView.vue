@@ -41,7 +41,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="page">
       <section class="page-head">
         <div class="ph-title">
@@ -105,4 +105,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .submission-panel .panel-body { padding: 14px 16px; }
 .polling-hint { padding: 8px 0; }
 .polling-hint .score-bar { max-width: 220px; }
+
+.term pre { max-height: 420px; overflow: auto; overscroll-behavior: contain; }
+.submission-panel .row-wrap { gap: 12px 24px; }
 </style>

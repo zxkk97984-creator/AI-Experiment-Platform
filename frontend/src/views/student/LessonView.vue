@@ -371,7 +371,7 @@ watch([lessonId, courseId], async ([, newCid], [, oldCid]) => {
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="reading">
     <!-- Loading -->
     <div v-if="loading" class="lesson-loading">
       <div class="skeleton" style="height:22px;width:360px;margin-bottom:16px"></div>
@@ -579,11 +579,11 @@ watch([lessonId, courseId], async ([, newCid], [, oldCid]) => {
 
 /* ── Sticky Top Bar（全宽，跨 flex 行上方） ──────────────────────────── */
 .lesson-topbar {
-  position: sticky; top: 0; z-index: 30;
+  position: sticky; top: var(--header-height); z-index: 20;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
-  margin: -32px -40px 0;
-  padding: 0 40px;
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-4);
 }
 .topbar-inner {
   display: flex; align-items: center; gap: 16px;

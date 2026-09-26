@@ -49,8 +49,8 @@ function openExam(exam) {
 </script>
 
 <template>
-  <AppLayout>
-    <main class="exam-center">
+  <AppLayout content-mode="list">
+    <section class="exam-center">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">ASSESSMENTS</p>
@@ -102,7 +102,7 @@ function openExam(exam) {
           </button>
         </article>
       </section>
-    </main>
+    </section>
 
     <ConfirmDialog
       v-if="waitingExam"

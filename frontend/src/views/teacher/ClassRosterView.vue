@@ -97,8 +97,8 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
-    <main class="roster-page">
+  <AppLayout content-mode="list">
+    <section class="roster-page">
       <section class="page-head">
         <div class="ph-title">
           <p class="eyebrow">教学 / 班级</p>
@@ -113,7 +113,7 @@ onMounted(load)
         <div class="metric"><span class="m-value">{{ studentTotal }}</span><span class="m-label">筛选结果</span></div>
       </section>
 
-      <div class="grid-2-1 roster-grid">
+      <div class="roster-grid">
         <section class="panel">
           <div class="panel-head"><div class="ph-label"><p class="eyebrow">Classes</p><h3>教学班</h3></div></div>
           <div class="panel-body">
@@ -174,13 +174,13 @@ onMounted(load)
           </div>
         </section>
       </div>
-    </main>
+    </section>
   </AppLayout>
 </template>
 
 <style scoped>
 .roster-page { display: flex; flex-direction: column; gap: var(--space-5); }
-.roster-grid { align-items: start; }
+.roster-grid { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .loading-text { color: var(--muted); padding: 12px 0; }
 .class-list { display: flex; flex-direction: column; }
 .class-row {
@@ -193,6 +193,8 @@ onMounted(load)
   border-radius: var(--radius-md);
   background: transparent;
   text-align: left;
+  align-items: flex-start;
+  width: 100%;
 }
 .class-row:hover, .class-row.active { background: var(--accent-faint); border-color: var(--accent-soft); }
 .class-title { font-weight: 600; color: var(--fg); }

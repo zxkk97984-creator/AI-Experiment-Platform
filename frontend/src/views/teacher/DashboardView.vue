@@ -196,7 +196,7 @@ onMounted(loadDashboard)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="teacher-dashboard">
       <section class="intro-section">
         <div>
@@ -318,16 +318,16 @@ onMounted(loadDashboard)
 </template>
 
 <style scoped>
-.teacher-dashboard { width: min(1480px, 100%); margin: 0 auto; padding: 34px 34px 56px; }
-.intro-section { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; padding: 4px 0 28px; }
+.teacher-dashboard { width: min(1480px, 100%); margin: 0 auto; padding: 0 0 24px; }
+.intro-section { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; padding: 4px 0 16px; }
 .date-line, .eyebrow, .focus-kicker { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: .08em; }
-.intro-section h1 { margin: 6px 0 0; font-family: var(--font-display); font-size: 34px; line-height: 1.2; letter-spacing: -.02em; }
+.intro-section h1 { margin: 6px 0 0; font-family: var(--font-display); font-size: 32px; line-height: 1.2; letter-spacing: -.02em; }
 .intro-copy { margin: 8px 0 0; color: var(--muted); }
 .current-term { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: var(--text-sm); }
 .current-term strong { min-height: 40px; display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); font-size: var(--text-base); font-weight: 500; }
-.overview-section, .workspace-section, .recent-section { padding: 22px 0; border-top: 1px solid var(--border); }
+.overview-section, .workspace-section, .recent-section { padding: 16px 0; border-top: 1px solid var(--border); }
 .overview-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
-.metric { min-height: 88px; padding: 18px 20px; }
+.metric { min-height: 68px; padding: 12px 16px; }
 .metric + .metric { border-left: 1px solid var(--border); }
 .metric strong { display: block; font-family: var(--font-mono); font-size: 23px; line-height: 1; font-variant-numeric: tabular-nums; }
 .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: var(--text-sm); }
@@ -338,9 +338,9 @@ onMounted(loadDashboard)
 .teacher-card { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
 .card-head { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 18px; border-bottom: 1px solid var(--border); }
 .card-head h2, .section-heading h2 { margin: 2px 0 0; font-family: var(--font-display); font-size: 19px; line-height: 1.25; }
-.focus-card { padding: 24px; }
+.focus-card { padding: 20px; }
 .focus-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: start; }
-.focus-card h2 { margin: 8px 0 0; font-family: var(--font-display); font-size: 28px; line-height: 1.25; }
+.focus-card h2 { margin: 8px 0 0; font-family: var(--font-display); font-size: 24px; line-height: 1.3; }
 .focus-meta { margin: 8px 0 0; color: var(--muted); font-size: var(--text-base); }
 .review-breakdown { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 24px; border-top: 1px solid var(--border); }
 .review-stat { min-width: 0; padding: 18px 14px 0 0; color: var(--muted); font-size: var(--text-sm); }

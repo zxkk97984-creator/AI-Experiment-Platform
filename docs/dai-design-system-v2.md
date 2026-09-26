@@ -314,15 +314,17 @@
 
 ### 5.5 下拉选择
 
-```html
-<label class="select">
-  <select>…</select>
-</label>
+```vue
+<DsSelect v-model="status" aria-label="状态筛选">
+  <option value="all">全部状态</option>
+  <option value="active">启用</option>
+</DsSelect>
 ```
 
-- 矩形边框控件，非 Pill；32px 高、5px 圆角、自绘箭头（背景 SVG，右侧 9px）。
-- hover 边框 `--fg`；`focus-within` 边框 `--accent` + 3px `--accent-soft` 光环。
-- 工具栏 select 宽 130–170px；多选用「复选 + 计数」表达，不得做成胶囊堆。
+- 统一使用全局 `DsSelect`，不要直接新增原生 `select`。组件保留原生表单值、必填、禁用和 `v-model.number` 语义，但由页面内浮层呈现选项，避免系统菜单向上覆盖标题或越出视口。
+- 矩形边框控件，非 Pill；默认 32px 高、5px 圆角。菜单优先向下展开；空间不足时才向上，并钳制在 12px 视口安全边距内。
+- 支持方向键、Home/End、输入前缀定位、Enter/Space 选择、Escape/Tab 关闭，以及选择后焦点恢复。
+- hover 边框 `--fg`；展开/聚焦边框 `--accent` + 3px `--accent-soft` 光环。工具栏宽度通常 130–170px；多选继续使用专用的「复选 + 计数」组件。
 
 ### 5.6 搜索
 
@@ -709,3 +711,28 @@
 | `.workbench` / `.wb-col` | `AIGradingReviewDetailView.vue` | 保持评分详情双栏布局 |
 | `.evidence-list` / `.ev-chip` | AI 评分组件 | 保持事实 / AI 建议 / 教师终审的视觉区分 |
 | `.confirm-bar` | AI 评分详情 | 需要 sticky 底栏的工作台页通用组件 |
+
+## 桌面内容布局模式（2026-09 UI 整改）
+
+`AppLayout` 新增可选 `contentMode`，默认 `list`；模板使用 `content-mode`。布局模式独立于原有 `variant`，不改变导航、权限或业务接口。
+
+| 模式 | 使用场景 | 内容宽度 |
+| --- | --- | --- |
+| `list` | 管理列表、首页、统计 | 使用可用宽度 |
+| `form` | 用户资料、安全、普通设置 | 最大 960px |
+| `reading` | 讲义正文与目录 | 容器最大 1080px，正文约 780px，目录独立 |
+| `workspace` | 代码、题目编辑、评分、Notebook | 使用可用宽度，页面按任务分栏 |
+
+```vue
+<AppLayout content-mode="form">
+  <section class="account-page">...</section>
+</AppLayout>
+```
+
+`AppLayout` 已提供主 `main` 地标，页面内容使用 `section` 或 `div`，避免重复地标。桌面页面沿用 24px 边距，普通标题 24px，首页不超过 32px。使用已有间距变量，不重复设置容器左右偏移或负外边距。
+
+列表按标题/主操作、紧凑统计、筛选、数据、分页排列。长班级信息可复用 `ClassSummary`，用原生展开交互保留完整内容。窄选择栏通常 280px，主名单/编辑区使用 `minmax(0, 1fr)`；设置高度限制的 Flex 列表必须避免条目收缩重叠。
+
+弹窗标题与操作区不收缩，正文拥有滚动区。缺少焦点管理的本地弹窗可引入 `vDialogFocus`，它负责初始焦点、Tab 循环及关闭后返回触发控件；Escape、取消和忙碌状态仍由原组件处理。已有独立焦点管理的弹窗不可重复绑定。
+
+桌面回归清单与前后截图见 [UI 布局验收](ui-layout-verification.md)。

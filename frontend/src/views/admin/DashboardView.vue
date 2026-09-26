@@ -38,7 +38,7 @@ function statusText(s) {
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <div class="dash">
       <!-- ── Hero / Page Head ──────────────────────────────────────────── -->
       <header class="page-head hero">
@@ -466,4 +466,10 @@ function statusText(s) {
   .stat-num { font-size: 20px; }
   .panel-card { padding: 18px; }
 }
+
+.hero { padding: 20px 24px; min-height: 0; }
+.hero-title { font-size: 32px; }
+.hero-visual { max-height: 120px; }
+.stat-card { min-height: 72px; padding: 16px; }
+.dash-grid { grid-template-columns: minmax(0, 1fr) 320px; align-items: start; }
 </style>

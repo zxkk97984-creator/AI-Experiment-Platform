@@ -49,7 +49,7 @@ onMounted(load)
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="workspace">
     <div class="judge-detail-page">
       <button class="back-link" @click="router.back()"><AppIcon name="back" :size="17" />返回</button>
       <section class="page-head">

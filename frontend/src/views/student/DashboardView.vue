@@ -331,8 +331,8 @@ onMounted(loadDashboard)
 </script>
 
 <template>
-  <AppLayout :student-context="studentContext">
-    <main class="student-dashboard">
+  <AppLayout content-mode="list" :student-context="studentContext">
+    <section class="student-dashboard">
       <section class="dashboard-section welcome-section">
         <div>
           <p class="greeting-date">{{ todayText }}</p>
@@ -486,7 +486,7 @@ onMounted(loadDashboard)
                   <div><strong>{{ todayDay }}</strong><span>{{ todayMonth }}</span></div>
                   <span>{{ todayWeekday }}</span>
                 </div>
-                <p class="schedule-note">{{ scheduleNote }}</p>
+                <p v-if="scheduleItems.length" class="schedule-note">{{ scheduleNote }}</p>
                 <DashboardAsyncState
                   :loading="loading"
                   :error="error"
@@ -600,7 +600,7 @@ onMounted(loadDashboard)
           <p v-else class="term-empty">当前学期暂无课程。</p>
         </DashboardAsyncState>
       </section>
-    </main>
+    </section>
   </AppLayout>
 </template>
 
@@ -614,7 +614,7 @@ onMounted(loadDashboard)
   --workspace-accent: oklch(0.5179 0.0909 158.07);
   width: min(1480px, 100%);
   margin: 0 auto;
-  padding: 34px 34px 56px;
+  padding: 0 0 24px;
   color: var(--workspace-fg);
   font-family: var(--font-body);
   font-size: var(--text-md);
@@ -625,7 +625,7 @@ onMounted(loadDashboard)
 .student-dashboard *::before,
 .student-dashboard *::after { box-sizing: border-box; }
 
-.dashboard-section { padding-block: 22px; }
+.dashboard-section { padding-block: 16px; }
 .dashboard-section + .dashboard-section { border-top: 1px solid var(--workspace-border); }
 
 .welcome-section {
@@ -634,7 +634,7 @@ onMounted(loadDashboard)
   justify-content: space-between;
   gap: 28px;
   padding-top: 4px;
-  padding-bottom: 28px;
+  padding-bottom: 16px;
 }
 
 .greeting-date {
@@ -648,7 +648,7 @@ onMounted(loadDashboard)
 .greeting-title {
   margin: 0;
   font-family: var(--font-display);
-  font-size: clamp(32px, 4vw, 48px);
+  font-size: 32px;
   font-weight: 700;
   line-height: 1.14;
   letter-spacing: -0.025em;
@@ -672,7 +672,7 @@ onMounted(loadDashboard)
   background: var(--workspace-surface);
 }
 
-.overview-metric { min-height: 92px; padding: 18px 20px; }
+.overview-metric { min-height: 72px; padding: 12px 16px; }
 .overview-metric + .overview-metric { border-left: 1px solid var(--workspace-border); }
 .summary-num {
   display: block;
@@ -744,7 +744,7 @@ onMounted(loadDashboard)
 .focus-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: start; }
 .focus-copy { min-width: 0; }
 .focus-kicker { margin: 0; color: var(--workspace-muted); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; }
-.focus-title { margin: 8px 0 0; font-family: var(--font-display); font-size: clamp(25px, 3vw, 34px); line-height: 1.2; }
+.focus-title { margin: 8px 0 0; font-family: var(--font-display); font-size: 24px; line-height: 1.2; }
 .focus-meta { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 8px 0 0; color: var(--workspace-muted); font-size: 13px; }
 .focus-meta span + span::before { content: "·"; margin-right: 14px; }
 .learning-path { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 26px; border-top: 1px solid var(--workspace-border); }
