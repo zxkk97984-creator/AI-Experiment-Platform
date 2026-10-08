@@ -3,11 +3,13 @@ import logging
 import re
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.errors import api_error
 from app.models import Exam, ExamAnswer, ExamGrade, ExamQuestion, ExamSubmission, QuestionRubric, User
 from app.services.student_ai_results import build_student_grading_breakdown
+from app.services.offering_service import require_student_task_write
 
 logger = logging.getLogger("dai.exam_service")
 
@@ -160,9 +162,11 @@ def validate_publish(exam, db):
         raise api_error(422, "QUESTION_INVALID", "题目校验失败：" + "; ".join(all_errors))
 def start_exam(exam, student, db):
     from app.services.time_utils import as_utc, utc_now
+    exam = require_student_task_write(db, exam, student)
     now = utc_now()
     existing = db.scalar(select(ExamSubmission).where(
-        ExamSubmission.exam_id == exam.id, ExamSubmission.student_id == student.id))
+        ExamSubmission.exam_id == exam.id, ExamSubmission.student_id == student.id)
+        .with_for_update().execution_options(populate_existing=True))
     if existing:
         if existing.status == "started":
             if existing.expires_at and as_utc(existing.expires_at) <= now:
@@ -170,6 +174,10 @@ def start_exam(exam, student, db):
                 db.refresh(existing)
             return existing
         raise api_error(403, "EXAM_ALREADY_SUBMITTED", "考试已提交")
+    if exam.start_at is not None and as_utc(exam.start_at) > now:
+        raise api_error(403, 'EXAM_NOT_STARTED', '考试尚未开始')
+    if exam.end_at is not None and as_utc(exam.end_at) <= now:
+        raise api_error(403, 'EXAM_EXPIRED', '考试已结束')
     expires_at = now + timedelta(minutes=exam.duration_minutes)
     sub = ExamSubmission(exam_id=exam.id, student_id=student.id, status="started",
                          started_at=now, expires_at=expires_at)
@@ -181,8 +189,13 @@ def start_exam(exam, student, db):
 
 def save_answer(db, exam_id, question_id, student, payload):
     from app.services.time_utils import as_utc, utc_now
+    exam = db.get(Exam, exam_id)
+    if not exam:
+        raise api_error(404, 'EXAM_NOT_FOUND', '考试不存在')
+    require_student_task_write(db, exam, student)
     sub = db.scalar(select(ExamSubmission).where(
-        ExamSubmission.exam_id == exam_id, ExamSubmission.student_id == student.id))
+        ExamSubmission.exam_id == exam_id, ExamSubmission.student_id == student.id)
+        .with_for_update().execution_options(populate_existing=True))
     if not sub or sub.status != "started":
         raise api_error(403, "EXAM_NOT_STARTED", "考试未开始或已结束")
     now = utc_now()
@@ -193,7 +206,8 @@ def save_answer(db, exam_id, question_id, student, payload):
     if not q or q.exam_id != exam_id:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
     ans = db.scalar(select(ExamAnswer).where(
-        ExamAnswer.submission_id == sub.id, ExamAnswer.question_id == question_id))
+        ExamAnswer.submission_id == sub.id, ExamAnswer.question_id == question_id)
+        .with_for_update().execution_options(populate_existing=True))
     if not ans:
         expected_version = payload.get("expected_version")
         if expected_version not in (None, 0):
@@ -237,13 +251,17 @@ def submit_exam(exam, student, db):
     now = utc_now()
     sub = db.scalar(select(ExamSubmission).where(
         ExamSubmission.exam_id == exam.id, ExamSubmission.student_id == student.id))
-    if not sub:
-        sub = ExamSubmission(exam_id=exam.id, student_id=student.id, status="started",
-                             started_at=now, expires_at=now + timedelta(minutes=exam.duration_minutes))
-        db.add(sub)
-        db.flush()
-    if sub.status in ("submitted", "grading", "graded", "review_required"):
+    if sub and sub.status in _COMPLETED_SUBMISSION_STATUSES:
         return sub
+    exam = require_student_task_write(db, exam, student)
+    sub = db.scalar(select(ExamSubmission).where(
+        ExamSubmission.exam_id == exam.id, ExamSubmission.student_id == student.id)
+        .with_for_update().execution_options(populate_existing=True))
+    if not sub:
+        raise api_error(403, 'EXAM_NOT_STARTED', '请先开始考试')
+    if sub.status in _COMPLETED_SUBMISSION_STATUSES:
+        return sub
+    now = utc_now()
 
     # 截止时的交卷请求也必须幂等成功：服务端按超时原因收卷后直接返回
     # 当前提交，避免客户端在零秒不断重试并把成功状态误报为失败。
@@ -266,7 +284,11 @@ def _prepare_answers(sub, db):
     处理（system_error + 父 review_required），绝不按 0 分结算。
     """
     questions = db.scalars(select(ExamQuestion).where(ExamQuestion.exam_id == sub.exam_id)).all()
-    answers = db.scalars(select(ExamAnswer).where(ExamAnswer.submission_id == sub.id)).all()
+    # A collector may have waited behind the student's parent-row lock after
+    # caching an older answer. Grade the committed answer, not that RR snapshot.
+    answers = db.scalars(select(ExamAnswer).where(ExamAnswer.submission_id == sub.id)
+                         .order_by(ExamAnswer.id).with_for_update()
+                         .execution_options(populate_existing=True)).all()
     by_qid = {a.question_id: a for a in answers}
     code_answers = []
 
@@ -633,8 +655,21 @@ def build_student_exam_session(exam: Exam, student: User, db: Session) -> dict:
         ExamSubmission.student_id == student.id,
     ))
     if submission and submission.status == "started" and submission.expires_at and as_utc(submission.expires_at) <= now:
-        _auto_submit(submission, db, now)
-        db.refresh(submission)
+        try:
+            require_student_task_write(db, exam, student)
+        except HTTPException as exc:
+            if not isinstance(exc.detail, dict) or exc.detail.get('code') != 'OFFERING_READ_ONLY':
+                raise
+            # Legacy inconsistent attempts in a closed context are recovered
+            # by the system scanner; a student's GET remains strictly read-only.
+            db.rollback()
+        else:
+            submission = db.scalar(select(ExamSubmission).where(ExamSubmission.id == submission.id)
+                                   .with_for_update().execution_options(populate_existing=True))
+            if (submission.status == 'started' and submission.expires_at
+                    and as_utc(submission.expires_at) <= utc_now()):
+                _auto_submit(submission, db, utc_now())
+                db.refresh(submission)
 
     summary = build_student_exam_summary(exam, submission, db, now)
     score_visible = bool(submission and submission.status == "graded" and exam.show_score_after_grading)

@@ -17,6 +17,8 @@ from app.schemas import (
     TeachingClassUpdate, UserRead,
 )
 from app.services.roster_service import sync_courses_for_class
+from app.services.offering_service import require_no_started_exams
+from app.services.teaching_query_policy import lock_current_actor
 
 router = APIRouter(tags=["academics"])
 
@@ -61,8 +63,9 @@ def create_term(payload: AcademicTermCreate, db: Session = Depends(get_db), _: U
 
 @router.patch("/academic-terms/{term_id}", response_model=AcademicTermRead)
 def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    lock_policy(db)
-    term = db.get(AcademicTerm, term_id)
+    _ = lock_current_actor(db, _)
+    term = db.scalar(select(AcademicTerm).where(AcademicTerm.id == term_id)
+                     .with_for_update().execution_options(populate_existing=True))
     if not term:
         raise api_error(404, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
     updates = payload.model_dump(exclude_unset=True)
@@ -72,6 +75,8 @@ def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends
     end = updates.get("end_date", term.end_date)
     if end < start:
         raise api_error(422, "INVALID_TERM_DATES", "学期结束日期不能早于开始日期")
+    if updates.get('status') == 'closed':
+        require_no_started_exams(db, term_id=term_id)
     audit(db, _.id, 'term.update', 'academic_term', term_id, changes=updates)
     for key, value in updates.items():
         setattr(term, key, value)
@@ -86,10 +91,12 @@ def update_term(term_id: int, payload: AcademicTermUpdate, db: Session = Depends
 
 @router.delete("/academic-terms/{term_id}", response_model=AcademicTermRead)
 def close_term(term_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    lock_policy(db)
-    term = db.get(AcademicTerm, term_id)
+    _ = lock_current_actor(db, _)
+    term = db.scalar(select(AcademicTerm).where(AcademicTerm.id == term_id)
+                     .with_for_update().execution_options(populate_existing=True))
     if not term:
         raise api_error(404, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
+    require_no_started_exams(db, term_id=term_id)
     audit(db, _.id, "term.close", "academic_term", term_id)
     term.status = "closed"
     db.commit(); db.refresh(term)
@@ -146,13 +153,18 @@ def create_class(payload: TeachingClassCreate, db: Session = Depends(get_db), _:
 
 @router.patch("/teaching-classes/{class_id}", response_model=TeachingClassSummary)
 def update_class(class_id: int, payload: TeachingClassUpdate, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    lock_policy(db)
-    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
+    _ = lock_current_actor(db, _)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id)
+                    .with_for_update().execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
-    _term_writable(row.academic_term)
+    term = db.scalar(select(AcademicTerm).where(AcademicTerm.id == row.academic_term_id)
+                     .with_for_update().execution_options(populate_existing=True))
+    _term_writable(term)
     if row.status == 'archived':
         raise api_error(409, 'TEACHING_CLASS_ARCHIVED', '已归档教学班不可修改')
+    if payload.status == 'archived':
+        require_no_started_exams(db, class_id=class_id)
     audit(db, _.id, 'class.update', 'teaching_class', class_id, changes=payload.model_dump(exclude_unset=True))
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(row, key, value)
@@ -167,11 +179,15 @@ def update_class(class_id: int, payload: TeachingClassUpdate, db: Session = Depe
 
 @router.delete("/teaching-classes/{class_id}", response_model=TeachingClassSummary)
 def archive_class(class_id: int, db: Session = Depends(get_db), _: User = Depends(require_roles("admin"))):
-    lock_policy(db)
-    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id).execution_options(populate_existing=True))
+    _ = lock_current_actor(db, _)
+    row = db.scalar(select(TeachingClass).where(TeachingClass.id == class_id)
+                    .with_for_update().execution_options(populate_existing=True))
     if not row:
         raise api_error(404, "TEACHING_CLASS_NOT_FOUND", "教学班不存在")
-    _term_writable(row.academic_term)
+    term = db.scalar(select(AcademicTerm).where(AcademicTerm.id == row.academic_term_id)
+                     .with_for_update().execution_options(populate_existing=True))
+    _term_writable(term)
+    require_no_started_exams(db, class_id=class_id)
     audit(db, _.id, "class.archive", "teaching_class", class_id)
     row.status = "archived"
     db.commit(); db.refresh(row)

@@ -187,6 +187,8 @@ def update_offering(offering_id: int, payload: OfferingUpdate, db=Depends(get_db
     row = _current(db, CourseOffering, offering_id)
     if not row:
         raise api_error(404, 'OFFERING_NOT_FOUND', '授课实例不存在')
+    if row.status == 'active' and payload.status and payload.status != 'active':
+        scope.require_no_started_exams(db, offering_id=offering_id)
     if payload.teacher_id:
         _teacher(db, payload.teacher_id)
         row.teacher_id = payload.teacher_id

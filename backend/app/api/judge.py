@@ -25,6 +25,7 @@ from app.services.time_utils import as_utc, utc_now
 from app.worker.judge_worker import _get_timeout, _run_docker_pytest, _status_from_pytest
 from app.services.student_ai_results import build_student_grading_breakdown
 from app.services.audience_service import student_in_assignment_audience
+from app.services.offering_service import require_student_task_write
 
 router = APIRouter(prefix="/judge", tags=["judge"])
 
@@ -81,6 +82,7 @@ def create_submission(
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
     if assignment.status != "published":
         raise api_error(400, "ASSIGNMENT_NOT_AVAILABLE", "作业不可提交")
+    assignment = require_student_task_write(db, assignment, current_user)
     course = db.get(Course, assignment.course_id)
     if current_user.role == "student":
         if not course or not (
@@ -279,6 +281,7 @@ def sample_run(
     assignment = db.get(Assignment, question.assignment_id)
     if not assignment:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
+    assignment = require_student_task_write(db, assignment, current_user)
     if assignment.status != "published":
         raise api_error(403, "ASSIGNMENT_NOT_AVAILABLE", "作业未发布")
     course = db.get(Course, assignment.course_id)
@@ -336,11 +339,14 @@ def sample_run(
         expected = case.get("expected")
         args_str = ", ".join(repr(a) for a in args)
         test_code += f"    assert {question.function_name}({args_str}) == {repr(expected)}\n"
+    # All runtime inputs are resolved before releasing the short policy lock.
+    # Self-tests persist no result and must not hold teaching locks during Docker.
+    timeout_seconds = _get_timeout(question, settings)
+    memory_mb = question.memory_limit_mb or settings.judge_memory_limit_mb
+    db.commit()
     with tempfile.TemporaryDirectory(prefix="dai-sample-") as temp_dir:
         workdir = Path(temp_dir)
         (workdir / "test_sample.py").write_text(test_code, encoding="utf-8")
-        timeout_seconds = _get_timeout(question, settings)
-        memory_mb = question.memory_limit_mb or settings.judge_memory_limit_mb
 
         try:
             stdout, stderr, returncode, elapsed_ms = _run_docker_pytest(

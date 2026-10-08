@@ -29,7 +29,7 @@ from app.services.audience_service import (
 )
 from app.worker.judge_worker import _run_docker_pytest, _status_from_pytest
 
-from app.services.offering_service import task_content_manager, teacher_task_condition
+from app.services.offering_service import require_student_task_write, task_content_manager, teacher_task_condition
 
 def ensure_exam_manager(exam, user, db=None):
     from sqlalchemy.orm import object_session
@@ -471,6 +471,7 @@ def run_exam_public_cases(
 ):
     """运行考试编程题的公开样例，不读取隐藏测试、不产生正式评分。"""
     exam = require_exam(exam_id, db)
+    exam = require_student_task_write(db, exam, current_user)
     if exam.status != "published" or not _student_exam_allowed(exam, current_user, db):
         raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
     if not student_in_exam_audience(db, exam, current_user.id):
@@ -479,7 +480,7 @@ def run_exam_public_cases(
     submission = db.scalar(select(ExamSubmission).where(
         ExamSubmission.exam_id == exam_id,
         ExamSubmission.student_id == current_user.id,
-    ))
+    ).with_for_update().execution_options(populate_existing=True))
     now = utc_now()
     if not submission or submission.status != "started":
         raise api_error(403, "EXAM_NOT_STARTED", "考试未开始或已结束")
@@ -514,15 +515,18 @@ def run_exam_public_cases(
         args_text = ", ".join(repr(arg) for arg in args)
         test_lines.append(f"    assert {function_name}({args_text}) == {expected!r}")
 
+    timeout_seconds = max(
+        min(math.ceil((question.time_limit_ms or 10_000) / 1000), settings.judge_timeout_seconds),
+        1,
+    )
+    memory_mb = question.memory_limit_mb or settings.judge_memory_limit_mb
+    # Sample execution has no database completion write. Release teaching locks
+    # before the potentially slow Docker call using these frozen scalar inputs.
+    db.commit()
     with tempfile.TemporaryDirectory(prefix="dai-exam-sample-") as temp_dir:
         workdir = Path(temp_dir)
         (workdir / "user_code.py").write_text(payload.code, encoding="utf-8")
         (workdir / "test_public_cases.py").write_text("\n".join(test_lines) + "\n", encoding="utf-8")
-        timeout_seconds = max(
-            min(math.ceil((question.time_limit_ms or 10_000) / 1000), settings.judge_timeout_seconds),
-            1,
-        )
-        memory_mb = question.memory_limit_mb or settings.judge_memory_limit_mb
         try:
             stdout, stderr, returncode, elapsed_ms = _run_docker_pytest(
                 workdir,
@@ -578,6 +582,19 @@ def submit_exam(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
+    # A received submission remains an idempotent read even after the offering
+    # is archived or its audience changes. First prove ownership of a terminal
+    # attempt; only then opt into the narrow historical task projection.
+    completed = db.scalar(select(ExamSubmission).where(
+        ExamSubmission.exam_id == exam_id,
+        ExamSubmission.student_id == current_user.id,
+        ExamSubmission.status.in_(("submitted", "grading", "graded", "review_required")),
+    ))
+    if completed is not None:
+        historical_exam = db.scalar(select(Exam).where(Exam.id == exam_id)
+                                    .execution_options(teaching_history=True))
+        if historical_exam is not None:
+            return _with_submission_aliases(build_student_exam_session(historical_exam, current_user, db))
     exam = require_exam(exam_id, db)
     course = db.get(Course, exam.course_id)
     if not course or not _student_exam_allowed(exam, current_user, db):

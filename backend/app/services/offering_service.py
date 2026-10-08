@@ -83,6 +83,49 @@ def require_offering(db, ident, user, write=False):
     return offering
 
 
+def require_no_started_exams(db, *, term_id=None, class_id=None, offering_id=None):
+    """Check closure under the caller's policy lock using an InnoDB current read.
+
+    Expired attempts still need collection; publication and roster changes do
+    not make an outstanding attempt safe to abandon. This never runs a job.
+    """
+    from app.models import Exam, ExamSubmission
+
+    if sum(value is not None for value in (term_id, class_id, offering_id)) != 1:
+        raise ValueError('Exactly one teaching context is required')
+    query = (select(ExamSubmission.id).join(Exam, Exam.id == ExamSubmission.exam_id)
+             .join(CourseOffering, CourseOffering.id == Exam.offering_id)
+             .where(ExamSubmission.status == 'started'))
+    if term_id is not None:
+        query = query.where(CourseOffering.academic_term_id == term_id)
+    elif class_id is not None:
+        query = query.where(CourseOffering.teaching_class_id == class_id)
+    else:
+        query = query.where(CourseOffering.id == offering_id)
+    if db.scalar(query.order_by(ExamSubmission.id).limit(1).with_for_update()) is not None:
+        raise api_error(409, 'EXAMS_IN_PROGRESS', '仍有考试未收卷，请先完成收卷后再关闭或归档')
+
+
+def require_student_task_write(db, task, student):
+    """Refresh task and teaching authority before each short student write."""
+    from app.services.teaching_query_policy import lock_current_actor
+
+    student = lock_current_actor(db, student)
+    if student.role != 'student':
+        raise api_error(403, 'FORBIDDEN', '仅学生可以提交教学任务')
+    model = type(task)
+    current = db.scalar(select(model).where(model.id == task.id).with_for_update()
+                        .execution_options(populate_existing=True))
+    if not current:
+        raise api_error(404, 'TASK_NOT_FOUND', '教学任务不存在或无权访问')
+    if current.offering_id is None:
+        raise api_error(403, 'TASK_SCOPE_REQUIRED', '历史任务尚未确认授课归属')
+    require_offering(db, current.offering_id, student, write=True)
+    if current.status != 'published':
+        raise api_error(403, f'{model.__name__.upper()}_NOT_AVAILABLE', '教学任务未发布')
+    return current
+
+
 def record_teaching_access(db, record, user, write=False):
     if write:
         from app.models import ExperimentRecord
