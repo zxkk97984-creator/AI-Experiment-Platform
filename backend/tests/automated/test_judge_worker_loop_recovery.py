@@ -66,7 +66,7 @@ class Loop:
                 raise outcome
             return outcome
 
-        self.client = SimpleNamespace(brpop=pop)
+        self.client = SimpleNamespace(blpop=pop)
 
         def from_url(url, **kwargs):
             self.connections.append((url, kwargs))
@@ -196,7 +196,7 @@ def test_consumer_socket_timeout_exceeds_the_blocking_pop_timeout(monkeypatch):
     loop = Loop(monkeypatch, messages=0)
     loop.run()
     assert loop.connections == [(loop.settings.redis_url, {
-        "decode_responses": True, "socket_connect_timeout": 2, "socket_timeout": 7})]
+        "decode_responses": True, "encoding_errors": "replace", "socket_connect_timeout": 2, "socket_timeout": 7})]
     assert all(timeout == 5 for _queues, timeout in loop.pop_calls)
 
 

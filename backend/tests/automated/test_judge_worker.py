@@ -291,23 +291,15 @@ def test_get_timeout_values():
 # P0 回归测试
 # ═══════════════════════════════════════════════════════════════
 
-def test_p0_1_brpop_receives_list_of_queues():
-    """P0-1: Worker 必须用 brpop([q1, q2], timeout=0) 而不是 brpop(q1, q2)"""
-    import fakeredis
-    from app.config import Settings
+def test_p0_1_worker_passes_queue_sequence_to_blocking_pop(monkeypatch):
+    """Exercise the actual worker's Redis call, including FIFO direction."""
+    from test_judge_worker_fifo import _message, _redis_loop
 
-    r = fakeredis.FakeRedis(decode_responses=True)
-    # 用正确的调用方式验证可以正常阻塞（fakeredis 支持 brpop 列表参数）
-    r.rpush("judge:queue", "123")
-    result = r.brpop(["judge:queue", "judge:exam:queue"], timeout=0)
-    assert result is not None
-    queue_name, value = result
-    assert queue_name == "judge:queue"
-    assert value == "123"
-
-    # 验证不带列表的调用会报错（第二个参数被当作 timeout）
-    with pytest.raises(Exception):
-        r.brpop("judge:queue", "judge:exam:queue")
+    loop, client, popped = _redis_loop(monkeypatch)
+    client.rpush("judge:queue", _message(123))
+    loop.run()
+    assert loop.processed == [123]
+    assert popped[0][:2] == ("blpop", ("judge:queue", "judge:exam:queue"))
 
 
 def test_p0_2_exam_functions_defined_at_module_level():

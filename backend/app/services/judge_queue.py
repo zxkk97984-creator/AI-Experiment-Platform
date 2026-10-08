@@ -68,7 +68,7 @@ def enqueue_job(db: Session, *, job_type: str, object_id: int) -> bool:
     """
     if job_type == "assignment":
         model = Submission
-        queue_key = JUDGE_QUEUE
+        queue_key = get_settings().judge_queue_name
     elif job_type == "exam":
         model = ExamAnswer
         queue_key = EXAM_JUDGE_QUEUE
@@ -255,7 +255,7 @@ def requeue_stale_jobs(db: Session, *, job_type: str | None = None,
 
     models_to_scan = []
     if job_type in (None, "assignment"):
-        models_to_scan.append(("assignment", Submission, JUDGE_QUEUE))
+        models_to_scan.append(("assignment", Submission, get_settings().judge_queue_name))
     if job_type in (None, "exam"):
         models_to_scan.append(("exam", ExamAnswer, EXAM_JUDGE_QUEUE))
 

@@ -990,13 +990,13 @@ def run_worker_loop():
 
     settings = get_settings()
     worker_role = settings.worker_role
-    queues = _worker_queue_names(settings)
+    queues = list(_worker_queue_names(settings))
     if not queues:
         logger.info("AI worker 未启用，退出消费循环")
         return
 
     redis_client = _redis.Redis.from_url(
-        settings.redis_url, decode_responses=True,
+        settings.redis_url, decode_responses=True, encoding_errors="replace",
         socket_connect_timeout=2, socket_timeout=7,
     )
     import socket
@@ -1021,38 +1021,45 @@ def run_worker_loop():
                 next_recovery = time.monotonic() + 120
 
         try:
-            result = redis_client.brpop(queues, timeout=5)
+            result = redis_client.blpop(queues, timeout=5)
             if result is None:
                 continue
 
             queue_name, raw_data = result
+            # Rotate every consumed message before decoding or claiming it.
+            # Invalid/duplicate messages must not monopolize the first queue.
+            queues.remove(queue_name)
+            queues.append(queue_name)
         except Exception:
-            logger.exception("brpop 异常")
+            logger.exception("blpop 异常")
             time.sleep(1)
             continue
 
         try:
             payload = _json.loads(raw_data)
+            if not isinstance(payload, dict):
+                raise ValueError("queue message must be an object")
+            msg_type = payload.get("type")
+            job_id = payload.get("id")
+            expected_type = ("ai_grade" if worker_role == "ai" else
+                             "exam" if queue_name == EXAM_JUDGE_QUEUE else "assignment")
+            if (msg_type != expected_type or type(job_id) is not int or job_id <= 0
+                    or ("attempt" in payload and
+                        (type(payload["attempt"]) is not int or payload["attempt"] < 0))):
+                raise ValueError("invalid queue message fields")
         except Exception:
-            logger.warning("无法解析消息: %s", raw_data[:100])
+            # The parser can also reject deeply nested JSON with RecursionError.
+            # Keep this boundary around decoding/validation, never execution.
+            logger.warning("无效判题消息，已忽略: queue=%s", queue_name)
             continue
 
-        msg_type = payload.get("type", "")
-        job_id = payload.get("id")
-
         if worker_role == "ai":
-            if msg_type != "ai_grade":
-                logger.warning("AI worker 忽略非 AI 消息: queue=%s", queue_name)
-                continue
             try:
                 with SessionLocal() as db:
                     process_ai_grade(db, redis_client, settings, job_id)
             except Exception:
                 logger.exception("AI 评分异常: id=%s", job_id)
-        elif msg_type == "ai_grade":
-            logger.warning("Judge worker 忽略 AI 消息: queue=%s", queue_name)
-            continue
-        elif queue_name == EXAM_JUDGE_QUEUE or msg_type == "exam":
+        elif msg_type == "exam":
             try:
                 with SessionLocal() as db:
                     process_exam_answer(db, redis_client, settings, job_id)
