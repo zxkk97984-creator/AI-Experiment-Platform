@@ -178,9 +178,12 @@ def db_session_factory(test_settings):
 
 
 @pytest.fixture()
-def redis_client():
+def redis_client(monkeypatch):
+    from app.services import judge_queue
     client = fakeredis.FakeRedis(decode_responses=True)
     client.flushall()
+    # Queue service creates clients outside FastAPI dependency injection.
+    monkeypatch.setattr(judge_queue, "_get_redis", lambda: client)
     return client
 
 

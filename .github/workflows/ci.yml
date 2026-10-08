@@ -262,3 +262,54 @@ jobs:
       - name: 停止服务
         if: always()
         run: docker compose -f docker-compose.prod.yml down -v
+
+  lab-runtime:
+    name: Real CPU Judge and Lab runtime (no skips)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DAI_RUN_DOCKER_SMOKE: "1"
+      DAI_JUDGE_IMAGE: dai-judge-python:ci-runtime
+      DAI_LAB_TEST_IMAGE: dai-kernel-python:ci-runtime
+      DAI_BACKEND_BASE_IMAGE: python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install -r backend/requirements-dev.txt
+      - name: Build current sandbox images
+        timeout-minutes: 18
+        run: |
+          docker build --build-arg DAI_JUDGE_BASE_IMAGE="$DAI_BACKEND_BASE_IMAGE" -t "$DAI_JUDGE_IMAGE" backend/docker/judge
+          docker build --build-arg DAI_KERNEL_BASE_IMAGE="$DAI_BACKEND_BASE_IMAGE" -t "$DAI_LAB_TEST_IMAGE" backend/docker/kernel
+      - name: Record existing sandbox resources
+        run: |
+          docker ps -aq --no-trunc | sort > /tmp/runtime-containers.before
+          docker volume ls -q --filter label=dai.lab=true | sort > /tmp/runtime-volumes.before
+      - name: Exercise real CPU runtimes
+        timeout-minutes: 9
+        run: |
+          timeout --signal=TERM --kill-after=30s 8m python -m pytest -q \
+            backend/tests/automated/test_judge_docker_smoke.py backend/tests/automated/test_lab_runtime.py \
+            -k 'real and not pytorch' --junitxml=runtime-junit.xml
+          python scripts/check_runtime_junit.py runtime-junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpu-runtime-results
+          path: runtime-junit.xml
+      - name: Clean only this isolated job's sandbox resources
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          if [[ -f /tmp/runtime-containers.before ]]; then
+            { docker ps -aq --no-trunc --filter ancestor="$DAI_JUDGE_IMAGE"; docker ps -aq --no-trunc --filter ancestor="$DAI_LAB_TEST_IMAGE"; } | sort -u > /tmp/runtime-containers.after
+            comm -13 /tmp/runtime-containers.before /tmp/runtime-containers.after | xargs -r docker rm -fv
+          fi
+          if [[ -f /tmp/runtime-volumes.before ]]; then
+            docker volume ls -q --filter label=dai.lab=true | sort > /tmp/runtime-volumes.after
+            comm -13 /tmp/runtime-volumes.before /tmp/runtime-volumes.after | xargs -r docker volume rm
+          fi

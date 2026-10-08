@@ -18,7 +18,10 @@ def assignment_case(school, db_session_factory, monkeypatch, redis_client):  # n
         return '1 passed', '', 0, 1
 
     monkeypatch.setattr(judge, '_run_docker_pytest', run)
-    monkeypatch.setattr(judge_queue, '_get_redis', lambda: redis_client)
+    def external_redis_forbidden(*args, **kwargs):
+        raise AssertionError('API tests must use the shared FakeRedis fixture')
+
+    monkeypatch.setattr(judge_queue._redis.Redis, 'from_url', external_redis_forbidden)
     with db_session_factory() as db:
         task = Assignment(course_id=school['course'], offering_id=school['offerings'][0],
                           title='受众作业', status='published')
