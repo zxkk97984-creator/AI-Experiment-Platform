@@ -7,6 +7,8 @@ import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import SubmissionSnapshotCell from '../../components/teacher/SubmissionSnapshotCell.vue'
 import SubmissionReviewPanel from '../../components/teacher/SubmissionReviewPanel.vue'
+import LabReviewPanel from '../../components/labs/LabReviewPanel.vue'
+import { submissionStatus } from '../../components/labs/labHelpers.js'
 import { formatDateTime } from '../../utils/format.js'
 
 const route = useRoute()
@@ -18,6 +20,7 @@ const loading = ref(true)
 const loadError = ref(false)
 const saving = ref(false)
 const showEmptyCells = ref(false)
+const labEnabled = ref(false)
 
 const cells = computed(() => {
   if (!submission.value?.cells_snapshot) return []
@@ -56,6 +59,7 @@ async function load() {
   try {
     const res = await experimentsAPI.getSubmission(route.params.id)
     submission.value = res.data
+    labEnabled.value = Boolean(res.data.lab_enabled)
   } catch {
     loadError.value = true
     app.showToast('加载提交详情失败', 'error')
@@ -141,7 +145,7 @@ onMounted(load)
             <div><dt>提交时间</dt><dd>{{ formatDateTime(submission.submitted_at) }}</dd></div>
             <div>
               <dt>当前状态</dt>
-              <dd><span class="status-pill" :class="isGraded ? 'graded' : 'pending'">{{ isGraded ? '已评分' : '待评分' }}</span></dd>
+              <dd><span class="status-pill" :class="isGraded ? 'graded' : 'pending'">{{ submissionStatus(submission) }}</span></dd>
             </div>
           </dl>
         </section>
@@ -170,7 +174,10 @@ onMounted(load)
             </footer>
           </section>
 
-          <SubmissionReviewPanel :submission="submission" :saving="saving" @submit="submitReview" />
+          <div>
+            <LabReviewPanel v-if="labEnabled" :key="submission.id" :submission-id="submission.id" :enabled="labEnabled" @enabled="labEnabled = $event" @reviewed="load" />
+            <SubmissionReviewPanel v-if="!labEnabled" :submission="submission" :saving="saving" @submit="submitReview" />
+          </div>
         </div>
       </template>
     </div>

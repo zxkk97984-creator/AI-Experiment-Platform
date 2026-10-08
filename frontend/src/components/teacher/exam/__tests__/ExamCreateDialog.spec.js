@@ -54,3 +54,22 @@ describe('ExamCreateDialog', () => {
     expect(wrapper.text()).toContain('课程 ID: 7')
   })
 })
+
+
+it('creates a class exam only with an offering from the selected course', async () => {
+  const wrapper = mountDialog({ open: true, courses, offerings: [
+    { id: 7, course_id: 2, status: 'active', term_name: '秋季', class_name: '一班' },
+    { id: 8, course_id: 9, status: 'active', term_name: '秋季', class_name: '其他课程' },
+  ] })
+  await wrapper.get('[name="title"]').setValue('班级考试')
+  await wrapper.get('.course-picker').trigger('click')
+  await wrapper.get('.course-item').trigger('click')
+  expect(wrapper.get('#exam-offering').text()).not.toContain('其他课程')
+  await wrapper.get('#exam-offering').setValue('7')
+  await wrapper.get('[data-action="save-exam"]').trigger('click')
+  expect(wrapper.emitted('save')[0][0]).toMatchObject({ course_id: 2, offering_id: 7 })
+  await wrapper.get('.course-picker').trigger('click')
+  await wrapper.get('.course-id-input').setValue('9')
+  await wrapper.get('.manual-confirm').trigger('click')
+  expect(wrapper.get('#exam-offering').element.value).toBe('')
+})

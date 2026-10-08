@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.dependencies import get_current_user, get_db, require_roles, PaginationParams, pagination
 from app.errors import api_error
 from app.models import (
+    AcademicTerm,
     Chapter,
     Course,
     CourseEnrollment,
@@ -17,8 +18,10 @@ from app.models import (
     ExperimentRecord,
     ExperimentSubmission,
     Lesson,
+    LabRecord, LabSubmission, LabRun,
     NotebookTemplate,
     NotebookTemplateVersion,
+    TeachingClass,
     User,
 )
 from app.schemas import (
@@ -49,6 +52,9 @@ from app.schemas.studio import StudioTemplateCreate
 from app.services.kernel_manager import get_kernel_manager
 from app.services import studio_service
 
+from app.models.teaching import CourseOffering, OfferingExperiment
+from app.services import offering_service as offering_scope
+
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
 # ── 工具函数 ──────────────────────────────────────────────────
@@ -57,6 +63,7 @@ router = APIRouter(prefix="/experiments", tags=["experiments"])
 def _record_read(record: ExperimentRecord) -> ExperimentRecordRead:
     return ExperimentRecordRead(
         id=record.id,
+        offering_id=record.offering_id,
         lesson_id=record.lesson_id,
         module_id=record.module_id,
         student_id=record.student_id,
@@ -76,11 +83,13 @@ def _require_owner(record: ExperimentRecord, current_user: User) -> None:
 
 
 def _require_record_accessible(record: ExperimentRecord, current_user: User, db: Session) -> None:
-    """校验 record 所有权 + 其关联的 lesson/module 当前仍可访问"""
     _require_owner(record, current_user)
+    writing = db.info.get("teaching_request_method") not in ("GET", "HEAD")
+    offering_scope.record_teaching_access(db, record, current_user, write=writing)
+    offering_scope.require_delivery(db, record.offering_id, 'lesson' if record.lesson_id else 'module', record.lesson_id or record.module_id, current_user, write=writing)
     if record.lesson_id:
         _check_lesson_access(record.lesson_id, current_user.id, db)
-    elif record.module_id:
+    else:
         _check_module_access(record.module_id, db)
 
 
@@ -115,7 +124,9 @@ def _ensure_template_version(
 
 def _check_lesson_access(lesson_id: int, student_id: int, db: Session) -> Lesson:
     """校验学生有权限访问课时：课程 published + 选课 enrolled"""
-    lesson = db.get(Lesson, lesson_id)
+    writing = db.info.get("teaching_request_method") not in ("GET", "HEAD")
+    lesson = (db.scalar(select(Lesson).where(Lesson.id == lesson_id).with_for_update()
+                        .execution_options(populate_existing=True)) if writing else db.get(Lesson, lesson_id))
     if not lesson:
         raise api_error(404, "LESSON_NOT_FOUND", "课时不存在")
     chapter = lesson.chapter
@@ -131,13 +142,16 @@ def _check_lesson_access(lesson_id: int, student_id: int, db: Session) -> Lesson
             CourseEnrollment.status == "enrolled",
         )
     )
-    if not enrollment:
-        raise api_error(403, "NOT_ENROLLED", "请先选课")
+    from app.api.courses import can_access_course_content
+    if lesson.status != "published" or not can_access_course_content(course, db.get(User, student_id), db):
+        raise api_error(403, "LESSON_NOT_AVAILABLE", "课时未发布或无授课授权")
     return lesson
 
 
 def _check_module_access(module_id: int, db: Session) -> ExperimentModule:
-    module = db.get(ExperimentModule, module_id)
+    writing = db.info.get("teaching_request_method") not in ("GET", "HEAD")
+    module = (db.scalar(select(ExperimentModule).where(ExperimentModule.id == module_id).with_for_update()
+                        .execution_options(populate_existing=True)) if writing else db.get(ExperimentModule, module_id))
     if not module:
         raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
     if module.status != "published":
@@ -148,6 +162,18 @@ def _check_module_access(module_id: int, db: Session) -> ExperimentModule:
 # ── 实验模块 API（Notebook 风格 kernel 端点）───────────────────
 
 
+def _managed_module_for_write(db, module_id, current_user):
+    from app.services.teaching_query_policy import lock_current_actor
+    actor = lock_current_actor(db, current_user)
+    module = db.scalar(select(ExperimentModule).where(ExperimentModule.id == module_id)
+                       .with_for_update().execution_options(populate_existing=True))
+    if not module:
+        raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
+    if actor.role not in ("teacher", "admin") or (actor.role == "teacher" and module.owner_id != actor.id):
+        raise api_error(403, "FORBIDDEN", "无权管理其他用户创建的实验模块")
+    return module
+
+
 @router.get("/modules", response_model=PaginatedResponse)
 def list_modules(
     db: Session = Depends(get_db),
@@ -155,7 +181,7 @@ def list_modules(
 ):
     query = select(ExperimentModule)
     if current_user.role == "student":
-        query = query.where(ExperimentModule.status == "published")
+        query = query.where(ExperimentModule.status == "published", ExperimentModule.id.in_(select(OfferingExperiment.entry_id).where(OfferingExperiment.entry_kind == "module", OfferingExperiment.status == "published", OfferingExperiment.offering_id.in_(offering_scope.student_offering_ids(db, current_user.id)))))
     elif current_user.role == "teacher":
         query = query.where(ExperimentModule.owner_id == current_user.id)
     modules = db.scalars(query.order_by(ExperimentModule.id)).all()
@@ -183,6 +209,7 @@ def list_student_module_catalog(
 
     learning_status = case(
         (ExperimentRecord.id.is_(None), "not_started"),
+        (select(LabRecord.record_id).where(LabRecord.record_id == ExperimentRecord.id, LabRecord.selected_submission_id.is_not(None)).exists(), "graded"),
         (ExperimentRecord.status.in_(("graded", "completed")), "graded"),
         (ExperimentRecord.status == "submitted", "submitted"),
         else_="started",
@@ -191,26 +218,39 @@ def list_student_module_catalog(
     join_condition = and_(
         ExperimentRecord.module_id == ExperimentModule.id,
         ExperimentRecord.student_id == current_user.id,
+        ExperimentRecord.offering_id == OfferingExperiment.offering_id,
     )
     base_query = (
         select(
             ExperimentModule.id,
             ExperimentModule.name,
+            OfferingExperiment.offering_id,
+            Course.title.label("course_title"),
+            AcademicTerm.name.label("term_name"),
+            TeachingClass.name.label("class_name"),
             learning_status,
             ExperimentRecord.updated_at.label("last_learning_at"),
         )
-        .select_from(ExperimentModule)
+        .select_from(OfferingExperiment)
+        .join(ExperimentModule, and_(OfferingExperiment.entry_kind == "module",
+                                    OfferingExperiment.entry_id == ExperimentModule.id))
+        .join(CourseOffering, CourseOffering.id == OfferingExperiment.offering_id)
+        .join(Course, Course.id == CourseOffering.course_id)
+        .join(AcademicTerm, AcademicTerm.id == CourseOffering.academic_term_id)
+        .join(TeachingClass, TeachingClass.id == CourseOffering.teaching_class_id)
         .outerjoin(ExperimentRecord, join_condition)
-        .where(ExperimentModule.status == "published")
+        .where(ExperimentModule.status == "published",
+               OfferingExperiment.status == "published",
+               OfferingExperiment.offering_id.in_(offering_scope.student_offering_ids(db, current_user.id)))
     )
 
-    # 汇总不随当前搜索/筛选变化，供页面顶部稳定展示全局状态。
+    # Aggregate the scoped status projection rather than a correlated CASE.
+    # MySQL ONLY_FULL_GROUP_BY otherwise rejects its LabRecord EXISTS branch.
+    # This projection precedes search/filter/pagination, keeping totals stable.
+    summary_source = base_query.subquery()
     summary_rows = db.execute(
-        select(learning_status, func.count(ExperimentModule.id))
-        .select_from(ExperimentModule)
-        .outerjoin(ExperimentRecord, join_condition)
-        .where(ExperimentModule.status == "published")
-        .group_by(learning_status)
+        select(summary_source.c.learning_status, func.count(summary_source.c.id))
+        .group_by(summary_source.c.learning_status)
     ).all()
     summary_counts = {key: value for key, value in summary_rows}
     summary = StudentExperimentCatalogSummary(
@@ -237,11 +277,13 @@ def list_student_module_catalog(
             case((ExperimentRecord.updated_at.is_(None), 1), else_=0),
             ExperimentRecord.updated_at.desc(),
             ExperimentModule.id.asc(),
+            OfferingExperiment.offering_id.asc(),
         )
     elif sort == "name_asc":
-        base_query = base_query.order_by(ExperimentModule.name.asc(), ExperimentModule.id.asc())
+        base_query = base_query.order_by(ExperimentModule.name.asc(), ExperimentModule.id.asc(),
+                                         OfferingExperiment.offering_id.asc())
     else:
-        base_query = base_query.order_by(ExperimentModule.id.asc())
+        base_query = base_query.order_by(ExperimentModule.id.asc(), OfferingExperiment.offering_id.asc())
 
     rows = db.execute(
         base_query.offset((page - 1) * page_size).limit(page_size)
@@ -251,6 +293,10 @@ def list_student_module_catalog(
             StudentExperimentModuleRead(
                 id=row.id,
                 name=row.name,
+                offering_id=row.offering_id,
+                course_title=row.course_title,
+                term_name=row.term_name,
+                class_name=row.class_name,
                 learning_status=row.learning_status,
                 last_learning_at=row.last_learning_at,
             )
@@ -270,6 +316,8 @@ def create_module(
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("teacher")),
 ):
+    from app.services.teaching_query_policy import lock_current_actor
+    current_user = lock_current_actor(db, current_user)
     if current_user.role == "teacher" and payload.template_id is not None:
         raise api_error(
             422,
@@ -313,9 +361,7 @@ def ensure_module_template(
     current_user: User = Depends(require_roles("teacher")),
 ):
     """为历史孤立模块幂等初始化空白 Notebook 草稿。"""
-    module = db.get(ExperimentModule, module_id)
-    if not module:
-        raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
+    module = _managed_module_for_write(db, module_id, current_user)
     if module.owner_id != current_user.id:
         raise api_error(403, "FORBIDDEN", "只能初始化自己创建的实验模块")
 
@@ -333,8 +379,10 @@ def get_module(
     module = db.get(ExperimentModule, module_id)
     if not module:
         raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
-    if current_user.role == "student" and module.status != "published":
-        raise api_error(403, "FORBIDDEN", "无权查看未发布的实验模块")
+    if current_user.role == "student":
+        delivery = db.scalar(select(OfferingExperiment.id).where(OfferingExperiment.entry_kind == "module", OfferingExperiment.entry_id == module.id, OfferingExperiment.status == "published", OfferingExperiment.offering_id.in_(offering_scope.student_offering_ids(db, current_user.id))))
+        if module.status != "published" or not delivery:
+            raise api_error(403, "FORBIDDEN", "无权查看未分配本班的实验模块")
     return module
 
 
@@ -346,11 +394,7 @@ def patch_module(
     current_user: User = Depends(require_roles("admin", "teacher")),
 ):
     """更新模块元数据：强类型 Schema，status 不可修改，未知字段拒绝。"""
-    module = db.get(ExperimentModule, module_id)
-    if not module:
-        raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
-    if current_user.role == "teacher" and module.owner_id != current_user.id:
-        raise api_error(403, "FORBIDDEN", "无权管理其他用户创建的实验模块")
+    module = _managed_module_for_write(db, module_id, current_user)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(module, key, value)
     db.commit()
@@ -374,11 +418,7 @@ def publish_module(
     current_user: User = Depends(require_roles("admin", "teacher")),
 ):
     """发布模块：要求模板就绪；状态变更只能通过本端点。"""
-    module = db.get(ExperimentModule, module_id)
-    if not module:
-        raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
-    if current_user.role == "teacher" and module.owner_id != current_user.id:
-        raise api_error(403, "FORBIDDEN", "无权管理其他用户创建的实验模块")
+    module = _managed_module_for_write(db, module_id, current_user)
     _ensure_module_publishable(module, db)
     module.status = "published"
     db.commit()
@@ -393,11 +433,7 @@ def unpublish_module(
     current_user: User = Depends(require_roles("admin", "teacher")),
 ):
     """取消发布：published → draft，学生端立即不可见。"""
-    module = db.get(ExperimentModule, module_id)
-    if not module:
-        raise api_error(404, "EXPERIMENT_MODULE_NOT_FOUND", "实验模块不存在")
-    if current_user.role == "teacher" and module.owner_id != current_user.id:
-        raise api_error(403, "FORBIDDEN", "无权管理其他用户创建的实验模块")
+    module = _managed_module_for_write(db, module_id, current_user)
     if module.status != "published":
         raise api_error(409, "MODULE_NOT_PUBLISHED", "仅已发布的模块可取消发布")
     module.status = "draft"
@@ -412,22 +448,32 @@ def unpublish_module(
 @router.post("/records/ensure-for-lesson/{lesson_id}", response_model=ExperimentRecordRead)
 def ensure_record_for_lesson(
     lesson_id: int,
+    offering_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
-    _check_lesson_access(lesson_id, current_user.id, db)
+    from app.services.account_service import lock_policy
+    lock_policy(db)
+    lesson = _check_lesson_access(lesson_id, current_user.id, db)
+    offering = offering_scope.resolve_student_offering(db, lesson.chapter.course_id, current_user, offering_id)
+    _, delivery = offering_scope.require_delivery(db, offering.id, "lesson", lesson_id, current_user)
 
     existing = db.scalar(
         select(ExperimentRecord).where(
             ExperimentRecord.lesson_id == lesson_id,
             ExperimentRecord.student_id == current_user.id,
+            ExperimentRecord.offering_id == offering.id,
         )
     )
     if existing:
         return _record_read(existing)
+    _, delivery = offering_scope.require_delivery(db, offering.id, "lesson", lesson_id, current_user, lock=True)
+    if delivery.pending_assessment_id:
+        raise api_error(409, "ASSESSMENT_REGRADING_PENDING", "本班评分标准正在更新，请等待教师完成重评")
 
-    version = _ensure_template_version(lesson_id=lesson_id, module_id=None, db=db)
+    version = db.get(NotebookTemplateVersion, delivery.template_version_id)
     record = ExperimentRecord(
+        offering_id=offering.id, scope_key=f"offering:{offering.id}",
         lesson_id=lesson_id, module_id=None,
         template_version_id=version.id,
         # Phase 5（计划 9.2）：从模板版本复制环境版本——已存在记录不因模板发布 v2 自动升级
@@ -438,10 +484,13 @@ def ensure_record_for_lesson(
         cells_sources={
             cell["id"]: cell["source"]
             for cell in version.cells
-            if cell.get("type") == "code" and not cell.get("source_hidden")
+            if (cell.get("type") == "code" or cell.get("student_editable", False)) and not cell.get("source_hidden")
         },
     )
     db.add(record)
+    db.flush()
+    from app.services.lab_assessment_service import bind_new_record
+    bind_new_record(db, record)
     db.commit()
     db.refresh(record)
     return _record_read(record)
@@ -450,22 +499,37 @@ def ensure_record_for_lesson(
 @router.post("/records/ensure-for-module/{module_id}", response_model=ExperimentRecordRead)
 def ensure_record_for_module(
     module_id: int,
+    offering_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     _check_module_access(module_id, db)
+    candidates = list(db.scalars(select(OfferingExperiment.offering_id).where(OfferingExperiment.entry_kind == "module", OfferingExperiment.entry_id == module_id, OfferingExperiment.status == "published", OfferingExperiment.offering_id.in_(offering_scope.student_offering_ids(db, current_user.id)))))
+    if offering_id is None and len(candidates) == 1:
+        offering_id = candidates[0]
+    if offering_id not in candidates:
+        raise api_error(409, "OFFERING_REQUIRED", "请选择已发布本实验的授课实例")
+    offering = offering_scope.require_offering(db, offering_id, current_user, write=True)
+    _, delivery = offering_scope.require_delivery(db, offering.id, "module", module_id, current_user)
 
     existing = db.scalar(
         select(ExperimentRecord).where(
             ExperimentRecord.module_id == module_id,
             ExperimentRecord.student_id == current_user.id,
+            ExperimentRecord.offering_id == offering.id,
         )
     )
     if existing:
         return _record_read(existing)
+    _, delivery = offering_scope.require_delivery(db, offering.id, "module", module_id, current_user, lock=True)
+    if delivery.pending_assessment_id:
+        raise api_error(409, "ASSESSMENT_REGRADING_PENDING", "本班评分标准正在更新，请等待教师完成重评")
 
-    version = _ensure_template_version(lesson_id=None, module_id=module_id, db=db)
+    version = db.get(NotebookTemplateVersion, delivery.template_version_id)
     record = ExperimentRecord(
+        offering_id=offering.id, scope_key=f"offering:{offering.id}",
         lesson_id=None, module_id=module_id,
         template_version_id=version.id,
         # Phase 5（计划 9.2）：从模板版本复制环境版本——已存在记录不因模板发布 v2 自动升级
@@ -476,10 +540,13 @@ def ensure_record_for_module(
         cells_sources={
             cell["id"]: cell["source"]
             for cell in version.cells
-            if cell.get("type") == "code" and not cell.get("source_hidden")
+            if (cell.get("type") == "code" or cell.get("student_editable", False)) and not cell.get("source_hidden")
         },
     )
     db.add(record)
+    db.flush()
+    from app.services.lab_assessment_service import bind_new_record
+    bind_new_record(db, record)
     db.commit()
     db.refresh(record)
     return _record_read(record)
@@ -514,7 +581,7 @@ def get_record_detail(
             type=cell.get("type", "code"),
             source=record.cells_sources.get(cell_id, cell.get("source", "")),
             order=cell.get("order", 0),
-            student_editable=cell.get("student_editable", True),
+            student_editable=cell.get("student_editable", cell.get("type", "code") == "code"),
             outputs=outputs,
             is_running=False,
         ))
@@ -545,7 +612,8 @@ def get_record_detail(
         )
 
     return ExperimentRecordDetailResponse(
-        id=record.id, lesson_id=record.lesson_id, module_id=record.module_id,
+        id=record.id, offering_id=record.offering_id, lesson_id=record.lesson_id, module_id=record.module_id,
+        lab_enabled=db.get(LabRecord, record.id) is not None,
         student_id=record.student_id, status=record.status,
         template_version_id=record.template_version_id,
         record_revision=record.record_revision,
@@ -599,8 +667,8 @@ def save_cells(
     if version:
         editable_ids = {
             cell["id"] for cell in version.cells
-            if cell.get("type") == "code"
-            and cell.get("student_editable", True)
+            if cell.get("type") in ("code", "markdown")
+            and cell.get("student_editable", cell.get("type") == "code")
             and not cell.get("source_hidden")
         }
         for cell_id in payload.cells:
@@ -609,10 +677,15 @@ def save_cells(
 
     merged = dict(record.cells_sources)
     merged.update(payload.cells)
-    record.cells_sources = merged
-    record.record_revision += 1
+    changed = db.execute(update(ExperimentRecord).where(
+        ExperimentRecord.id == record_id,
+        ExperimentRecord.record_revision == payload.record_revision,
+    ).values(cells_sources=merged, record_revision=payload.record_revision + 1)).rowcount
+    if changed != 1:
+        db.rollback()
+        raise api_error(409, "REVISION_CONFLICT", "记录已被其他操作修改，请刷新后重试")
     db.commit()
-    return {"record_id": record_id, "record_revision": record.record_revision}
+    return {"record_id": record_id, "record_revision": payload.record_revision + 1}
 
 
 def _visible_execution_count(record: ExperimentRecord, version) -> int:
@@ -693,20 +766,34 @@ def execute_cell(
             if diagnostic.code == "IMPORT_NOT_INSTALLED":
                 raise api_error(500, "IMPORT_NOT_INSTALLED", diagnostic.message)
 
+    execution_revision = record.record_revision
+    execution_context = (record.offering_id, record.student_id, record.template_version_id,
+                         record.environment_version_id)
+    # Admission metadata was checked with current locks. Release every policy,
+    # account and teaching lock before workspace copying or Docker execution.
+    db.commit()
     _init_hidden_cells_once(record, version, db)
 
     try:
         km = get_kernel_manager()
-        if env_id is not None:
-            km.get_or_create_session(record_id, image_ref=image_ref,
-                                     environment_version_id=env_id)
-        else:
-            km.get_or_create_session(record_id)  # 未绑定环境版本：存量兼容路径
+        from app.services.lab_workspace import ensure_record_kernel
+        ensure_record_kernel(km, record, version, db, image_ref=image_ref,
+                             environment_version_id=env_id)
         result = km.execute(record_id, payload.code)
     except RuntimeError as e:
         raise api_error(409, "KERNEL_BUSY", str(e))
     except Exception as e:
         raise api_error(500, "KERNEL_ERROR", f"执行失败：{e}")
+
+    # Workspace preparation may have opened a read snapshot. Completion starts
+    # a new short metadata transaction and rechecks current account and class
+    # authority before storing or returning the execution's feedback.
+    db.rollback()
+    _require_record_accessible(record, current_user, db)
+    if (record.record_revision != execution_revision
+            or (record.offering_id, record.student_id, record.template_version_id,
+                record.environment_version_id) != execution_context):
+        raise api_error(409, "REVISION_CONFLICT", "作答或授课归属在运行期间发生变化，请刷新后重试")
 
     # Kernel 输出中的 ModuleNotFoundError 兜底归类（计划 9.4）：不把裸 traceback 当策略错误
     kernel_diagnostic = _classify_kernel_module_not_found(result["outputs"], policy, installed)
@@ -804,11 +891,9 @@ def _init_hidden_cells_once(record: ExperimentRecord, version, db: Session) -> N
         except Exception:
             raise api_error(503, "ENVIRONMENT_IMAGE_MISSING", "运行环境暂不可用，请稍后重试")
     try:
-        if env_id is not None:
-            km.get_or_create_session(record.id, image_ref=image_ref,
-                                     environment_version_id=env_id)
-        else:
-            km.get_or_create_session(record.id)  # 未绑定环境版本：存量兼容路径
+        from app.services.lab_workspace import ensure_record_kernel
+        ensure_record_kernel(km, record, version, db, image_ref=image_ref,
+                             environment_version_id=env_id)
     except Exception as e:
         raise api_error(500, "KERNEL_INIT_FAILED", f"Kernel 创建失败：{e}")
 
@@ -846,8 +931,20 @@ def interrupt_kernel(
         raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
     _require_record_accessible(record, current_user, db)
 
+    db.commit()
     km = get_kernel_manager()
-    km.interrupt(record_id)
+    from app.services.kernel_manager import KernelManager
+    from sqlalchemy.orm import sessionmaker
+    try:
+        if isinstance(km, KernelManager):
+            km.interrupt(record_id, resource_factory=sessionmaker(bind=db.get_bind(), expire_on_commit=False))
+        else:
+            km.interrupt(record_id)
+    except RuntimeError as exc:
+        raise api_error(409, "KERNEL_BUSY", str(exc))
+    db.rollback()
+    _require_record_accessible(record, current_user, db)
+    db.commit()
     return {"status": "interrupted"}
 
 
@@ -865,9 +962,20 @@ def restart_kernel(
     record.cells_outputs = {}
     db.commit()
 
-    # Phase 5：重启沿用记录绑定环境的 digest 镜像（session 内已记录，restart 自动继承）
     km = get_kernel_manager()
-    km.restart(record_id)
+    from app.services.environment_service import resolve_run_image_ref
+    from app.services.lab_workspace import ensure_record_kernel
+    env_id = record.environment_version_id
+    version = db.get(NotebookTemplateVersion, record.template_version_id)
+    try:
+        image_ref = resolve_run_image_ref(db, env_id) if env_id is not None else None
+        ensure_record_kernel(km, record, version, db, image_ref=image_ref,
+                             environment_version_id=env_id, restart=True)
+    except RuntimeError as exc:
+        raise api_error(409, "KERNEL_BUSY", str(exc))
+    db.rollback()
+    _require_record_accessible(record, current_user, db)
+    db.commit()
     return {"status": "restarted"}
 
 
@@ -878,6 +986,7 @@ def restart_kernel(
 def submit_record(
     record_id: int,
     payload: ExperimentSubmitRequest,
+    settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
@@ -885,13 +994,15 @@ def submit_record(
 
     幂等：同一 client_request_id 多次请求返回已有提交。
     """
+    from app.services.account_service import lock_policy
+    lock_policy(db)
     client_request_id = str(payload.client_request_id)  # UUID → str（兼容 SQLite）
 
     # 1. 加载 record 并验证所有权（幂等检查之前），防止越权
     record = db.get(ExperimentRecord, record_id)
     if not record:
         raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
-    _require_owner(record, current_user)
+    _require_record_accessible(record, current_user, db)
 
     # 2. 快速幂等检查（无锁）：同一 client_request_id 已存在 → 直接返回
     existing = db.scalar(
@@ -901,18 +1012,42 @@ def submit_record(
         )
     )
     if existing:
-        return ExperimentSubmissionRead.model_validate(existing)
+        response = ExperimentSubmissionRead.model_validate(existing)
+        lab = db.get(LabSubmission, existing.id)
+        response.lab_enabled = lab is not None
+        run = db.get(LabRun, lab.current_run_id) if lab and lab.current_run_id else None
+        response.lab_status = run.status if run else None
+        return response
+
+    if db.get(LabRecord, record.id):
+        from app.services.lab_submission_service import submit_lab
+        _require_record_accessible(record, current_user, db)
+        if not settings.lab_enabled:
+            raise api_error(503, "LAB_DISABLED", "实验评测暂未启用")
+        result = submit_lab(db, record, current_user, payload, settings)
+        db.commit()
+        response = ExperimentSubmissionRead.model_validate(result)
+        response.lab_enabled = True
+        response.lab_status = "queued"
+        return response
 
     # 3. 仅终态（graded/completed）禁止重新提交
     if record.status not in ("started", "submitted"):
         raise api_error(400, "ALREADY_GRADED", "实验已评分，不能再次提交")
 
     # 4. 锁定 record 行，防止并发提交计算出相同 attempt_number
-    db.execute(
+    record = db.scalar(
         select(ExperimentRecord)
         .where(ExperimentRecord.id == record_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    _require_record_accessible(record, current_user, db)
+    _, delivery = offering_scope.require_delivery(db, record.offering_id,
+        'lesson' if record.lesson_id else 'module', record.lesson_id or record.module_id,
+        current_user, lock=True)
+    if delivery.pending_assessment_id:
+        raise api_error(409, 'ASSESSMENT_SWITCH_PENDING', '本班评测版本正在整批核对，请稍后正式提交')
 
     # 5. 锁内二次幂等检查（另一个请求可能在步骤2和步骤4之间插入了相同 client_request_id）
     existing_locked = db.scalar(
@@ -963,6 +1098,7 @@ def submit_record(
         db.commit()
     except Exception:
         db.rollback()
+        _require_record_accessible(record, current_user, db)
         # 并发冲突（SQLite 无真正行锁）：另一个线程先插入了相同 attempt_number
         # 重新获取锁并计算 attempt_number 重试
         db.execute(
@@ -1005,7 +1141,7 @@ def _submission_records_query(*columns):
         .join(User, ExperimentRecord.student_id == User.id)
         .outerjoin(Lesson, ExperimentRecord.lesson_id == Lesson.id)
         .outerjoin(Chapter, Lesson.chapter_id == Chapter.id)
-        .outerjoin(Course, Chapter.course_id == Course.id)
+        .outerjoin(Course, Course.id == func.coalesce(Chapter.course_id, select(CourseOffering.course_id).where(CourseOffering.id == ExperimentRecord.offering_id).correlate(ExperimentRecord).scalar_subquery()))
         .outerjoin(ExperimentModule, ExperimentRecord.module_id == ExperimentModule.id)
     )
 
@@ -1017,10 +1153,7 @@ def _apply_submission_visibility(query, current_user: User):
         # 教师可见两类提交：自己课程的课时实验（lesson→chapter→course 链路）、
         # 自己创建的实验模块（module 链路，owner_id 归属）。
         # 模块实验的 lesson_id 为 NULL，仅按 Course.teacher_id 过滤会被全部排除。
-        return query.where(or_(
-            Course.teacher_id == current_user.id,
-            ExperimentModule.owner_id == current_user.id,
-        ))
+        return query.where(offering_scope.teacher_record_condition(current_user.id))
     if current_user.role == "admin":
         return query
     # get_current_user rejects unsupported persisted roles; keep this helper
@@ -1031,6 +1164,7 @@ def _apply_submission_visibility(query, current_user: User):
 @router.get("/submissions", response_model=ExperimentSubmissionListRead)
 def list_submissions(
     record_id: int | None = None,
+    offering_id: int | None = None,
     q: str | None = None,
     course_id: int | None = None,
     entry_id: int | None = None,
@@ -1055,6 +1189,9 @@ def list_submissions(
     scope_ids = _apply_submission_visibility(
         _submission_records_query(ExperimentRecord.id), current_user
     )
+    if offering_id is not None:
+        offering_scope.require_offering(db, offering_id, current_user)
+        scope_ids = scope_ids.where(ExperimentRecord.offering_id == offering_id)
     if record_id is not None:
         scope_ids = scope_ids.where(ExperimentRecord.id == record_id)
 
@@ -1098,6 +1235,8 @@ def list_submissions(
     visible_ids = _apply_submission_visibility(
         _submission_records_query(ExperimentRecord.id), current_user
     )
+    if offering_id is not None:
+        visible_ids = visible_ids.where(ExperimentRecord.offering_id == offering_id)
     if record_id is not None:
         visible_ids = visible_ids.where(ExperimentRecord.id == record_id)
     if course_id is not None:
@@ -1189,6 +1328,10 @@ def list_submissions(
     items = []
     for s in submissions:
         item = ExperimentSubmissionRead.model_validate(s)
+        lab = db.get(LabSubmission, s.id)
+        item.lab_enabled = lab is not None
+        run = db.get(LabRun, lab.current_run_id) if lab and lab.current_run_id else None
+        item.lab_status = "needs_review" if lab and lab.review_requested else run.status if run else None
         record = records_map.get(s.record_id)
         if record:
             student = students_map.get(record.student_id)
@@ -1233,21 +1376,7 @@ def list_submissions(
 
 
 def _teacher_owns_record(db: Session, record: ExperimentRecord, user: User) -> bool:
-    """教师对实验记录的归属校验：课时走 lesson→chapter→course 链路，模块走 owner_id。
-
-    模块实验记录 lesson_id 为 NULL、无课程归属，必须走模块所有者判断，
-    否则教师永远无法查看/评分自己模块的提交（与提交列表可见性同源缺陷）。
-    """
-    if record.lesson_id:
-        lesson = db.get(Lesson, record.lesson_id)
-        return bool(
-            lesson and lesson.chapter and lesson.chapter.course
-            and lesson.chapter.course.teacher_id == user.id
-        )
-    if record.module_id:
-        module = db.get(ExperimentModule, record.module_id)
-        return bool(module and module.owner_id == user.id)
-    return False
+    return bool(record.offering_id and record.offering_id in offering_scope.teacher_offering_ids(db, user.id))
 
 
 @router.get("/submissions/{submission_id}", response_model=ExperimentSubmissionDetailRead)
@@ -1296,6 +1425,10 @@ def get_submission(
         }
 
     detail = ExperimentSubmissionDetailRead.model_validate(submission)
+    lab = db.get(LabSubmission, submission.id)
+    detail.lab_enabled = lab is not None
+    run = db.get(LabRun, lab.current_run_id) if lab and lab.current_run_id else None
+    detail.lab_status = "needs_review" if lab and lab.review_requested else run.status if run else None
     detail.cells_snapshot = snapshot
     detail.outputs_snapshot = submission.outputs_snapshot or {}
     detail.cell_metadata = metadata
@@ -1351,6 +1484,15 @@ def review_submission(
             raise api_error(403, "FORBIDDEN", "无权评分该提交")
     elif current_user.role not in ("admin",):
         raise api_error(403, "FORBIDDEN", "无权评分")
+
+    offering_scope.record_teaching_access(db, record, current_user, write=True)
+    submission = db.scalar(select(ExperimentSubmission).where(ExperimentSubmission.id == submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+    if not submission:
+        raise api_error(404, "SUBMISSION_NOT_FOUND", "提交记录不存在")
+
+    if db.get(LabSubmission, submission.id):
+        raise api_error(409, "LAB_REVIEW_REQUIRED", "请使用实验评测复核入口并填写改分原因")
 
     from datetime import datetime, timezone
     if payload.score is not None:

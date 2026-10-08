@@ -7,6 +7,8 @@ from sqlalchemy import select
 from app.models import ExperimentRecord, ExperimentSubmission
 from conftest import auth_header, create_course_db, create_user, login
 
+from teaching_test_support import grant_experiment
+
 API = "/api/v1"
 
 
@@ -58,6 +60,7 @@ def _setup_experiment(client, db_sf):
         db.commit()
 
     # 学生创建实验记录
+    grant_experiment(db_sf, "lesson", leid, ["esub_s"])
     rec = client.post(f"{API}/experiments/records/ensure-for-lesson/{leid}",
                       headers=auth_header(s_tok))
     assert rec.status_code in (200, 201), f"创建记录失败: {rec.text}"
@@ -163,7 +166,7 @@ def test_another_student_cannot_submit(client, db_session_factory):
     r = client.post(f"{API}/experiments/records/{ctx['rid']}/submit",
                     headers=auth_header(s2_tok),
                     json={"client_request_id": str(uuid.uuid4())})
-    assert r.status_code == 403, f"应为 403: {r.status_code}"
+    assert r.status_code == 404, f"越权记录应隐藏: {r.status_code}"
 
 
 def test_teacher_cannot_submit(client, db_session_factory):
@@ -200,8 +203,8 @@ def test_p1_2_idempotency_requires_ownership(client, db_session_factory):
     r2 = client.post(f"{API}/experiments/records/{ctx['rid']}/submit",
                      headers=auth_header(s3_tok),
                      json={"client_request_id": req_id})
-    assert r2.status_code == 403, \
-        f"P1-2: 越权访问应返回 403，实际: {r2.status_code}"
+    assert r2.status_code == 404, \
+        f"P1-2: 越权记录应隐藏，实际: {r2.status_code}"
 
 
 # ═══════════════════════════════════════════════════════════════

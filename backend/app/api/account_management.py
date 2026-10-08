@@ -10,9 +10,10 @@ from app.config import Settings, get_settings
 from app.dependencies import get_db, get_redis_client, pagination, PaginationParams, require_roles
 from app.errors import api_error
 from app.models import AdminBatch, AdminBatchItem, AuditEvent, User
-from app.security import validate_password_rules
 from app.services import account_service as accounts
 from app.services import account_batch_service as batches
+from app.services import credential_delivery_service as credentials
+from app.models.credential_delivery import CredentialDelivery
 from app.services.roster_import_service import parse_xlsx, spreadsheet
 
 router = APIRouter(prefix='/admin', tags=['account-management'])
@@ -59,9 +60,24 @@ def require_batch(db, batch_id):
     return batch
 
 
-def verify_admin(request, actor, password, redis, settings):
+def verify_admin(request, actor, password, redis, settings, db):
     from app.api.auth import _client_ip
+    from app.dependencies import get_current_payload
     from app.services.auth_service import check_login_rate_limits, record_login_failure, reset_login_failures
+    from app.services.teaching_query_policy import lock_current_actor
+    actor = lock_current_actor(db, actor)
+    if actor.role != 'admin':
+        raise api_error(403, 'FORBIDDEN', '只有当前有效管理员可以复核本人密码')
+    scheme, _, token = request.headers.get('Authorization', '').partition(' ')
+    if scheme.lower() != 'bearer' or not token:
+        raise api_error(401, 'INVALID_TOKEN', '缺少有效访问令牌')
+
+    def current_token():
+        payload = get_current_payload(token, settings, redis)
+        if payload['sub'] != str(actor.id) or payload.get('sv') != actor.session_version:
+            raise api_error(401, 'SESSION_REVOKED', '会话已失效，请重新登录')
+
+    current_token()
     key = 'reauth:' + actor.username
     ip = _client_ip(request, settings)
     check_login_rate_limits(redis, settings, key, ip)
@@ -70,6 +86,9 @@ def verify_admin(request, actor, password, redis, settings):
     except Exception:
         record_login_failure(redis, settings, key, ip)
         raise
+    # Logout/expiry can occur while bcrypt verifies the password. Do not emit
+    # credentials on an access token that became invalid during that work.
+    current_token()
     reset_login_failures(redis, key)
 
 
@@ -79,6 +98,8 @@ def read_policy(db: Session = Depends(get_db), settings: Settings = Depends(get_
     policy = db.get(accounts.AccountSecurityPolicy, 1)
     return {'configured': True, 'custom_password': bool(policy and policy.password_ciphertext),
             'version': policy.version if policy else 1, 'temporary_days': policy.temporary_days if policy else 7,
+            'generation_method': 'independent_random',
+            'credential_export_hours': getattr(settings, 'account_credential_export_hours', 24),
             'encryption_ready': bool(settings.account_security_keys)}
 
 
@@ -86,16 +107,16 @@ def read_policy(db: Session = Depends(get_db), settings: Settings = Depends(get_
 def update_policy(payload: PolicyUpdate, request: Request, db: Session = Depends(get_db),
                   settings: Settings = Depends(get_settings), actor: User = Depends(require_roles('admin')),
                   redis=Depends(get_redis_client)):
-    verify_admin(request, actor, payload.current_password, redis, settings)
+    verify_admin(request, actor, payload.current_password, redis, settings, db)
+    if payload.default_password is not None:
+        raise api_error(422, 'SHARED_PASSWORD_UNSUPPORTED', '学生临时密码由系统独立随机生成，不再设置共享默认密码')
+    accounts.cipher(settings)
     policy = accounts.lock_policy(db)
-    password, _, _ = accounts.temporary_policy(db, settings)
-    password = payload.default_password if payload.default_password is not None else password
-    try:
-        validate_password_rules(password)
-    except ValueError as exc:
-        raise api_error(422, 'PASSWORD_POLICY', str(exc))
     policy.version += 1
-    policy.password_ciphertext = accounts.encrypt_secret(settings, password, f'policy:{policy.version}')
+    # Keep legacy ciphertext tied to its original version by re-encrypting it.
+    if policy.password_ciphertext:
+        legacy = accounts.decrypt_secret(settings, policy.password_ciphertext, f'policy:{policy.version - 1}')
+        policy.password_ciphertext = accounts.encrypt_secret(settings, legacy, f'policy:{policy.version}')
     policy.temporary_days, policy.updated_by = payload.temporary_days, actor.id
     accounts.audit(db, actor.id, 'account_policy.update', 'account_policy', 1,
                    request_id=getattr(request.state, 'request_id', None),
@@ -136,7 +157,7 @@ def confirm(batch_id: str, payload: BatchConfirm, request: Request, db: Session 
             redis=Depends(get_redis_client)):
     batch = require_batch(db, batch_id)
     if batch.kind == 'password_reset' and batch.status == 'preview':
-        verify_admin(request, actor, payload.current_password, redis, settings)
+        verify_admin(request, actor, payload.current_password, redis, settings, db)
     result = batches.confirm_batch(db, batch_id, actor, payload, settings)
     try:
         redis.publish('account-batches', batch_id)
@@ -163,9 +184,64 @@ def get_batch(batch_id: str, page: PaginationParams = Depends(pagination), db: S
     rows = db.scalars(query.order_by(AdminBatchItem.row_number).offset((page.page - 1) * page.page_size).limit(page.page_size)).all()
     prepared = db.scalar(select(func.count()).select_from(AdminBatchItem).where(
         AdminBatchItem.batch_id == batch.id, AdminBatchItem.prepared_hash.is_not(None)))
-    return {**batch_read(batch), 'prepared': prepared, 'total': total, 'page': page.page, 'page_size': page.page_size,
+    return {**batch_read(batch), 'credentials': credentials.metadata(db, batch_id=batch.id),
+            'prepared': prepared, 'total': total, 'page': page.page, 'page_size': page.page_size,
             'items': [{'row_number': i.row_number, 'status': i.status, 'data': {k:v for k,v in i.data.items() if not k.startswith('_')},
                        'result': i.result} for i in rows]}
+
+
+class CredentialExport(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    current_password: str
+
+
+def _credential_response(content):
+    return Response(content, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': 'attachment; filename="temporary-credentials.xlsx"',
+                             'Cache-Control': 'private, no-store', 'Pragma': 'no-cache',
+                             'X-Content-Type-Options': 'nosniff'})
+
+
+@router.get('/credential-deliveries')
+def list_credential_deliveries(user_id: int, db: Session = Depends(get_db),
+                              actor: User = Depends(require_roles('admin'))):
+    return {'items': credentials.metadata(db, user_id=user_id)}
+
+
+@router.post('/credential-deliveries/{delivery_id}/export')
+def export_credential(delivery_id: str, payload: CredentialExport, request: Request,
+                      db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+                      actor: User = Depends(require_roles('admin')), redis=Depends(get_redis_client)):
+    verify_admin(request, actor, payload.current_password, redis, settings, db)
+    delivery = db.get(CredentialDelivery, delivery_id)
+    if not delivery:
+        raise api_error(404, 'CREDENTIAL_NOT_FOUND', '凭据交付不存在')
+    user = db.scalar(select(User).where(User.id == delivery.user_id).with_for_update()
+                     .execution_options(populate_existing=True)) if delivery.user_id else None
+    content = credentials.workbook(db, [(delivery, user)], actor, settings,
+                                   target_type='credential_delivery', target_id=delivery_id)
+    db.commit()
+    return _credential_response(content)
+
+
+@router.post('/batches/{batch_id}/credentials')
+def export_batch_credentials(batch_id: str, payload: CredentialExport, request: Request,
+                             db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+                             actor: User = Depends(require_roles('admin')), redis=Depends(get_redis_client)):
+    verify_admin(request, actor, payload.current_password, redis, settings, db)
+    require_batch(db, batch_id)
+    user_ids = list(db.scalars(select(CredentialDelivery.user_id).where(
+        CredentialDelivery.batch_id == batch_id, CredentialDelivery.user_id.is_not(None))))
+    # Match reset/change-password lock order: users first, delivery records second.
+    # A joined FOR UPDATE may let MySQL lock deliveries first and deadlock a reset.
+    list(db.scalars(select(User).where(User.id.in_(user_ids)).order_by(User.id)
+                    .with_for_update().execution_options(populate_existing=True)))
+    rows = db.execute(select(CredentialDelivery, User).join(User, User.id == CredentialDelivery.user_id)
+                      .where(CredentialDelivery.batch_id == batch_id).order_by(User.id)
+                      .execution_options(populate_existing=True)).all()
+    content = credentials.workbook(db, rows, actor, settings, target_type='batch', target_id=batch_id)
+    db.commit()
+    return _credential_response(content)
 
 
 @router.get('/batches/{batch_id}/report')

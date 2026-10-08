@@ -8,6 +8,7 @@ from app.models import Exam, ExamAnswer, ExamQuestion, ExamSubmission, User
 from app.services.time_utils import as_utc, utc_now
 from conftest import auth_header, create_course_db, create_user, login
 
+from teaching_test_support import grant_course_students
 API = "/api/v1"
 
 
@@ -30,6 +31,7 @@ def _seed(client, db_sf, *, question=None, duration=60, start_delta=-10, end_del
         "end_at": (now + timedelta(minutes=end_delta)).isoformat(),
     })
     exam_id = exam.json()["id"]
+    grant_course_students(db_sf, course_id, ["life_student"])
     question = question or {
         "question_type": "single_choice",
         "prompt": "2 + 2 = ?",

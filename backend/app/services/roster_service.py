@@ -54,6 +54,25 @@ def sync_course_class_enrollments(db: Session, course: Course) -> None:
         if enrollment.origin == "class" and student_id not in student_ids:
             enrollment.status = "dropped"
 
+    from app.models.teaching import CourseOffering, OfferingEnrollment
+    from app.services.offering_service import enroll_student
+    offerings = list(db.scalars(select(CourseOffering).where(CourseOffering.course_id == course.id, CourseOffering.status == 'active')))
+    # Remove first, so a genuine class transfer can acquire the unique grade scope.
+    for offering in offerings:
+        current = set(db.scalars(select(TeachingClassStudent.student_id).where(TeachingClassStudent.teaching_class_id == offering.teaching_class_id, TeachingClassStudent.status == 'active')))
+        members = list(db.scalars(select(OfferingEnrollment).where(OfferingEnrollment.offering_id == offering.id)))
+        for member in members:
+            if member.status == 'active' and member.origin == 'class' and member.student_id not in current:
+                member.status, member.active_scope_key = 'removed', None
+    db.flush()
+    for offering in offerings:
+        current = db.scalars(select(TeachingClassStudent.student_id).where(TeachingClassStudent.teaching_class_id == offering.teaching_class_id, TeachingClassStudent.status == 'active'))
+        for student_id in current:
+            member = db.scalar(select(OfferingEnrollment).where(OfferingEnrollment.offering_id == offering.id, OfferingEnrollment.student_id == student_id))
+            if member and member.status == 'transferred':
+                continue
+            enroll_student(db, offering, student_id)
+
 
 def sync_courses_for_class(db: Session, teaching_class_id: int) -> None:
     course_ids = db.scalars(

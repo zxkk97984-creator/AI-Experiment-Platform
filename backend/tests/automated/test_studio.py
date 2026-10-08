@@ -20,6 +20,7 @@ from app.models import (
     NotebookTemplateVersion,
 )
 from conftest import auth_header, create_user, login, seed_basic_environment
+from teaching_test_support import grant_experiment
 
 
 def _cell(
@@ -442,6 +443,9 @@ def test_publish_history_sha_immutability_and_student_version_pinning(
     ).encode("utf-8")
     assert v1["sha256"] == hashlib.sha256(canonical).hexdigest()
 
+    grant_experiment(db_session_factory, 'lesson', ctx['lesson_id'],
+                     ['studio_student', 'studio_student_new'], template_version_id=v1['id'])
+
     old_record = client.post(
         f"/api/v1/experiments/records/ensure-for-lesson/{ctx['lesson_id']}",
         headers=_headers(ctx, "studio_student"),
@@ -458,6 +462,11 @@ def test_publish_history_sha_immutability_and_student_version_pinning(
     assert v2_response.status_code == 201, v2_response.text
     v2 = v2_response.json()
     assert v2["version_number"] == 2
+
+    # Content publication and classroom release are separate administrator
+    # decisions. New attempts use v2 after release; existing attempts keep v1.
+    grant_experiment(db_session_factory, 'lesson', ctx['lesson_id'],
+                     ['studio_student', 'studio_student_new'], template_version_id=v2['id'])
 
     history = client.get(
         f"/api/v1/studio/templates/{template['id']}/versions",

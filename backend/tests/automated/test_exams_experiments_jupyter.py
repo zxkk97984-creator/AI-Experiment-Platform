@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from conftest import auth_header, create_course_db, create_user, login
 from app.services.time_utils import utc_now
+from teaching_test_support import grant_course_students
 
 
 def test_exam_submission_and_grade_visibility(client, db_session_factory):
@@ -15,7 +16,7 @@ def test_exam_submission_and_grade_visibility(client, db_session_factory):
         db_session_factory, teacher_username="teacher", title="深度学习",
         status="published", visibility="public",
     )
-    client.post(f"/api/v1/courses/{course_id}/enroll", headers=auth_header(student_token))
+    offering_id = grant_course_students(db_session_factory, course_id, ["student"])
 
     now = utc_now()
     exam_response = client.post(
@@ -23,6 +24,7 @@ def test_exam_submission_and_grade_visibility(client, db_session_factory):
         headers=auth_header(teacher_token),
         json={
             "course_id": course_id,
+            "offering_id": offering_id,
             "title": "期末考试",
             "duration_minutes": 90,
             "start_at": (now - timedelta(minutes=10)).isoformat(),
@@ -31,6 +33,9 @@ def test_exam_submission_and_grade_visibility(client, db_session_factory):
     )
     assert exam_response.status_code == 201
     exam_id = exam_response.json()["id"]
+    # The legacy API creates shared content; fixture setup explicitly grants
+    # this published teaching instance before students are admitted.
+    grant_course_students(db_session_factory, course_id, ["student"])
 
     # 添加题目并发布（创建强制 draft，需显式发布）
     client.post(

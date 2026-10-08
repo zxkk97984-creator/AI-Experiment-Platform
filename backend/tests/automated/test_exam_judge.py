@@ -3,6 +3,7 @@ import datetime
 from datetime import timezone, timedelta
 from unittest.mock import patch
 from conftest import auth_header, create_course_db, create_user, login
+from teaching_test_support import grant_course_students
 API = "/api/v1"
 
 def _h(tok): return auth_header(tok)
@@ -15,6 +16,7 @@ def _setup(client, db_sf):
     now = datetime.datetime.now(timezone.utc)
     e = client.post(f"{API}/exams", headers=_h(t_tok), json={"course_id":cid,"title":"CE","duration_minutes":60,"start_at":(now-timedelta(hours=1)).isoformat(),"end_at":(now+timedelta(hours=1)).isoformat()})
     eid = e.json()["id"]
+    grant_course_students(db_sf, cid, ["ejs"])
     q = client.post(f"{API}/exams/{eid}/questions", headers=_h(t_tok), json={"question_type":"code","prompt":"Q","points":30,"order_index":0,"hidden_tests":"def test():\n    assert add(1,2)==3","starter_code":"def add(a,b):\n    ","correct_answer":{},"grading_mode":"legacy"})
     assert q.status_code == 201
     client.patch(

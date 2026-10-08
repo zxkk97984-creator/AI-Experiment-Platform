@@ -22,6 +22,8 @@ _NON_RETRYABLE_HTTP_STATUS = {401, 403}
 # 共用 max_tokens；预算必须给两者同时留空间，否则会出现“推理耗尽 token、content 为空”。
 # 新操作必须在此登记预算后才能调用 chat_json（未知操作 fail-closed）。
 OPERATION_MAX_TOKENS: dict[str, int] = {
+    "lab_grading": 10000,
+    "lab_rubric": 8000,
     # 1500 实测不足：reasoning 模型在复杂 Rubric 下推理 token 与 JSON 正文
     # 相加超限 → 输出被截断（Expecting ',' delimiter）甚至 content 为空
     # （finish_reason=length）。max_tokens 是上限不是花费，放宽不影响成功短响应的成本。
@@ -312,3 +314,7 @@ class DeepSeekClient:
             },
         )
         raise last_error  # type: ignore[misc]
+
+    def close(self) -> None:
+        """Release the transport when a bounded authoring/grading request ends."""
+        self._client.close()

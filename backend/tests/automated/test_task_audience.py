@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import auth_header, create_user, login, seed_basic_environment
+from conftest import auth_header, create_user, grant_teaching_fixture, login, seed_basic_environment
 from app.models import (
     AcademicTerm, Assignment, Chapter, Course, CourseEnrollment,
     CourseTeachingClass, Exam, JudgeQuestion, TeachingClass, TeachingClassStudent,
@@ -48,6 +48,8 @@ def _seed(db_session_factory):
         db.add(JudgeQuestion(assignment_id=assignment.id, title="题", function_name="f", hidden_tests="def test():\n    pass\n", grading_mode="legacy"))
         exam = Exam(course_id=course.id, title="范围考试", status="draft", start_at=NOW, end_at=NOW + timedelta(days=1))
         db.add(exam)
+        # 管理员分配授课实例；额外白名单成员也必须先属于该实例。
+        grant_teaching_fixture(db, course, student_ids=[in_class.id, extra.id, excluded.id])
         db.commit()
         return {
             "teacher": teacher, "in_class": in_class, "extra": extra,
@@ -104,7 +106,7 @@ def test_exam_audience_start_gate(client, db_session_factory):
     tok, _ = login(client, "aud-extra-student")
     assert client.post(f"/api/v1/exams/{g['exam'].id}/start", headers=auth_header(tok)).status_code == 201
     out_tok, _ = login(client, "aud-outsider-student")
-    assert client.post(f"/api/v1/exams/{g['exam'].id}/start", headers=auth_header(out_tok)).status_code == 403
+    assert client.post(f"/api/v1/exams/{g['exam'].id}/start", headers=auth_header(out_tok)).status_code == 404
 
 
 def test_audience_csv_import(client, db_session_factory):

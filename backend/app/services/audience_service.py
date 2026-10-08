@@ -62,6 +62,28 @@ def validate_student_ids(db: Session, student_ids: list[int]) -> None:
         raise api_error(422, "INVALID_AUDIENCE_STUDENTS", "包含不存在或不可用的学生 ID：" + "、".join(missing))
 
 
+def _validate_offering_audience(db: Session, task, class_ids, include_ids, exclude_ids) -> None:
+    """Check the task boundary before querying globally identifiable users/classes."""
+    if task.offering_id is None:
+        return
+    from app.models.teaching import CourseOffering, OfferingEnrollment
+    offering = db.get(CourseOffering, task.offering_id)
+    if not offering or offering.course_id != task.course_id:
+        raise api_error(422, "AUDIENCE_SCOPE_INVALID", "任务授课范围无效")
+    if any(ident != offering.teaching_class_id for ident in _dedupe(class_ids)):
+        raise api_error(422, "AUDIENCE_SCOPE_INVALID", "只能选择本任务所属教学班")
+    selected = set(_dedupe(include_ids)) | set(_dedupe(exclude_ids))
+    if selected:
+        allowed = set(db.scalars(select(OfferingEnrollment.student_id).where(
+            OfferingEnrollment.offering_id == task.offering_id,
+            OfferingEnrollment.status == "active",
+            OfferingEnrollment.student_id.in_(selected),
+        )))
+        if selected != allowed:
+            # An unknown ID and an ID in another class receive the same error.
+            raise api_error(422, "AUDIENCE_SCOPE_INVALID", "只能选择本授课班在册学生")
+
+
 def validate_audience(
     db: Session,
     course: Course,
@@ -121,6 +143,7 @@ def save_audience(
     actor_id: int | None = None,
 ) -> None:
     task = _task_model(db, task_type, task_id)
+    _validate_offering_audience(db, task, audience_class_ids, whitelist_student_ids, excluded_student_ids)
     validate_audience(
         db, course, audience_mode=audience_mode,
         audience_class_ids=audience_class_ids,
@@ -194,7 +217,15 @@ def effective_student_ids(db: Session, *, task_type: str, task_id: int, course: 
         students = db.scalars(select(ExamAudienceStudent).where(ExamAudienceStudent.exam_id == task.id)).all()
     include_ids = {row.student_id for row in students if row.kind == "include"}
     exclude_ids = {row.student_id for row in students if row.kind == "exclude"}
-    return (base - exclude_ids) | include_ids
+    result = (base - exclude_ids) | include_ids
+    from app.models.teaching import CourseOffering, OfferingEnrollment
+    if task.offering_id is None:
+        return set()
+    offering = db.get(CourseOffering, task.offering_id)
+    if not offering or offering.status != "active":
+        return set()
+    members = set(db.scalars(select(OfferingEnrollment.student_id).where(OfferingEnrollment.offering_id == task.offering_id, OfferingEnrollment.status == "active")))
+    return result & members
 
 
 def require_effective_audience(db: Session, *, task_type: str, task_id: int, course: Course) -> set[int]:
@@ -261,7 +292,8 @@ def assignment_visible_condition(student_id: int):
             and_(Assignment.audience_mode == WHITELIST_ONLY, False),
         ),
     )
-    return and_(or_(base, include), or_(~exclude, include))
+    from app.services.offering_service import offering_student_predicate
+    return and_(or_(base, include), or_(~exclude, include), offering_student_predicate(Assignment.offering_id, student_id))
 
 
 def exam_visible_condition(student_id: int):
@@ -298,7 +330,8 @@ def exam_visible_condition(student_id: int):
             and_(Exam.audience_mode == WHITELIST_ONLY, False),
         ),
     )
-    return and_(or_(base, include), or_(~exclude, include))
+    from app.services.offering_service import offering_student_predicate
+    return and_(or_(base, include), or_(~exclude, include), offering_student_predicate(Exam.offering_id, student_id))
 
 
 def student_in_assignment_audience(db: Session, assignment: Assignment, student_id: int) -> bool:
@@ -393,12 +426,32 @@ def _csv_student_identifier(row: dict) -> tuple[str | None, str | None, str | No
     )
 
 
+def _resolve_task_student(db: Session, task, student_no, username, real_name):
+    if task.offering_id is None:
+        from app.services.roster_service import resolve_student_identity
+        return resolve_student_identity(db, student_no, username, real_name)
+    from app.models.teaching import OfferingEnrollment
+    query = select(User).join(OfferingEnrollment, OfferingEnrollment.student_id == User.id).where(
+        OfferingEnrollment.offering_id == task.offering_id,
+        OfferingEnrollment.status == "active", User.role == "student", User.status == "active",
+    )
+    if student_no:
+        query = query.where(User.student_no == student_no)
+    if username:
+        query = query.where(User.username == username)
+    student = db.scalar(query)
+    if real_name and student and real_name.strip() != student.real_name:
+        return None
+    return student
+
+
 def import_audience_students(
     db: Session, *, task_type: str, task_id: int, kind: str, rows: list[dict],
 ) -> dict:
     """按 CSV 行导入任务级白名单 / 排除名单。返回 created/updated/skipped/errors。"""
     if kind not in ("include", "exclude"):
         raise ValueError("kind 必须为 include 或 exclude")
+    task = _task_model(db, task_type, task_id)
     class_model, student_model = _link_models(task_type)
     if task_type == "assignment":
         existing_rows = db.scalars(select(AssignmentAudienceStudent).where(
@@ -420,11 +473,11 @@ def import_audience_students(
             result["skipped"] += 1
             result["errors"].append({"row": index, "student_no": student_no, "username": username, "status": "skipped", "message": "缺少学号或账号列"})
             continue
-        from app.services.roster_service import resolve_student_identity
-        student = resolve_student_identity(db, student_no, username, real_name)
+        student = _resolve_task_student(db, task, student_no, username, real_name)
         if student is None:
             result["skipped"] += 1
-            result["errors"].append({"row": index, "student_no": student_no, "username": username, "status": "skipped", "message": f"学生不存在或不可用（{real_name or student_no or username}）"})
+            message = "学生不存在、不可用或不在本授课班" if task.offering_id is not None else f"学生不存在或不可用（{real_name or student_no or username}）"
+            result["errors"].append({"row": index, "student_no": student_no, "username": username, "status": "skipped", "message": message})
             continue
         if student.id in seen:
             result["skipped"] += 1

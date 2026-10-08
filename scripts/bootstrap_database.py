@@ -118,6 +118,8 @@ def _upgrade(backend_dir: Path, database_url: str, target: str) -> None:
 def bootstrap_database() -> str:
     """Execute the safe migration sequence and return the final revision."""
     backend_dir = _backend_dir()
+    if str(backend_dir) not in sys.path:
+        sys.path.insert(0, str(backend_dir))
     database_url = _database_url(backend_dir)
     seed = _load_seed_module()
     environment = os.environ.get("DAI_ENVIRONMENT", "development")

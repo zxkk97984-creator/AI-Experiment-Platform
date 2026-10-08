@@ -7,21 +7,12 @@ from pydantic import ValidationError as PydanticValidationError
 from app.schemas import ExamQuestionCreate, ExamQuestionUpdate, PublicCase
 from app.services.exam_service import score_choice_answer, validate_publish, validate_question
 from conftest import auth_header, create_course_db, create_user, login
+from teaching_test_support import grant_course_students
 
 
 def _enroll_student_for_publish(db_session_factory, course_id, username):
-    """为考试发布创建一名已选课学生作为 all_enrolled audience。"""
-    from app.models import CourseEnrollment, User
-
-    with db_session_factory() as db:
-        student = db.query(User).filter(User.username == username).first()
-        db.add(CourseEnrollment(
-            course_id=course_id,
-            student_id=student.id,
-            status="enrolled",
-            origin="manual",
-        ))
-        db.commit()
+    """管理员显式分班授权，冻结 all_enrolled audience 的真实班级名单。"""
+    return grant_course_students(db_session_factory, course_id, [username])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -195,6 +186,7 @@ def test_publish_fails_with_invalid_questions(client, db_session_factory):
         "end_at": (now + timedelta(hours=1)).isoformat(),
     })
     eid = e.json()["id"]
+    _enroll_student_for_publish(db_session_factory, cid, "pv_s")
 
     # 创建一道无效题目（只有1个选项的单选题）
     r = client.post(f"/api/v1/exams/{eid}/questions", headers=auth_header(t_tok), json={
@@ -231,6 +223,7 @@ def test_active_code_draft_can_save_but_publish_requires_test_groups(client, db_
         "end_at": (now + timedelta(hours=1)).isoformat(),
     })
     eid = e.json()["id"]
+    _enroll_student_for_publish(db_session_factory, cid, "pv2_s")
 
     # 创建 active 编程题草稿，不要求 hidden_tests
     r = client.post(f"/api/v1/exams/{eid}/questions", headers=auth_header(t_tok), json={

@@ -6,7 +6,7 @@ finished_at/execution_time_ms 的取值规则；进行中评分 finished_at 为�
 """
 from datetime import datetime, timezone
 
-from conftest import create_user, login, auth_header, seed_basic_environment
+from conftest import grant_teaching_fixture, create_user, login, auth_header, seed_basic_environment
 
 from app.models import (
     Assignment, CodeGrade, Course, Exam, ExamAnswer, ExamQuestion,
@@ -63,6 +63,7 @@ def _seed_assignment_grade(db, teacher, student, *, status="completed", finished
         finished_at=datetime.now(timezone.utc) if finished else None,
     )
     db.add(cg)
+    grant_teaching_fixture(db, course, [student.id])
     db.commit()
     # 以库内实际值为准：MySQL DATETIME(0) 截断微秒，API 读到的正是截断值
     db.refresh(cg)
@@ -113,6 +114,7 @@ def _seed_exam_grade(db, teacher, student, *, status="completed", finished=True)
         finished_at=datetime.now(timezone.utc) if finished else None,
     )
     db.add(cg)
+    grant_teaching_fixture(db, course, [student.id])
     db.commit()
     # 以库内实际值为准：MySQL DATETIME(0) 截断微秒，API 读到的正是截断值
     db.refresh(cg)

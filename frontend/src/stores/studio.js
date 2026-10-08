@@ -197,7 +197,7 @@ export const useStudioStore = defineStore('studio', () => {
 
   function setCellEditable(cellId, val) {
     const cell = cells.value.find(c => c.id === cellId)
-    if (!cell || cell.type !== 'code') return
+    if (!cell || !['code', 'markdown'].includes(cell.type)) return
     cell.student_editable = val
     dirty.value = true
     saved.value = false
@@ -286,7 +286,7 @@ export const useStudioStore = defineStore('studio', () => {
       }
       return res.data
     } catch (e) {
-      error.value = { code: 'PUBLISH_FAILED', message: e.response?.data?.detail?.message || '发布失败' }
+      error.value = { code: e.response?.data?.detail?.code === 'LAB_ASSESSMENT_PUBLISH_REQUIRED' ? 'LAB_ASSESSMENT_PUBLISH_REQUIRED' : 'PUBLISH_FAILED', message: e.response?.data?.detail?.message || '发布失败' }
       return null
     } finally {
       saving.value = false

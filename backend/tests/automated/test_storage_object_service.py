@@ -7,7 +7,7 @@ from io import BytesIO
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
 
 from app.models import (
     StorageObject,
@@ -23,7 +23,7 @@ from app.services.storage_object_service import (
     StorageObjectValidationError,
 )
 from app.storage import StorageArea, StorageService
-from conftest import create_user
+from conftest import constraint_violation, create_user
 
 
 def _make_service(db, settings):
@@ -112,8 +112,11 @@ def test_storage_object_rejects_invalid_status_and_negative_size(db_session_fact
             metadata_json={},
         )
         db.add(invalid_status)
-        with pytest.raises(IntegrityError):
+        with constraint_violation() as rejected:
             db.commit()
+        if isinstance(rejected.value, OperationalError):
+            assert rejected.value.orig.args[0] == 3819
+        assert "ck_storage_objects_status" in str(rejected.value.orig)
         db.rollback()
 
         negative_size = StorageObject(
@@ -124,8 +127,11 @@ def test_storage_object_rejects_invalid_status_and_negative_size(db_session_fact
             metadata_json={},
         )
         db.add(negative_size)
-        with pytest.raises(IntegrityError):
+        with constraint_violation() as rejected:
             db.commit()
+        if isinstance(rejected.value, OperationalError):
+            assert rejected.value.orig.args[0] == 3819
+        assert "ck_storage_objects_size_nonnegative" in str(rejected.value.orig)
 
 
 def test_lifecycle_transitions_are_explicit_and_idempotent(db_session_factory, test_settings):

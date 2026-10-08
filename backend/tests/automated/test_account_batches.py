@@ -3,7 +3,7 @@ from datetime import timedelta
 from io import BytesIO
 
 from cryptography.fernet import Fernet
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 import pytest
 from sqlalchemy import func, select
 
@@ -55,23 +55,35 @@ def run_worker(factory, settings):
     return claim
 
 
+def exported_passwords(client, headers, batch_id):
+    response = client.post(f'{API}/admin/batches/{batch_id}/credentials', headers=headers,
+                           json={'current_password': 'Passw0rd!'})
+    assert response.status_code == 200
+    book = load_workbook(BytesIO(response.content), read_only=True)
+    try:
+        return {row[0]: row[3] for row in book.active.iter_rows(min_row=2, values_only=True)}
+    finally:
+        book.close()
+
+
 def test_import_requires_password_change_then_grants_normal_access(client, db_session_factory, test_settings, admin_headers):
     batch = preview(client, admin_headers, [['00001234', 'Student One']])
     assert batch['summary']['new_accounts'] == 1
     assert confirm(client, admin_headers, batch).status_code == 202
     run_worker(db_session_factory, test_settings)
+    temporary_password = exported_passwords(client, admin_headers, batch['id'])['00001234']
     with db_session_factory() as db:
         student = db.scalar(select(User).where(User.student_no == '00001234'))
         assert student.username == '00001234'
         assert student.must_change_password is True
         assert student.temporary_password_expires_at is not None
-        assert verify_password('tzcaicode', student.password_hash)
-    token, _ = login(client, '00001234', 'tzcaicode')
+        assert verify_password(temporary_password, student.password_hash)
+    token, _ = login(client, '00001234', temporary_password)
     headers = auth_header(token)
     assert client.get(f'{API}/auth/me', headers=headers).json()['must_change_password'] is True
     assert client.get(f'{API}/courses', headers=headers).status_code == 403
     changed = client.patch(f'{API}/users/me/password', headers=headers,
-                           json={'current_password': 'tzcaicode', 'password': 'PersonalPassword!123'})
+                           json={'current_password': temporary_password, 'password': 'PersonalPassword!123'})
     assert changed.status_code == 204, changed.text
     assert client.get(f'{API}/auth/me', headers=headers).status_code == 401
     fresh, _ = login(client, '00001234', 'PersonalPassword!123')
@@ -201,7 +213,7 @@ def test_identity_conflict_after_preparation_keeps_entire_import_unapplied(clien
 def test_policy_change_requires_fresh_preview(client, db_session_factory, admin_headers):
     batch = preview(client, admin_headers, [['00002002', 'Policy student']])
     response = client.put(f'{API}/admin/account-security', headers=admin_headers,
-                          json={'current_password': 'Passw0rd!', 'default_password': 'NewTemporary!123', 'temporary_days': 10})
+                          json={'current_password': 'Passw0rd!', 'temporary_days': 10})
     assert response.status_code == 200, response.text
     response = confirm(client, admin_headers, batch)
     assert response.status_code == 409, response.text

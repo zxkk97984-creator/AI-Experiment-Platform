@@ -1,16 +1,20 @@
 <script setup>
 import { vDialogFocus } from '../../../directives/dialogFocus.js'
 /** 创建考试弹窗：表单与课程选择在组件内，save 上抛规范化载荷，完整校验与 API 由父组件负责。 */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import AppIcon from '../../ui/AppIcon.vue'
 
 const props = defineProps({
   open: { type: Boolean, required: true },
   courses: { type: Array, required: true },
+  offerings: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['save', 'close'])
 
 const form = ref({ title: '', course_id: '', duration_minutes: 60, start_at: '', end_at: '' })
+const offeringId = ref('')
+const courseOfferings = computed(() => props.offerings.filter(o => o.course_id === Number(form.value.course_id) && o.status === 'active'))
+watch(() => form.value.course_id, () => { offeringId.value = '' })
 const courseModalOpen = ref(false)
 const manualCourseId = ref('')
 
@@ -42,6 +46,7 @@ function confirmManualCourse() {
 
 function save() {
   emit('save', {
+    ...(offeringId.value ? { offering_id: Number(offeringId.value) } : {}),
     title: form.value.title.trim(),
     course_id: Number(form.value.course_id),
     duration_minutes: Number(form.value.duration_minutes),
@@ -58,6 +63,7 @@ function save() {
       <div class="form-group"><label>考试名称</label><input v-model="form.title" name="title" placeholder="输入考试名称" /></div>
       <div class="grid-2"><div class="form-group"><label>课程</label><button type="button" class="course-picker" @click="openCourseModal"><span v-if="selectedCourse">{{ selectedCourse.title }}（ID: {{ selectedCourse.id }}）</span><span v-else-if="form.course_id">课程 ID: {{ form.course_id }}</span><span v-else class="placeholder">选择课程</span><AppIcon name="chevron-down" :size="17" /></button></div><div class="form-group"><label>时长（分钟）</label><input v-model.number="form.duration_minutes" name="duration-minutes" type="number" min="1" /></div></div>
       <div class="grid-2"><div class="form-group"><label>开始时间</label><input v-model="form.start_at" type="datetime-local" /></div><div class="form-group"><label>最晚进入时间</label><input v-model="form.end_at" type="datetime-local" /></div></div>
+      <div class="form-group"><label for="exam-offering">任务归属</label><select id="exam-offering" v-model="offeringId"><option value="">共享课程模板（仅内容负责人可创建）</option><option v-for="o in courseOfferings" :key="o.id" :value="o.id">{{ o.term_name }} · {{ o.class_name }}</option></select></div>
       <p class="form-hint">“最晚进入时间”只限制新学生进入；已开始的学生始终获得完整考试时长。成绩、题目和答案默认不公开。</p>
       <div class="create-actions"><button class="btn-ghost" @click="emit('close')">取消</button><button class="btn-primary" data-action="save-exam" :disabled="!canSave" @click="save">确定</button></div>
     </div>

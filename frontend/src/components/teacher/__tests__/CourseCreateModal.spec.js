@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 
 const showToastMock = vi.hoisted(() => vi.fn())
+const authState = vi.hoisted(() => ({ isAdmin: true }))
+vi.mock('../../../stores/auth.js', () => ({ useAuthStore: () => authState }))
 
 vi.mock('../../../api/courses', () => ({
   coursesAPI: {
@@ -52,6 +54,7 @@ function mountModal() {
 describe('CourseCreateModal', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    authState.isAdmin = true
     academicsAPI.listClasses.mockResolvedValue({
       data: { items: [{ id: 10, name: '计算机 2601 班', student_count: 32 }] },
     })

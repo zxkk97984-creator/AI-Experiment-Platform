@@ -1,7 +1,7 @@
 """作业发布门禁测试：POST 仅 draft、PATCH 不可改 status、发布需至少一题、零题不视为已提交。"""
 
 from conftest import auth_header, create_course_db, create_user, login
-from app.models import CourseEnrollment
+from teaching_test_support import grant_course_students
 
 API = "/api/v1"
 
@@ -11,19 +11,18 @@ def _setup_teacher(client, db_session_factory):
     student = create_user(db_session_factory, "audience-student", "student")
     token, _ = login(client, "teacher")
     course_id = create_course_db(db_session_factory, teacher_username="teacher", status="draft")
-    with db_session_factory() as db:
-        db.add(CourseEnrollment(course_id=course_id, student_id=student.id, status="enrolled", origin="manual"))
-        db.commit()
+    grant_course_students(db_session_factory, course_id, ["audience-student"])
     return token, course_id
 
 
-def _create_draft_assignment(client, token, course_id, title="作业"):
+def _create_draft_assignment(client, db_sf, token, course_id, title="作业"):
     response = client.post(
         f"{API}/assignments",
         headers=auth_header(token),
         json={"course_id": course_id, "title": title, "status": "draft"},
     )
     assert response.status_code == 201, response.text
+    grant_course_students(db_sf, course_id, ["audience-student"])
     return response.json()
 
 
@@ -40,13 +39,13 @@ def test_create_assignment_rejects_published_status(client, db_session_factory):
 
 def test_create_assignment_accepts_draft(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     assert assignment["status"] == "draft"
 
 
 def test_patch_cannot_change_status(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     response = client.patch(
         f"{API}/assignments/{assignment['id']}",
         headers=auth_header(token),
@@ -59,7 +58,7 @@ def test_patch_cannot_change_status(client, db_session_factory):
 
 def test_publish_requires_at_least_one_question(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     response = client.post(
         f"{API}/assignments/{assignment['id']}/publish",
         headers=auth_header(token),
@@ -70,7 +69,7 @@ def test_publish_requires_at_least_one_question(client, db_session_factory):
 
 def test_publish_succeeds_with_question(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     question = client.post(
         f"{API}/assignments/{assignment['id']}/questions",
         headers=auth_header(token),
@@ -95,7 +94,7 @@ def test_publish_succeeds_with_question(client, db_session_factory):
 
 def test_unpublish_returns_to_draft(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     client.post(
         f"{API}/assignments/{assignment['id']}/questions",
         headers=auth_header(token),
@@ -123,7 +122,7 @@ def test_unpublish_returns_to_draft(client, db_session_factory):
 
 def test_republish_is_idempotent(client, db_session_factory):
     token, course_id = _setup_teacher(client, db_session_factory)
-    assignment = _create_draft_assignment(client, token, course_id)
+    assignment = _create_draft_assignment(client, db_session_factory, token, course_id)
     client.post(
         f"{API}/assignments/{assignment['id']}/questions",
         headers=auth_header(token),

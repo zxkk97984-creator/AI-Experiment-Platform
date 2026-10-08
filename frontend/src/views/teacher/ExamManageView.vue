@@ -7,6 +7,7 @@ import TeacherPageHeader from '../../components/teacher/TeacherPageHeader.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
 import ExamCreateDialog from '../../components/teacher/exam/ExamCreateDialog.vue'
 import { examsAPI } from '../../api/exams.js'
+import { offeringsAPI } from '../../api/offerings.js'
 import { coursesAPI } from '../../api/courses.js'
 import { useAppStore } from '../../stores/app.js'
 import { formatDateTime } from '../../utils/format.js'
@@ -16,6 +17,11 @@ const router = useRouter()
 const app = useAppStore()
 const exams = ref([])
 const courses = ref([])
+const offerings = ref([])
+async function fetchOfferings() {
+  try { offerings.value = (await offeringsAPI.list()).data.items || [] }
+  catch { app.showToast('授课班级加载失败，请刷新后选择班级', 'error') }
+}
 const loading = ref(true)
 const createOpen = ref(false)
 const query = ref('')
@@ -80,7 +86,7 @@ async function handleSave(payload) {
     if (res?.data?.id) router.push(`/teacher/exams/${res.data.id}/edit`)
   } catch (error) { app.showToast(error.response?.data?.detail?.message || '创建失败', 'error') }
 }
-onMounted(() => { fetchExams(); fetchCourses() })
+onMounted(() => { fetchExams(); fetchCourses(); fetchOfferings() })
 </script>
 
 <template>
@@ -124,7 +130,7 @@ onMounted(() => { fetchExams(); fetchCourses() })
       </section>
     </section>
 
-    <ExamCreateDialog :open="createOpen" :courses="courses" @save="handleSave" @close="closeCreateModal" />
+    <ExamCreateDialog :open="createOpen" :courses="courses" :offerings="offerings" @save="handleSave" @close="closeCreateModal" />
   </AppLayout>
 </template>
 

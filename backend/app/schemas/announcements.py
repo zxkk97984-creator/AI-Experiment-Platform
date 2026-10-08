@@ -10,8 +10,9 @@ class AnnouncementCreate(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=2000)
     priority: Literal["normal", "important", "urgent"] = "normal"
-    scope: Literal["global", "course"]
+    scope: Literal["global", "course", "offering"]
     course_id: int | None = None
+    offering_id: int | None = None
     expires_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -20,6 +21,10 @@ class AnnouncementCreate(BaseModel):
             raise ValueError("课程公告必须指定 course_id")
         if self.scope == "global" and self.course_id is not None:
             raise ValueError("全局公告不能指定 course_id")
+        if self.scope == "offering" and self.offering_id is None:
+            raise ValueError("班级公告必须指定授课实例")
+        if self.scope != "offering" and self.offering_id is not None:
+            raise ValueError("非班级公告不可指定授课实例")
         return self
 
     @field_validator("expires_at")

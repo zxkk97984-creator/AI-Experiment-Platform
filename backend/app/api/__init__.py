@@ -13,6 +13,7 @@ from .course_covers import router as course_covers_router
 from .environments import router as environments_router
 from .exams import router as exams_router
 from .experiments import router as experiments_router
+from .labs import router as labs_router
 from .judge import router as judge_router
 from .jupyter import router as jupyter_router
 from .lesson_progress import router as lesson_progress_router
@@ -43,6 +44,7 @@ api_router.include_router(lesson_progress_router)
 api_router.include_router(lesson_videos_router)
 api_router.include_router(exams_router)
 api_router.include_router(experiments_router)
+api_router.include_router(labs_router)
 api_router.include_router(jupyter_router)
 api_router.include_router(notebooks_router)
 api_router.include_router(studio_router)
@@ -53,3 +55,12 @@ api_router.include_router(notifications_router)
 api_router.include_router(admin_logs_router)
 
 api_router.include_router(account_management_router)
+
+from .offerings import router as offerings_router
+api_router.include_router(offerings_router)
+
+from .course_materials import router as course_materials_router
+api_router.include_router(course_materials_router)
+
+from .gradebook import router as gradebook_router
+api_router.include_router(gradebook_router)

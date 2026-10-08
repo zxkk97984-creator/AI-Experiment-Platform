@@ -5,6 +5,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { experimentsAPI } from '../../api/experiments.js'
+import { submissionStatus } from '../../components/labs/labHelpers.js'
 import { useAppStore } from '../../stores/app.js'
 import { useAuthStore } from '../../stores/auth.js'
 import AppLayout from '../../components/layout/AppLayout.vue'
@@ -228,7 +229,7 @@ onBeforeUnmount(() => { window.clearTimeout(searchTimer); requestGuard.invalidat
                   <td class="meta">{{ formatDateTime(submission.submitted_at) }}</td>
                   <td>
                     <span class="badge status-pill" :class="submission.score == null ? 'badge-warning pending' : 'badge-success graded'">
-                      <span class="dot"></span>{{ submission.score == null ? '待评分' : '已评分' }}
+                      <span class="dot"></span>{{ submissionStatus(submission) }}
                     </span>
                   </td>
                   <td class="cell-num">

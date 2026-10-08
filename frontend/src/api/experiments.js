@@ -3,13 +3,13 @@ import client from './client.js'
 /** 统一的实验 API — 仅此入口，不再调用 /notebooks */
 export const experimentsAPI = {
   /** 确保学生有 lesson notebook 记录 */
-  ensureForLesson(lessonId) {
-    return client.post(`/experiments/records/ensure-for-lesson/${lessonId}`)
+  ensureForLesson(lessonId, offeringId) {
+    return client.post(`/experiments/records/ensure-for-lesson/${lessonId}`, null, { params: offeringId ? { offering_id: offeringId } : {} })
   },
 
   /** 确保学生有 module 实验记录 */
-  ensureForModule(moduleId) {
-    return client.post(`/experiments/records/ensure-for-module/${moduleId}`)
+  ensureForModule(moduleId, offeringId) {
+    return client.post(`/experiments/records/ensure-for-module/${moduleId}`, null, { params: offeringId ? { offering_id: offeringId } : {} })
   },
 
   /** 获取记录详情（含 cells + outputs） */
@@ -59,8 +59,8 @@ export const experimentsAPI = {
 
   // 实验提交
   /** 学生提交实验快照——client_request_id 保证幂等 */
-  submitRecord(recordId, clientRequestId) {
-    return client.post(`/experiments/records/${recordId}/submit`, { client_request_id: clientRequestId })
+  submitRecord(recordId, clientRequestId, options = {}) {
+    return client.post(`/experiments/records/${recordId}/submit`, { client_request_id: clientRequestId, ...options })
   },
   /** 查看提交列表 */
   listSubmissions(params) { return client.get('/experiments/submissions', { params }) },

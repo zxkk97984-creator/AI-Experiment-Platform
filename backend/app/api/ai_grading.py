@@ -102,8 +102,13 @@ def _ensure_course_teacher(db: Session, course_id: int, user: User):
     course = db.get(Course, course_id)
     if not course:
         raise api_error(404, "NOT_FOUND", "课程不存在")
+    task = db.info.get("teaching_question_task")
+    if task is not None and task.course_id == course_id and task.offering_id:
+        from app.services.offering_service import task_content_manager
+        task_content_manager(db, task, user)
+        return
     if course.teacher_id != user.id:
-        raise api_error(403, "FORBIDDEN", "仅课程教师可操作")
+        raise api_error(403, "FORBIDDEN", "仅课程负责人可修改共享评分配置")
 
 
 def _get_course_id_for_question(db: Session, kind: str, question_id: int) -> int:
@@ -114,6 +119,7 @@ def _get_course_id_for_question(db: Session, kind: str, question_id: int) -> int
         a = db.get(Assignment, q.assignment_id)
         if a is None:
             raise api_error(404, "NOT_FOUND", "作业不存在")
+        db.info["teaching_question_task"] = a
         return a.course_id
     elif kind == "exam":
         q = db.get(ExamQuestion, question_id)
@@ -122,6 +128,7 @@ def _get_course_id_for_question(db: Session, kind: str, question_id: int) -> int
         e = db.get(Exam, q.exam_id)
         if e is None:
             raise api_error(404, "NOT_FOUND", "考试不存在")
+        db.info["teaching_question_task"] = e
         return e.course_id
     raise api_error(400, "INVALID_KIND", "kind 必须为 assignment 或 exam")
 
@@ -131,7 +138,7 @@ def _teacher_course_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return []
     rows = db.scalars(
-        select(Course.id).where(Course.teacher_id == user.id)
+        select(Course.id).where(teacher_course_condition(user.id))
     ).all()
     return list(rows)
 
@@ -992,3 +999,5 @@ def regrade_question(
     db.commit()
 
     return {"ok": True, "total": count, "queued": queued}
+
+from app.services.offering_service import teacher_course_condition

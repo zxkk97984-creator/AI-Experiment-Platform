@@ -155,7 +155,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             path_template = ""
             route = request.scope.get("route")
             if route is not None:
-                path_template = getattr(route, "path", "") or ""
+                # FastAPI 0.142 keeps the original APIRoute in scope while
+                # its effective context owns the included router prefixes.
+                # Both values are registered templates; never use URL.path.
+                context = request.scope.get("fastapi", {}).get("effective_route_context")
+                path_template = (getattr(context, "path_format", "")
+                                 or getattr(route, "path_format", "")
+                                 or getattr(route, "path", "") or "")
             log_method = logger.warning if status_code >= 500 else logger.info
             log_method(
                 "http_request",

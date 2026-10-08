@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import CheckConstraint
+from sqlalchemy import CheckConstraint, UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 
 from app import models
@@ -263,6 +263,8 @@ def test_metadata_contains_unified_notebook_experiment_and_exam_schema():
 
     experiment_columns = set(tables["experiment_records"].c.keys())
     assert {
+        "offering_id",
+        "scope_key",
         "lesson_id",
         "module_id",
         "student_id",
@@ -275,6 +277,13 @@ def test_metadata_contains_unified_notebook_experiment_and_exam_schema():
         "submitted_at",
         "completed_at",
     } <= experiment_columns
+    unique_keys = {tuple(column.name for column in constraint.columns)
+                   for constraint in tables['experiment_records'].constraints
+                   if isinstance(constraint, UniqueConstraint)}
+    assert ('scope_key', 'lesson_id', 'student_id') in unique_keys
+    assert ('scope_key', 'module_id', 'student_id') in unique_keys
+    assert ('lesson_id', 'student_id') not in unique_keys
+    assert ('module_id', 'student_id') not in unique_keys
 
     question_columns = set(tables["exam_questions"].c.keys())
     assert {
@@ -327,6 +336,7 @@ def _alembic_env(tmp_path, db_name: str) -> dict:
     env["DAI_DATABASE_URL"] = f"sqlite:///{db_path}"
     env["DAI_ALLOW_ENVIRONMENT_V2_DOWNGRADE"] = "true"
     env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_LAB_DOWNGRADE"] = "true"
     # 确保 backend/ 在路径上以便 alembic/env.py 能 from app.config import
     env["PYTHONPATH"] = str(BACKEND_ROOT)
     return env
@@ -385,8 +395,9 @@ def test_clean_migration_upgrade_head(tmp_path):
 
 
 def test_migration_downgrade_upgrade_roundtrip(tmp_path):
-    """downgrade → upgrade roundtrip 完整无报错"""
+    """Explicit disposable SQLite authorization retains the migration roundtrip."""
     env = _alembic_env(tmp_path, "roundtrip.db")
+    env['DAI_ALLOW_TEACHING_DOWNGRADE'] = '1'
     _upgrade_head_seeded(env)
 
     r2 = subprocess.run(

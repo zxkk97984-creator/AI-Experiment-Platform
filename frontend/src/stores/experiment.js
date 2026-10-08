@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { experimentsAPI } from '../api/experiments.js'
+import { labsAPI } from '../api/labs.js'
 import { useAppStore } from './app.js'
 
 export const useExperimentStore = defineStore('experiment', () => {
@@ -14,6 +15,10 @@ export const useExperimentStore = defineStore('experiment', () => {
   const entryDescription = ref('')
   // Phase 5：学生可见环境摘要（NotebookPlayer 标题下提示；不含 digest/tag）
   const environmentSummary = ref(null)
+  const labEnabled = ref(false)
+  const cellCheckTargets = ref([])
+  const cellCheckResults = ref({})
+  const cellCheckTimers = new Map()
 
   const dirty = ref(false)
   const saving = ref(false)
@@ -28,6 +33,7 @@ export const useExperimentStore = defineStore('experiment', () => {
   const submitAttemptCount = ref(0)
   const submissions = ref([])
   const currentClientRequestId = ref(null)
+  let currentSubmissionKey = null
 
   const dirtySources = ref({})
 
@@ -50,13 +56,13 @@ export const useExperimentStore = defineStore('experiment', () => {
   }
 
   // ── 加载 ──
-  async function openLesson(lessonId, courseId) {
-    context.value = { type: 'lesson', id: lessonId, courseId, returnPath: `/student/courses/${courseId}`, title: null }
+  async function openLesson(lessonId, courseId, offeringId = null) {
+    context.value = { type: 'lesson', id: lessonId, courseId, offeringId, returnPath: `/student/courses/${courseId}`, title: null }
     await _load(lessonId, null)
   }
 
-  async function openModule(moduleId) {
-    context.value = { type: 'module', id: moduleId, returnPath: '/student/experiments', title: null }
+  async function openModule(moduleId, offeringId = null) {
+    context.value = { type: 'module', id: moduleId, offeringId, returnPath: '/student/experiments', title: null }
     await _load(null, moduleId)
   }
 
@@ -81,8 +87,8 @@ export const useExperimentStore = defineStore('experiment', () => {
 
     try {
       const ensRes = lessonId != null
-        ? await experimentsAPI.ensureForLesson(lessonId)
-        : await experimentsAPI.ensureForModule(moduleId)
+        ? await (context.value?.offeringId ? experimentsAPI.ensureForLesson(lessonId, context.value.offeringId) : experimentsAPI.ensureForLesson(lessonId))
+        : await (context.value?.offeringId ? experimentsAPI.ensureForModule(moduleId, context.value.offeringId) : experimentsAPI.ensureForModule(moduleId))
       recordId.value = ensRes.data.id
       recordRevision.value = ensRes.data.record_revision
 
@@ -91,7 +97,7 @@ export const useExperimentStore = defineStore('experiment', () => {
       const raw = (d.cells || []).map(c => ({
         id: c.id, type: c.type || 'code', source: c.source || '',
         order: c.order || 0,
-        student_editable: c.student_editable !== false,
+        student_editable: c.student_editable == null ? c.type !== 'markdown' : c.student_editable === true,
         outputs: c.outputs || null, isRunning: false,
       }))
       raw.sort((a, b) => a.order - b.order)
@@ -99,6 +105,7 @@ export const useExperimentStore = defineStore('experiment', () => {
       entryName.value = d.entry_name || ''
       entryDescription.value = d.entry_description || ''
       environmentSummary.value = d.environment_summary || null
+      labEnabled.value = Boolean(d.lab_enabled)
       if (context.value) context.value.title = entryName.value
       if (d.record_revision != null) recordRevision.value = d.record_revision
       saved.value = true
@@ -122,6 +129,9 @@ export const useExperimentStore = defineStore('experiment', () => {
     const cell = cells.value.find(c => c.id === cellId)
     if (!cell || !cell.student_editable) return
     cell.source = source
+    for (const id of Object.keys(cellCheckResults.value)) cellCheckResults.value[id] = { state: 'stale', message: '代码已修改，请重新运行检查' }
+    for (const timer of cellCheckTimers.values()) clearTimeout(timer)
+    cellCheckTimers.clear()
     dirtySources.value = { ...dirtySources.value, [cellId]: source }
     dirty.value = true
     saved.value = false
@@ -241,7 +251,7 @@ export const useExperimentStore = defineStore('experiment', () => {
     }
   }
 
-  async function executeCell(cellId) {
+  async function executeCell(cellId, checkFeedback = true) {
     const cell = cells.value.find(c => c.id === cellId)
     if (!cell || cell.type !== 'code') return
     executingCellId.value = cellId
@@ -252,6 +262,7 @@ export const useExperimentStore = defineStore('experiment', () => {
         execution_time_ms: res.data.execution_time_ms,
         execution_count: res.data.execution_count,
       }
+      if (checkFeedback && cellCheckTargets.value.includes(cellId)) await checkCell(cellId)
     } catch (e) {
       const code = e.response?.data?.detail?.code
       const message = e.response?.data?.detail?.message
@@ -264,10 +275,47 @@ export const useExperimentStore = defineStore('experiment', () => {
     }
   }
 
+  async function checkCell(cellId, allCells = false) {
+    const checkedRecord = recordId.value
+    if (!(await flushSave()) || dirty.value || conflict.value) {
+      cellCheckResults.value[cellId] = { state: 'unavailable', message: '保存后才能检查，请解决保存冲突' }
+      return
+    }
+    const revision = recordRevision.value
+    const targets = allCells ? cellCheckTargets.value : [cellId]
+    for (const target of targets) cellCheckResults.value[target] = { state: 'checking', message: '正在从头重放并检查…' }
+    try {
+      const { data } = await labsAPI.checkCell(checkedRecord, cellId, { expected_record_revision: revision, client_request_id: crypto.randomUUID(), all_cells: allCells })
+      pollCellCheck(data.id, cellId, checkedRecord, revision, 0, targets)
+    } catch (e) {
+      for (const target of targets) cellCheckResults.value[target] = { state: 'unavailable', message: e.response?.data?.detail?.message || '检查暂不可用，请稍后重新运行' }
+    }
+  }
+
+  async function pollCellCheck(runId, cellId, checkedRecord, revision, attempts, targets = [cellId]) {
+    if (recordId.value !== checkedRecord || recordRevision.value !== revision || dirty.value) return
+    try {
+      const { data } = await labsAPI.getRun(runId)
+      if (recordId.value !== checkedRecord || recordRevision.value !== revision || dirty.value) return
+      if (data.stale) for (const target of targets) cellCheckResults.value[target] = { state: 'stale', message: '作答已变化，请重新运行检查' }
+      else if (data.status === 'succeeded') {
+        const items = Object.values(data.result?.cell_checks || {})
+        for (const target of targets) {
+          const marks = targets.length > 1 ? items.filter(item => item.cell_id === target) : items
+          const passed = marks.length > 0 && marks.every(item => item.passed === true)
+          cellCheckResults.value[target] = { state: passed ? 'passed' : 'failed', message: passed ? '单元格检查通过' : '尚未通过全部评分点，请检查实现' }
+        }
+      } else if (['queued', 'running', 'recovering'].includes(data.status) && attempts < 180) {
+        cellCheckTimers.set(cellId, setTimeout(() => pollCellCheck(runId, cellId, checkedRecord, revision, attempts + 1, targets), 2000))
+      } else for (const target of targets) cellCheckResults.value[target] = { state: 'unavailable', message: data.error_message || '检查未完成，可稍后重新运行' }
+    } catch { for (const target of targets) cellCheckResults.value[target] = { state: 'unavailable', message: '检查状态加载失败，请重新运行或刷新' } }
+  }
+
   async function executeAllCells() {
     for (const cell of cells.value.filter(c => c.type === 'code')) {
-      await executeCell(cell.id)
+      await executeCell(cell.id, false)
     }
+    if (cellCheckTargets.value.length) await checkCell(cellCheckTargets.value.at(-1), true)
   }
 
   async function interruptKernel() {
@@ -284,18 +332,23 @@ export const useExperimentStore = defineStore('experiment', () => {
   }
 
   // ── 提交 ──
-  async function submitExperiment() {
-    if (!recordId.value) return false
+  async function submitExperiment(options) {
+    if (!recordId.value || submitting.value || conflict.value) return false
+    submitting.value = true
 
     // 先 flush 所有待保存数据
     if (dirty.value || saving.value || pendingFlush) {
       const ok = await flushSave()
       if (!ok) {
         app.showToast('保存失败，请检查网络后重试提交', 'error')
+        submitting.value = false
         return false
       }
     }
 
+    const payload = options ? { ...options, expected_record_revision: recordRevision.value } : undefined
+    const submissionKey = JSON.stringify([recordId.value, recordRevision.value, payload])
+    if (currentSubmissionKey !== submissionKey) { currentClientRequestId.value = null; currentSubmissionKey = submissionKey }
     // 生成/复用 client_request_id
     if (!currentClientRequestId.value) {
       currentClientRequestId.value = crypto.randomUUID()
@@ -306,6 +359,7 @@ export const useExperimentStore = defineStore('experiment', () => {
       const res = await experimentsAPI.submitRecord(
         recordId.value,
         currentClientRequestId.value,
+        ...(payload ? [payload] : []),
       )
       const sub = res.data
       lastSubmitTime.value = new Date().toISOString()
@@ -355,11 +409,15 @@ export const useExperimentStore = defineStore('experiment', () => {
   function destroy() {
     clearTimeout(debounceTimer)
     _stopSafety()
+    for (const timer of cellCheckTimers.values()) clearTimeout(timer)
+    cellCheckTimers.clear()
+    cellCheckTargets.value = []
+    cellCheckResults.value = {}
   }
 
   return {
     context, recordId, recordRevision, cells, entryName, entryDescription,
-    environmentSummary,
+    environmentSummary, labEnabled, cellCheckTargets, cellCheckResults,
     dirty, saving, saved, error, conflict, executingCellId,
     submitting, lastSubmitTime, submitAttemptCount, submissions, currentClientRequestId,
     openLesson, openModule,

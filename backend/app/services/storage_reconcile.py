@@ -79,11 +79,17 @@ _AREA_PREFIXES: tuple[tuple[StorageArea, str], ...] = (
     (StorageArea.COVERS, "covers"),
     (StorageArea.VIDEOS, "lessons"),
     (StorageArea.STUDIO, "templates"),
+    (StorageArea.DATASETS, "datasets"),
+    (StorageArea.ARTIFACTS, "artifacts"),
+    (StorageArea.MATERIALS, "materials"),
 )
 _NAMESPACE_AREAS = {
     "course-covers": StorageArea.COVERS,
     "lesson-videos": StorageArea.VIDEOS,
     "studio-assets": StorageArea.STUDIO,
+    "lab-datasets": StorageArea.DATASETS,
+    "lab-artifacts": StorageArea.ARTIFACTS,
+    "course-materials": StorageArea.MATERIALS,
 }
 _QUARANTINE_TABLE = "storage_quarantines"
 
@@ -420,6 +426,8 @@ class StorageReconcileService:
                 )
 
         for area, prefix in _AREA_PREFIXES:
+            if area.value not in self.storage.configured_areas:
+                continue
             try:
                 physical_objects = self.storage.list_objects(area, prefix)
             except StorageError as exc:

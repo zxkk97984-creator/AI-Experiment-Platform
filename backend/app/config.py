@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parents[1] / "storage" / "covers"
     )
     cover_max_upload_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    material_storage_dir: str = ""
+    material_max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    material_large_max_upload_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
+    material_url_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     # Storage backend selection is deliberately provider-neutral.  Development
     # defaults to local files; S3-compatible deployments configure the
     # endpoint and credentials without changing business services or DB keys.
@@ -203,11 +207,55 @@ class Settings(BaseSettings):
     def cover_storage_path(self) -> Path:
         return Path(self.cover_storage_dir).resolve()
 
+    @property
+    def material_storage_path(self) -> Path:
+        return Path(self.material_storage_dir).resolve() if self.material_storage_dir else self.studio_storage_path.parent / "materials"
+
+    # Software environments are versioned separately from host resource budgets.
+    lab_enabled: bool = True
+    lab_worker_mode: Literal['general', 'benchmark'] = 'general'
+    lab_worker_node_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$')
+    lab_benchmark_node_id: str = Field(default='', pattern=r'^(?:[A-Za-z0-9][A-Za-z0-9_.:-]{0,127})?$')
+    lab_storage_dir: str = ""
+    lab_upload_max_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
+    lab_expanded_max_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    lab_file_max_bytes: int = Field(default=500 * 1024 * 1024, gt=0)
+    lab_max_files: int = Field(default=100000, ge=1)
+    lab_artifact_quota_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    lab_training_concurrency: int = Field(default=1, ge=1, le=64)
+    lab_total_cpus: float = Field(default=4, gt=0, le=1024)
+    lab_total_memory_mb: int = Field(default=8192, ge=1024)
+    lab_interactive_reserved_memory_mb: int = Field(default=2048, ge=256)
+    lab_max_kernels: int = Field(default=20, ge=1)
+    lab_gpu_enabled: bool = False
+    lab_gpu_devices: str = ""
+    lab_log_max_bytes: int = Field(default=1048576, ge=4096, le=8 * 1024 * 1024)
+    lab_queue_poll_seconds: float = Field(default=2, gt=0, le=60)
+    lab_lease_seconds: int = Field(default=120, ge=30)
+    lab_max_attempts: int = Field(default=3, ge=1, le=10)
+    lab_min_free_disk_mb: int = Field(default=2048, ge=64)
+
+    @model_validator(mode='after')
+    def _validate_benchmark_node(self):
+        if self.lab_worker_mode == 'benchmark' and (not self.lab_benchmark_node_id
+                or self.lab_worker_node_id != self.lab_benchmark_node_id):
+            raise ValueError('专用基准 worker 必须配置相同的本机和目标 Docker daemon ID')
+        return self
+
+    @property
+    def lab_storage_path(self) -> Path:
+        return Path(self.lab_storage_dir).resolve() if self.lab_storage_dir else self.studio_storage_path.parent / "lab"
+
+    @property
+    def lab_work_path(self) -> Path:
+        return (Path(self.judge_work_dir).resolve() if self.judge_work_dir else self.studio_storage_path.parent / "judge-work") / "labs"
+
     # ── 登录限流 ──
     account_security_keys: str = ""  # Comma-separated Fernet keys, newest first; separate from JWT.
     account_worker_hash_concurrency: int = Field(default=2, ge=1, le=8)
     account_batch_retention_days: int = Field(default=90, ge=1)
     account_audit_retention_days: int = Field(default=365, ge=90)
+    account_credential_export_hours: int = Field(default=24, ge=1, le=72)
     login_rate_limit_window_seconds: int = Field(default=900, ge=60)
     login_rate_limit_user_max_failures: int = Field(default=10, ge=1)
     login_rate_limit_ip_max_attempts: int = Field(default=30, ge=1)

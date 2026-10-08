@@ -33,12 +33,16 @@ def publish_announcement(
     if current_user.role == "admin" and payload.scope != "global":
         raise api_error(403, "FORBIDDEN", "管理员仅可发布全局公告")
     if current_user.role == "teacher":
-        if payload.scope != "course":
+        if payload.scope not in ("course", "offering"):
             raise api_error(403, "FORBIDDEN", "教师仅可向自己的课程发布公告")
+        if payload.scope == "offering":
+            from app.services.offering_service import require_offering
+            offering = require_offering(db, payload.offering_id, current_user, write=True)
+            payload.course_id = offering.course_id
         course = db.get(Course, payload.course_id)
         if not course:
             raise api_error(404, "NOT_FOUND", "课程不存在")
-        if course.teacher_id != current_user.id:
+        if payload.scope == "course" and course.teacher_id != current_user.id:
             raise api_error(403, "FORBIDDEN", "仅课程教师可发布公告")
 
     now = datetime.now(timezone.utc)
@@ -55,7 +59,8 @@ def publish_announcement(
         content=content,
         priority=payload.priority,
         scope=payload.scope,
-        course_id=payload.course_id if payload.scope == "course" else None,
+        course_id=payload.course_id if payload.scope in ("course", "offering") else None,
+        offering_id=payload.offering_id,
         author_id=current_user.id,
         expires_at=payload.expires_at,
     )

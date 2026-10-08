@@ -83,6 +83,7 @@ describe('useExperimentStore', () => {
       type: 'lesson',
       id: 10,
       courseId: 5,
+      offeringId: null,
       returnPath: '/student/courses/5',
       title: 'Test Notebook',
     })

@@ -460,6 +460,7 @@ class EnrollmentRead(BaseModel):
 
 
 class AssignmentCreate(BaseModel):
+    offering_id: int | None = Field(default=None, gt=0)
     course_id: int
     title: str
     description: str | None = None
@@ -511,6 +512,7 @@ class AssignmentUpdate(BaseModel):
 class AssignmentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    offering_id: int | None = None
     id: int
     course_id: int
     title: str
@@ -710,6 +712,7 @@ class ExamSampleRunRequest(BaseModel):
 
 
 class ExamCreate(BaseModel):
+    offering_id: int | None = Field(default=None, gt=0)
     course_id: int
     title: str
     status: Literal["draft"] = "draft"
@@ -743,6 +746,7 @@ class ExamUpdate(BaseModel):
 class ExamRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    offering_id: int | None = None
     id: int
     course_id: int
     title: str
@@ -1005,6 +1009,10 @@ class ExperimentModuleRead(BaseModel):
 class StudentExperimentModuleRead(BaseModel):
     id: int
     name: str
+    offering_id: int
+    course_title: str | None = None
+    term_name: str | None = None
+    class_name: str | None = None
     learning_status: Literal["not_started", "started", "submitted", "graded"]
     last_learning_at: datetime | None = None
 
@@ -1066,6 +1074,7 @@ class ExperimentCellOut(BaseModel):
 
 
 class ExperimentRecordRead(BaseModel):
+    offering_id: int | None = None
     id: int
     lesson_id: int | None = None
     module_id: int | None = None
@@ -1083,6 +1092,8 @@ class ExperimentSubmissionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    lab_enabled: bool = False
+    lab_status: str | None = None
     record_id: int
     attempt_number: int
     client_request_id: str | None = None
@@ -1143,6 +1154,8 @@ class ExperimentSubmissionDetailRead(ExperimentSubmissionRead):
 class ExperimentSubmitRequest(BaseModel):
     """实验提交请求——client_request_id 用于幂等"""
     client_request_id: UUID  # UUID v4，Pydantic 自动校验格式
+    artifact_id: int | None = Field(default=None, gt=0)
+    expected_record_revision: int | None = Field(default=None, ge=1)
 
 
 class ExperimentReviewUpdate(BaseModel):
@@ -1152,8 +1165,10 @@ class ExperimentReviewUpdate(BaseModel):
 
 
 class ExperimentRecordDetailResponse(BaseModel):
+    offering_id: int | None = None
     """GET /records/{id} 完整响应（学生不含 source_hidden cells）"""
     id: int
+    lab_enabled: bool = False
     lesson_id: int | None = None
     module_id: int | None = None
     student_id: int

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import auth_header, create_user, login, seed_basic_environment
+from conftest import auth_header, create_user, grant_teaching_fixture, login, seed_basic_environment
 
 # 冻结在模块导入时刻，供种子数据相对偏移；HTTP 端点内部 now 与它仅差毫秒级
 NOW = datetime.now(timezone.utc)
@@ -122,6 +122,7 @@ def _build_graph(db_session_factory):
             course_id=course_b.id, author_id=teacher_b.id,
         )
         db.add_all([notice_visible, notice_invisible])
+        grant_teaching_fixture(db, course_a, student_ids=[student.id])
         db.commit()
         for obj in [course_a, course_b, lesson, pending, done, exam, record]:
             db.refresh(obj)
@@ -262,6 +263,8 @@ def test_priority_experiments_only_unsubmitted(client, db_session_factory):
             submitted_at=NOW - timedelta(hours=5),
         )
         db.add_all([rec_started, rec_graded, rec_mod_started, rec_mod_submitted])
+        from app.models import Course
+        grant_teaching_fixture(db, db.get(Course, g["course_a"].id), student_ids=[g["student"].id])
         db.commit()
 
     token, _ = login(client, "dash-student")
@@ -364,6 +367,7 @@ def test_teacher_deadline_window_covers_seven_days(client, db_session_factory):
         db.add(a)
         db.flush()
         db.add(JudgeQuestion(assignment_id=a.id, title="题一", function_name="f", hidden_tests=""))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     token, _ = login(client, "dl-seven-teacher")
@@ -401,6 +405,7 @@ def test_deadline_submitted_requires_all_questions_completed(client, db_session_
             question_id=q1.id, student_id=student.id, code="x",
             status="completed", grading_status="completed", score=50.0,
         ))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     token, _ = login(client, "dl-partial-teacher")
@@ -437,6 +442,7 @@ def test_deadline_full_participation_omits_work_item(client, db_session_factory)
                 question_id=q.id, student_id=student.id, code="x",
                 status="completed", grading_status="completed", score=50.0,
             ))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     token, _ = login(client, "dl-full-teacher")
@@ -452,6 +458,7 @@ def test_deadline_submitted_counts_only_currently_enrolled(client, db_session_fa
     from sqlalchemy import select
 
     from app.models import Assignment, Course, CourseEnrollment, JudgeQuestion, Submission
+    from app.models.teaching import OfferingEnrollment
 
     teacher = create_user(db_session_factory, "dl-withdrawn-teacher", "teacher")
     seed_basic_environment(db_session_factory)
@@ -474,6 +481,12 @@ def test_deadline_submitted_counts_only_currently_enrolled(client, db_session_fa
             question_id=q.id, student_id=student.id, code="x",
             status="completed", grading_status="completed", score=80.0,
         ))
+        offering = grant_teaching_fixture(db, course, student_ids=[student.id])
+        allocated = db.scalar(select(OfferingEnrollment).where(
+            OfferingEnrollment.offering_id == offering.id,
+            OfferingEnrollment.student_id == student.id,
+        ))
+        allocated.status, allocated.active_scope_key = "dropped", None
         enrollment = db.scalar(
             select(CourseEnrollment).where(
                 CourseEnrollment.course_id == course.id,

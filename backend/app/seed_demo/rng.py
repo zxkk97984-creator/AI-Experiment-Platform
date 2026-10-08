@@ -5,6 +5,8 @@
 make_rng(*parts) 取一个以实体稳定 key 派生的 random.Random 实例，
 绝不在模块级共享一个顺序消费的随机流——这样即使部分数据已存在被跳过，
 其他实体的随机序列也不会漂移。
+实体 key 使用用户名、题目序号/标题等语义值，不使用数据库自增 ID；
+MySQL 的 DELETE 重置后 ID 会延续，但演示答案、成绩及复核状态应保持一致。
 """
 from __future__ import annotations
 

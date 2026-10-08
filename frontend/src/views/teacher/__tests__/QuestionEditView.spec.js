@@ -14,9 +14,11 @@ import { describe, it, expect, vi, beforeEach, beforeAll, afterAll, afterEach } 
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
+const navigation = vi.hoisted(() => ({ route: { params: { id: '7' }, query: {}, meta: { role: 'teacher' } }, push: vi.fn() }))
+
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: '7' } }),
-  useRouter: () => ({ push: vi.fn() }),
+  useRoute: () => navigation.route,
+  useRouter: () => ({ push: navigation.push }),
   createRouter: vi.fn(() => ({
     beforeEach: vi.fn(),
     afterEach: vi.fn(),
@@ -152,6 +154,7 @@ describe('题目编辑页 QuestionEditView（IDE 布局重构）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    navigation.route = { params: { id: '7' }, query: {}, meta: { role: 'teacher' } }
     appStore.showToast.mockClear()
     assignmentsAPI.get.mockResolvedValue({ data: assignmentDraft })
     assignmentsAPI.getQuestions.mockResolvedValue({ data: { items: [] } })
@@ -163,6 +166,33 @@ describe('题目编辑页 QuestionEditView（IDE 布局重构）', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('作业默认环境')
     expect(wrapper.text()).toContain('环境最低内存 256 MB')
+  })
+
+  it('管理员从课程资料进入后，按真实任务归属返回资料', async () => {
+    navigation.route = { params: { id: '7' }, query: { from: 'materials', course_id: '999', offering_id: '999' }, meta: { role: 'admin' } }
+    assignmentsAPI.get.mockResolvedValue({ data: { ...assignmentDraft, course_id: 101, offering_id: 109 } })
+    const wrapper = await mountPage(); await flushPromises()
+    await clickBtn(wrapper, '返回课程资料')
+    expect(navigation.push).toHaveBeenCalledWith({ path: '/admin/materials', query: { course_id: '101', offering_id: '109' } })
+  })
+
+  it('管理员刷新编辑地址且加载失败时，按有效查询上下文返回资料', async () => {
+    navigation.route = { params: { id: '7' }, query: { from: 'materials', course_id: '101', offering_id: '109' }, meta: { role: 'admin' } }
+    assignmentsAPI.get.mockRejectedValueOnce(new Error('unavailable'))
+    const wrapper = await mountPage(); await flushPromises()
+    await clickBtn(wrapper, '返回课程资料')
+    expect(navigation.push).toHaveBeenCalledWith({ path: '/admin/materials', query: { course_id: '101', offering_id: '109' } })
+  })
+
+  it('管理员直接进入编辑页返回授课安排，教师仍返回作业列表', async () => {
+    navigation.route.meta.role = 'admin'
+    const admin = await mountPage(); await flushPromises()
+    await clickBtn(admin, '返回授课安排')
+    expect(navigation.push).toHaveBeenLastCalledWith('/admin/offerings')
+    navigation.route = { params: { id: '7' }, query: {}, meta: { role: 'teacher' } }
+    const teacher = await mountPage(); await flushPromises()
+    await clickBtn(teacher, '取消')
+    expect(navigation.push).toHaveBeenLastCalledWith('/teacher/assignments')
   })
 
   it('作业环境配置紧跟题目列表，选择题目后仍保持在该位置', async () => {

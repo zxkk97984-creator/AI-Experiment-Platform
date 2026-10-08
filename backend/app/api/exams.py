@@ -29,6 +29,12 @@ from app.services.audience_service import (
 )
 from app.worker.judge_worker import _run_docker_pytest, _status_from_pytest
 
+from app.services.offering_service import task_content_manager, teacher_task_condition
+
+def ensure_exam_manager(exam, user, db=None):
+    from sqlalchemy.orm import object_session
+    task_content_manager(db or object_session(exam), exam, user)
+
 router = APIRouter(prefix="/exams", tags=["exams"])
 
 
@@ -130,7 +136,7 @@ def list_exams(
             .where(exam_visible_condition(current_user.id))
         )
     elif current_user.role == "teacher":
-        query = query.where(Course.teacher_id == current_user.id)
+        query = query.where(or_(teacher_task_condition(Exam, current_user.id), and_(Exam.offering_id.is_(None), Course.teacher_id == current_user.id)))
     elif current_user.role != "admin":
         # Any unsupported role: empty
         query = query.where(Exam.id == -1)
@@ -267,9 +273,13 @@ def create_exam(
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     course = require_course(payload.course_id, db)
-    if current_user.role == "teacher":
-        if course.teacher_id != current_user.id:
-            raise api_error(403, "FORBIDDEN", "只能在自己的课程中创建考试")
+    if payload.offering_id:
+        from app.services.offering_service import require_offering
+        offering = require_offering(db, payload.offering_id, current_user, write=True)
+        if offering.course_id != course.id:
+            raise api_error(422, 'TASK_SCOPE_MISMATCH', '任务课程须与授课实例一致')
+    elif current_user.role == 'teacher' and course.teacher_id != current_user.id:
+        raise api_error(403, 'FORBIDDEN', '共享模板由课程负责人维护；班级任务请选择授课实例')
     # 创建考试时强制 draft，发布需通过 update 接口触发 validate_publish()
     exam_data = payload.model_dump()
     exam_data["status"] = "draft"
@@ -324,7 +334,7 @@ def update_exam(
     settings: Settings = Depends(get_settings),
 ):
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     previous_status = exam.status
     changes = payload.model_dump(exclude_unset=True)
     audience_updates = {key: changes.pop(key) for key in (
@@ -419,7 +429,7 @@ async def import_exam_audience(
     if kind not in ("include", "exclude"):
         raise api_error(422, "INVALID_AUDIENCE_KIND", "kind 必须为 include 或 exclude")
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     content = await file.read()
     if len(content) > 2 * 1024 * 1024:
         raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
@@ -602,7 +612,7 @@ def retry_exam_submission(
 ):
     """显式重试 review_required 的考试提交（教师/管理员受控入口）"""
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     sub = db.get(ExamSubmission, submission_id)
     if not sub or sub.exam_id != exam_id:
         raise api_error(404, "SUBMISSION_NOT_FOUND", "考试提交不存在")
@@ -616,7 +626,7 @@ def publish_exam_review(
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     return release_exam_review(exam, current_user, db)
 
 
@@ -629,7 +639,7 @@ def extend_submission_time(
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     submission = db.get(ExamSubmission, submission_id)
     if not submission or submission.exam_id != exam_id:
         raise api_error(404, "SUBMISSION_NOT_FOUND", "考试提交不存在")
@@ -644,7 +654,7 @@ def force_submit_submission(
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     exam = require_exam(exam_id, db)
-    ensure_course_manager(exam.course, current_user)
+    ensure_exam_manager(exam, current_user)
     submission = db.get(ExamSubmission, submission_id)
     if not submission or submission.exam_id != exam_id:
         raise api_error(404, "SUBMISSION_NOT_FOUND", "考试提交不存在")
@@ -665,7 +675,7 @@ def exam_grades(
     server_now = utc_now()
     exam = require_exam(exam_id, db)
     if current_user.role == "teacher":
-        ensure_course_manager(exam.course, current_user)
+        ensure_exam_manager(exam, current_user)
     submission_join = and_(
         ExamSubmission.exam_id == exam_id,
         ExamSubmission.student_id == User.id,
@@ -1165,7 +1175,7 @@ def _answer_payload(answer: ExamAnswer, question_map: dict[int, ExamQuestion], c
 
 def _require_grade_detail_access(exam: Exam, current_user: User) -> None:
     if current_user.role == "teacher":
-        ensure_course_manager(exam.course, current_user)
+        ensure_exam_manager(exam, current_user)
 
 
 def _round_manual_score(value: float) -> float:
@@ -1373,8 +1383,7 @@ def get_questions(exam_id: int, db: Session = Depends(get_db), current_user: Use
     elif current_user.role == "teacher":
         # 教师只能看自己课程的考试题目
         course = db.get(Course, exam.course_id)
-        if not course or course.teacher_id != current_user.id:
-            raise api_error(403, "FORBIDDEN", "无权查看该考试题目")
+        ensure_exam_manager(exam, current_user, db)
     elif current_user.role not in ("admin",):
         # Unsupported roles cannot inspect exam questions.
         raise api_error(403, "FORBIDDEN", "无权查看考试题目")

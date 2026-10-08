@@ -256,6 +256,9 @@ def test_publish_gate_blocks_insufficient_memory(client, db_session_factory, tes
             hidden_tests="assert True", memory_limit_mb=128, grading_mode="legacy",
         )
         db.add(question)
+        from conftest import grant_teaching_fixture
+        student = db.scalar(select(User).where(User.username == 'env-student'))
+        grant_teaching_fixture(db, db.get(Course, course_id), student_ids=[student.id])
         db.commit()
 
     r = client.post(f"{ASSIGN_API}/{assignment_id}/publish", headers=auth_header(tok))

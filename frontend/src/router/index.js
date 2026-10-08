@@ -13,6 +13,16 @@ const routes = [
   { path: '/welcome', name: 'Welcome', component: () => import('../views/WelcomeView.vue'), meta: { guest: true } },
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { guest: true } },
 
+  { path: '/student/materials', name: 'StudentCourseMaterialsView', component: () => import('../views/shared/CourseMaterialsView.vue'), meta: { role: 'student' } },
+  { path: '/student/offerings', name: 'StudentOfferingsView', component: () => import('../views/shared/OfferingsView.vue'), meta: { role: 'student' } },
+  { path: '/teacher/materials', name: 'TeacherCourseMaterialsView', component: () => import('../views/shared/CourseMaterialsView.vue'), meta: { role: 'teacher' } },
+  { path: '/teacher/offerings', name: 'TeacherOfferingsView', component: () => import('../views/shared/OfferingsView.vue'), meta: { role: 'teacher' } },
+  { path: '/admin/materials', name: 'AdminCourseMaterialsView', component: () => import('../views/shared/CourseMaterialsView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/offerings', name: 'AdminOfferingsView', component: () => import('../views/shared/OfferingsView.vue'), meta: { role: 'admin' } },
+
+  { path: '/student/gradebook', name: 'StudentGradebook', component: () => import('../views/GradebookView.vue'), meta: { role: 'student' } },
+  { path: '/teacher/gradebook', name: 'TeacherGradebook', component: () => import('../views/GradebookView.vue'), meta: { role: 'teacher' } },
+  { path: '/admin/gradebook', name: 'AdminGradebook', component: () => import('../views/GradebookView.vue'), meta: { role: 'admin' } },
   // Student
   { path: '/student', name: 'StudentHome', component: () => import('../views/student/DashboardView.vue'), meta: { role: 'student' } },
   { path: '/student/courses', name: 'StudentCourses', component: () => import('../views/student/CourseListView.vue'), meta: { role: 'student' } },
@@ -56,6 +66,8 @@ const routes = [
   { path: '/teacher/courses/:courseId/lessons/:lessonId/edit', name: 'TeacherLessonEdit', component: () => import('../views/teacher/LessonEditView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/courses/:id/studio/:lid', name: 'TeacherStudio', component: () => import('../views/teacher/StudioView.vue'), meta: { role: 'teacher' } },
 
+  { path: '/admin/assignments/:id/edit', name: 'AdminAssignmentEdit', component: () => import('../views/teacher/QuestionEditView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/exams/:id/edit', name: 'AdminExamEdit', component: () => import('../views/teacher/ExamQuestionEditView.vue'), meta: { role: 'admin' } },
   // Admin
   { path: '/admin', name: 'AdminHome', component: () => import('../views/admin/DashboardView.vue'), meta: { role: 'admin' } },
   { path: '/admin/users', name: 'AdminUsers', component: () => import('../views/admin/UserListView.vue'), meta: { role: 'admin' } },

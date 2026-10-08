@@ -16,6 +16,7 @@ from app import models
 from app.database import Base
 from app.services.kernel_manager import KernelManager, KernelSession, get_kernel_manager
 from conftest import auth_header, create_assignment_db, create_course_db, create_user, login, seed_basic_environment
+from teaching_test_support import grant_course_students, grant_experiment
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -313,7 +314,7 @@ def test_judge_docker_failure_sets_system_error():
 # ═══════════════════════════════════════════════════════════════
 
 def test_teacher_a_cannot_see_teacher_b_submissions(client, db_session_factory):
-    """真实: ta 创建课程+作业+题目, tb 尝试查看→403"""
+    """真实: ta 创建课程+作业+题目, tb 尝试查看→404，不泄露提交存在"""
     create_user(db_session_factory, 'ta1', 'teacher')
     create_user(db_session_factory, 'tb1', 'teacher')
     create_user(db_session_factory, 'stu1', 'student')
@@ -324,6 +325,7 @@ def test_teacher_a_cannot_see_teacher_b_submissions(client, db_session_factory):
     caid = create_course_db(db_session_factory, teacher_username='ta1', title='TA Course', status='published', visibility='public')
     client.post(f'/api/v1/courses/{caid}/enroll', headers=auth_header(s_tok))
     aid = create_assignment_db(db_session_factory, course_id=caid, teacher_username='ta1', title='A1', status='draft')
+    grant_course_students(db_session_factory, caid, ['stu1'])
     q = client.post(f'/api/v1/assignments/{aid}/questions', headers=auth_header(ta_tok), json={
         'title': 'Q1', 'function_name': 'f', 'hidden_tests': 'def test(): pass', 'grading_mode': 'legacy',
     })
@@ -338,9 +340,9 @@ def test_teacher_a_cannot_see_teacher_b_submissions(client, db_session_factory):
     assert sub.status_code == 201
     sid = sub.json()['id']
 
-    # tb (另一教师) GET detail → 403
+    # tb (另一教师) GET detail → 404
     r = client.get(f'/api/v1/judge/submissions/{sid}', headers=auth_header(tb_tok))
-    assert r.status_code == 403, f"tb GET sub detail: {r.status_code}"
+    assert r.status_code == 404, f"tb GET sub detail: {r.status_code}"
 
     # tb GET list → items 不含 ta 的提交
     r = client.get('/api/v1/judge/submissions', headers=auth_header(tb_tok))
@@ -353,7 +355,7 @@ def test_teacher_a_cannot_see_teacher_b_submissions(client, db_session_factory):
 # ═══════════════════════════════════════════════════════════════
 
 def test_student_b_cannot_access_student_a_record(client, db_session_factory):
-    """真实: sa 创建 record, sb 尝试所有操作→403"""
+    """真实: sa 创建 record, sb 尝试所有操作→404，不泄露记录存在"""
     create_user(db_session_factory, 't_rec', 'teacher')
     create_user(db_session_factory, 'sa1', 'student')
     create_user(db_session_factory, 'sb1', 'student')
@@ -384,14 +386,14 @@ def test_student_b_cannot_access_student_a_record(client, db_session_factory):
         db.add(lesson); db.commit()
         lid = lesson.id
 
-    client.post(f'/api/v1/courses/{cid}/enroll', headers=auth_header(sa_tok))
+    grant_experiment(db_session_factory, 'lesson', lid, ['sa1'])
 
     # sa ensure record
     r = client.post(f'/api/v1/experiments/records/ensure-for-lesson/{lid}', headers=auth_header(sa_tok))
     assert r.status_code in (200, 201), r.text
     rid = r.json()['id']
 
-    # sb GET detail → 403
+    # sb GET detail → 404
     for method, path in [
         ('get', f'/api/v1/experiments/records/{rid}'),
         ('put', f'/api/v1/experiments/records/{rid}/cells'),
@@ -405,4 +407,4 @@ def test_student_b_cannot_access_student_a_record(client, db_session_factory):
             r2 = client.put(path, headers=auth_header(sb_tok), json={'cells': {}, 'record_revision': 1})
         else:
             r2 = client.post(path, headers=auth_header(sb_tok), json={'code': 'print(1)'} if 'execute' in path else None)
-        assert r2.status_code == 403, f"sb {method} {path}: expected 403 got {r2.status_code}"
+        assert r2.status_code == 404, f"sb {method} {path}: expected 404 got {r2.status_code}"

@@ -2,6 +2,8 @@
 import datetime, pytest
 from datetime import timezone, timedelta
 from conftest import auth_header, create_course_db, create_user, login
+from teaching_test_support import grant_course_students
+from conftest import grant_teaching_fixture
 API = "/api/v1"
 
 def _h(token): return auth_header(token)
@@ -12,15 +14,16 @@ def _setup(client, db_session_factory):
     t_tok, _ = login(client, "e_t")
     s_tok, _ = login(client, "e_s")
     cid = create_course_db(db_session_factory, teacher_username="e_t", title="C", status="published", visibility="public")
-    client.post(f"{API}/courses/{cid}/enroll", headers=_h(s_tok))
+    offering_id = grant_course_students(db_session_factory, cid, ["e_s"])
     now = datetime.datetime.now(timezone.utc)
-    e = client.post(f"{API}/exams", headers=_h(t_tok), json={"course_id":cid,"title":"E","duration_minutes":60,"start_at":(now-timedelta(hours=1)).isoformat(),"end_at":(now+timedelta(hours=1)).isoformat()})
+    e = client.post(f"{API}/exams", headers=_h(t_tok), json={"course_id":cid,"offering_id":offering_id,"title":"E","duration_minutes":60,"start_at":(now-timedelta(hours=1)).isoformat(),"end_at":(now+timedelta(hours=1)).isoformat()})
     eid = e.json()["id"]
+    grant_course_students(db_session_factory, cid, ["e_s"])
     q1 = client.post(f"{API}/exams/{eid}/questions", headers=_h(t_tok), json={"question_type":"single_choice","prompt":"Q1","correct_answer":{"correct":["A"]},"points":10,"order_index":0,"options":{"A":"选项A","B":"选项B"}})
     assert q1.status_code == 201, q1.text
     q2 = client.post(f"{API}/exams/{eid}/questions", headers=_h(t_tok), json={"question_type":"code","prompt":"Q2","points":20,"order_index":1,"hidden_tests":"assert True","correct_answer":{},"grading_mode":"legacy"})
     assert q2.status_code == 201, q2.text
-    return {"t_tok":t_tok,"s_tok":s_tok,"cid":cid,"eid":eid,"q1_id":q1.json()["id"],"q2_id":q2.json()["id"]}
+    return {"t_tok":t_tok,"s_tok":s_tok,"cid":cid,"offering_id":offering_id,"eid":eid,"q1_id":q1.json()["id"],"q2_id":q2.json()["id"]}
 
 def test_question_crud(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
@@ -147,7 +150,8 @@ def test_teacher_grades_use_server_pagination_and_search(client, db_session_fact
     ctx = _setup(client, db_session_factory)
     extra = create_user(db_session_factory, "e_extra", "student", real_name="额外学生")
     with db_session_factory() as db:
-        db.add(CourseEnrollment(course_id=ctx["cid"], student_id=extra.id, status="enrolled"))
+        from app.models import Course
+        grant_teaching_fixture(db, db.get(Course, ctx["cid"]), [extra.id])
         db.commit()
 
     response = client.get(
@@ -236,9 +240,8 @@ def test_teacher_grades_summary_aggregates_without_materializing_all_students(
         )
         extra_student_ids.append(extra.id)
         with db_session_factory() as db:
-            db.add(CourseEnrollment(
-                course_id=ctx["cid"], student_id=extra.id, status="enrolled"
-            ))
+            from app.models import Course
+            grant_teaching_fixture(db, db.get(Course, ctx["cid"]), [extra.id])
             db.commit()
 
     with db_session_factory() as db:
@@ -557,7 +560,7 @@ def test_exam_list_returns_is_submitted_for_student(client, db_session_factory):
     for title in ("E-grading", "E-graded"):
         extra_id = client.post(
             f"{API}/exams", headers=_h(t_tok),
-            json={"course_id": cid, "title": title, "duration_minutes": 60,
+            json={"course_id": cid, "offering_id": ctx["offering_id"], "title": title, "duration_minutes": 60,
                   "start_at": (now - timedelta(hours=1)).isoformat(),
                   "end_at": (now + timedelta(hours=1)).isoformat()},
         ).json()["id"]
@@ -568,6 +571,7 @@ def test_exam_list_returns_is_submitted_for_student(client, db_session_factory):
         )
         assert r.status_code == 201, r.text
         extra_ids.append(extra_id)
+    grant_course_students(db_session_factory, cid, ["e_s"])
     grading_eid, graded_eid = extra_ids
 
     for exam_id in [eid, grading_eid, graded_eid]:

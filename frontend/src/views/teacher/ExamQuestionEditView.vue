@@ -11,8 +11,10 @@ import QeTestCases from '../../components/teacher/question-editor/QeTestCases.vu
 import TaskAudiencePicker from '../../components/teacher/TaskAudiencePicker.vue'
 import { examsAPI } from '../../api/exams.js'
 import { useAppStore } from '../../stores/app.js'
+import { taskEditorReturn } from '../../utils/taskEditorNavigation.js'
 const route = useRoute(); const router = useRouter(); const app = useAppStore()
 const examId = route.params.id; const exam = ref(null); const questions = ref([])
+const returnNavigation = computed(() => taskEditorReturn({ role: route.meta?.role, kind: 'exam', task: exam.value, query: route.query }))
 const loading = ref(true); const showForm = ref(false); const editingQ = ref(null)
 const aiConfigQid = ref(null)  // 当前展开 AI 配置的题目 ID
 const choiceEditor = ref(null)
@@ -233,9 +235,9 @@ onMounted(load)
       <!-- ── Page Head ─────────────────────────────────────────────────── -->
       <header class="page-head">
         <div>
-          <button class="btn-ghost btn-sm back-btn" @click="router.push('/teacher/exams')">
+          <button class="btn-ghost btn-sm back-btn" @click="router.push(returnNavigation.destination)">
             <AppIcon name="back" :size="15" />
-            返回考试列表
+            {{ returnNavigation.label }}
           </button>
           <div class="title-line">
             <h1 class="page-title">{{ exam?.title || '考试题目管理' }}</h1>
@@ -354,6 +356,7 @@ onMounted(load)
                 task-kind="exam"
                 :task-id="examId"
                 :course-id="exam?.course_id"
+                :offering-id="exam?.offering_id"
                 :audience-mode="audienceMode"
                 :class-ids="audienceClassIds"
                 :whitelist-ids="audienceWhitelistIds"

@@ -23,7 +23,7 @@ usage() {
   ./start.sh stop           停止项目（保留数据库数据卷）
   ./start.sh restart        重新启动项目
   ./start.sh status         查看进程、端口和容器状态
-  ./start.sh logs [name]    跟踪日志；name 可为 api/frontend/judge/envbuilder/accounts
+  ./start.sh logs [name]    跟踪日志；name 可为 api/frontend/judge/envbuilder/accounts/lab
   ./start.sh help           显示帮助
 
 可选环境变量：
@@ -58,7 +58,7 @@ show_status() {
     frontend_port="$(cat "$RUN_DIR/frontend.port" 2>/dev/null || printf '5173')"
 
     printf '应用进程：\n'
-    for name in api frontend judge envbuilder accounts; do
+    for name in api frontend judge envbuilder accounts lab; do
         service_status "$name"
     done
 
@@ -78,11 +78,11 @@ follow_logs() {
     local files=()
     case "$name" in
         all)
-            for candidate in api frontend judge envbuilder accounts; do
+            for candidate in api frontend judge envbuilder accounts lab; do
                 [ -f "$RUN_DIR/$candidate.log" ] && files+=("$RUN_DIR/$candidate.log")
             done
             ;;
-        api|frontend|judge|envbuilder|accounts)
+        api|frontend|judge|envbuilder|accounts|lab)
             files+=("$RUN_DIR/$name.log")
             ;;
         *)

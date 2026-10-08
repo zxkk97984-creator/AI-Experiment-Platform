@@ -10,8 +10,10 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from app.errors import api_error
 from app.models import (AdminBatch, AdminBatchItem, AuditEvent, User,
                         TeachingClass, TeachingClassStudent, ExamSubmission)
-from app.security import hash_password, validate_password_rules
+from app.security import hash_password
 from app.services import account_service as accounts
+from app.services import credential_delivery_service as credentials
+from app.models.credential_delivery import CredentialDelivery
 from app.services.roster_import_service import preflight
 from app.services.time_utils import as_utc, utc_now
 
@@ -96,9 +98,9 @@ def confirm_batch(db, batch_id, actor, payload, settings):
         raise api_error(409, 'PREVIEW_EXPIRED', '预检已过期，请重新上传')
     if batch.summary.get('errors'):
         raise api_error(409, 'PREVIEW_ERRORS', '请修复所有错误后重新上传')
-    password, days, version = accounts.temporary_policy(db, settings)
+    _legacy_password, days, version = accounts.temporary_policy(db, settings)
     if version != batch.policy_version:
-        raise api_error(409, 'POLICY_CHANGED', '默认密码策略已变化，请重新预检')
+        raise api_error(409, 'POLICY_CHANGED', '临时凭据策略已变化，请重新预检')
     if batch.kind == 'password_reset':
         accounts.verify_current(actor, payload.current_password)
         if not payload.reason or not payload.reason.strip():
@@ -114,16 +116,11 @@ def confirm_batch(db, batch_id, actor, payload, settings):
                 item.status, item.result = 'skipped', {'message': '凭据已变化，请重新预览'}
             else:
                 user.credential_version += 1
+                credentials.invalidate(db, user.id)
                 item.expected_version = user.credential_version
-    if batch.kind not in {'classes', 'password_reset'}:
-        for item in db.scalars(select(AdminBatchItem).where(AdminBatchItem.batch_id == batch.id)).all():
-            if item.result.get('action') == 'create_user':
-                try:
-                    validate_password_rules(password, item.data.get('student_no'))
-                except ValueError:
-                    raise api_error(409, 'PASSWORD_IDENTITY_CONFLICT', '默认临时密码与待创建账号冲突，请修改策略后重新预检')
     if batch.kind != 'classes':
-        batch.password_ciphertext = accounts.encrypt_secret(settings, password, f'batch:{batch.id}:{version}')
+        accounts.cipher(settings)  # Fail closed before queueing credential preparation.
+    batch.password_ciphertext = None
     batch.scope = {**batch.scope, 'temporary_days': days}
     batch.reason, batch.status = payload.reason, 'queued'
     accounts.audit(db, actor.id, 'batch.confirm', 'batch', batch.id, batch_id=batch.id, reason=payload.reason)
@@ -169,6 +166,8 @@ def finish(db, batch, status, error=None):
     batch.lease_token = None
     batch.lease_until = None
     db.execute(update(AdminBatchItem).where(AdminBatchItem.batch_id == batch.id).values(prepared_hash=None))
+    db.execute(update(CredentialDelivery).where(CredentialDelivery.batch_id == batch.id,
+               CredentialDelivery.state == 'prepared').values(ciphertext=None, state='cleared'))
 
 
 def prepare_hashes(factory, batch_id, token, settings):
@@ -176,8 +175,10 @@ def prepare_hashes(factory, batch_id, token, settings):
         batch = owned_batch(db, batch_id, token)
         if batch.kind == 'classes':
             return
-        secret = accounts.decrypt_secret(settings, batch.password_ciphertext, f'batch:{batch.id}:{batch.policy_version}')
         rows = db.scalars(select(AdminBatchItem).where(AdminBatchItem.batch_id == batch_id).order_by(AdminBatchItem.row_number)).all()
+        used = {accounts.decrypt_secret(settings, d.ciphertext, f'credential:{d.id}')
+                for d in db.scalars(select(CredentialDelivery).where(
+                    CredentialDelivery.batch_id == batch_id, CredentialDelivery.ciphertext.is_not(None)))}
         needed = []
         seen = set()
         for item in rows:
@@ -186,20 +187,29 @@ def prepare_hashes(factory, batch_id, token, settings):
             if requires and item.status == 'pending' and key not in seen:
                 seen.add(key)
                 if not item.prepared_hash:
-                    needed.append(item.id)
+                    needed.append((item.id, f'user:{key}' if batch.kind == 'password_reset' else f'student:{key}'))
         db.commit()
     with ThreadPoolExecutor(max_workers=settings.account_worker_hash_concurrency) as pool:
         for offset in range(0, len(needed), 40):
-            ids = needed[offset:offset + 40]
-            hashes = list(pool.map(hash_password, [secret] * len(ids)))
+            chunk = needed[offset:offset + 40]
+            with factory() as db:
+                batch = owned_batch(db, batch_id, token)
+                secrets_to_hash = []
+                for _, key in chunk:
+                    target = db.get(User, int(key.split(':', 1)[1])) if key.startswith('user:') else None
+                    secrets_to_hash.append(credentials.prepare(db, batch.actor_id, settings, key,
+                                           batch_id=batch_id, used=used,
+                                           identity=target.username if target else None)[1])
+                db.commit()
+            hashes = list(pool.map(hash_password, secrets_to_hash))
             with factory() as db:
                 owned_batch(db, batch_id, token)
-                for item_id, hashed in zip(ids, hashes):
+                for (item_id, _), hashed in zip(chunk, hashes):
                     db.get(AdminBatchItem, item_id).prepared_hash = hashed
                 heartbeat(db, batch_id, token)
 
 
-def apply_import(factory, batch_id, token):
+def apply_import(factory, batch_id, token, settings):
     with factory() as db:
         # Same global academic mutation lock as interactive class changes.
         accounts.lock_policy(db)
@@ -242,6 +252,11 @@ def apply_import(factory, batch_id, token):
                             temporary_password_expires_at=utc_now() + timedelta(days=batch.scope['temporary_days']))
                 db.add(user)
                 db.flush()
+                delivery = db.scalar(select(CredentialDelivery).where(
+                    CredentialDelivery.batch_id == batch_id, CredentialDelivery.recipient_key == f'student:{no}'))
+                if not delivery or delivery.state != 'prepared':
+                    raise api_error(409, 'CREDENTIAL_UNAVAILABLE', '临时凭据准备状态异常')
+                credentials.issue(db, delivery, user, settings)
                 accounts.audit(db, actor.id, 'user.create', 'user', user.id, batch_id=batch.id)
             cache[no] = user
             if not user.department and data.get('department'):
@@ -276,7 +291,7 @@ def apply_import(factory, batch_id, token):
         db.commit()
 
 
-def apply_resets(factory, batch_id, token):
+def apply_resets(factory, batch_id, token, settings):
     with factory() as db:
         ids = list(db.scalars(select(AdminBatchItem.id).where(AdminBatchItem.batch_id == batch_id,
                                                             AdminBatchItem.status == 'pending').order_by(AdminBatchItem.id)))
@@ -297,6 +312,11 @@ def apply_resets(factory, batch_id, token):
             else:
                 accounts.change_credentials(db, user, item.prepared_hash, temporary=True,
                                             days=batch.scope['temporary_days'])
+                delivery = db.scalar(select(CredentialDelivery).where(
+                    CredentialDelivery.batch_id == batch_id, CredentialDelivery.recipient_key == f'user:{user.id}'))
+                if not delivery or delivery.state != 'prepared':
+                    raise api_error(409, 'CREDENTIAL_UNAVAILABLE', '临时凭据准备状态异常')
+                credentials.issue(db, delivery, user, settings)
                 item.status, item.result = 'succeeded', {'message': '密码已重置，下次登录必须改密'}
                 accounts.audit(db, batch.actor_id, 'password.reset', 'user', user.id,
                                batch_id=batch.id, reason=batch.reason)
@@ -320,9 +340,9 @@ def process_batch(factory, batch_id, token, settings):
             raise api_error(409, 'RETRY_EXHAUSTED', '任务重试次数已达上限')
         prepare_hashes(factory, batch_id, token, settings)
         if kind == 'password_reset':
-            apply_resets(factory, batch_id, token)
+            apply_resets(factory, batch_id, token, settings)
         else:
-            apply_import(factory, batch_id, token)
+            apply_import(factory, batch_id, token, settings)
     except (HTTPException, IntegrityError, OperationalError) as exc:
         code = exc.detail.get('code') if isinstance(exc, HTTPException) else 'DATABASE_CONFLICT'
         if code == 'LEASE_LOST':
@@ -341,6 +361,7 @@ def process_batch(factory, batch_id, token, settings):
 
 def cleanup_batches(db, settings):
     now = utc_now()
+    credentials.cleanup(db)
     for batch in db.scalars(select(AdminBatch).where(AdminBatch.status == 'preview', AdminBatch.expires_at < now)).all():
         finish(db, batch, 'expired')
     old = select(AdminBatch.id).where(AdminBatch.finished_at < now - timedelta(days=settings.account_batch_retention_days))

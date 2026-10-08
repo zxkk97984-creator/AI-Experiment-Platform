@@ -42,6 +42,8 @@ from app.services.roster_service import sync_course_class_enrollments
 from app.services.storage_object_binding_service import retire_bound_object
 from app.storage import StorageArea, StorageService
 
+from app.models.teaching import CourseOffering
+
 router = APIRouter(tags=["courses"])
 
 
@@ -137,51 +139,12 @@ def is_student_in_course_class(course_id: int, student_id: int, db: Session) -> 
 
 
 def can_view_course(course: Course, user: User, db: Session) -> bool:
-    """课程可见性：能否发现课程、读取课程元数据。
-
-    - admin：任意课程
-    - teacher：仅自己的课程
-    - student：published + 教学班成员或教师手动加入 / 白名单成员 / 存量已选（private）
-    - 其他角色：fail closed
-    """
-    if user.role == "admin":
-        return True
-    if user.role == "teacher":
-        return course.teacher_id == user.id
-    if user.role != "student":
-        return False
-    if course.status != "published":
-        return False
-    if course.visibility == "public":
-        # 兼容迁移前的旧值：旧 public 仍按公开课程处理，迁移后新课程使用 class。
-        return True
-    if course.visibility == "class":
-        return (
-            is_student_in_course_class(course.id, user.id, db)
-            or is_student_manually_enrolled(course.id, user.id, db)
-        )
-    if course.visibility == "whitelist":
-        return is_student_whitelisted(course.id, user.id, db)
-    if course.visibility == "private":
-        # 保留存量已选学生的访问
-        return is_student_enrolled(course.id, user.id, db)
-    # 非法/未知数据库值 fail closed
-    return False
+    from app.services.offering_service import can_read_course_content
+    return can_read_course_content(db, course, user)
 
 
 def can_access_course_content(course: Course, user: User, db: Session) -> bool:
-    """内容权限：能否读取章节/课时或参加作业、考试、提交等学习活动。
-
-    学生必须同时满足可见性要求与有效选课；白名单只决定能否发现并选课，不能替代选课。
-    """
-    if user.role in ("admin", "teacher"):
-        return can_view_course(course, user, db)
-    if user.role == "student":
-        return (
-            can_view_course(course, user, db)
-            and is_student_enrolled(course.id, user.id, db)
-        )
-    return False
+    return can_view_course(course, user, db)
 
 
 def _class_summaries(course: Course, class_counts: dict[int, int] | None = None) -> list[TeachingClassSummary]:
@@ -231,7 +194,7 @@ def list_courses(
     if current_user.role == "student":
         access_filters.append(student_visible_course_predicate(current_user.id))
     elif current_user.role == "teacher":
-        access_filters.append(Course.teacher_id == current_user.id)
+        access_filters.append(or_(Course.teacher_id == current_user.id, Course.id.in_(select(CourseOffering.course_id).where(CourseOffering.teacher_id == current_user.id, CourseOffering.status.in_(["active", "archived"])))))
     elif current_user.role not in ("admin",):
         access_filters.append(Course.id == -1)
     query = query.where(*access_filters)
@@ -334,8 +297,7 @@ def _set_course_classes(db: Session, course: Course, class_ids: list[int]) -> No
 
 
 def _ensure_course_term_writable(course: Course) -> None:
-    if course.academic_term is not None and course.academic_term.status == "closed":
-        raise api_error(409, "ACADEMIC_TERM_CLOSED", "已关闭学期的课程只读")
+    return None
 
 
 def _ensure_course_publishable(db: Session, course: Course) -> None:
@@ -345,10 +307,8 @@ def _ensure_course_publishable(db: Session, course: Course) -> None:
         missing.append("课程名称")
     if not (course.description or "").strip():
         missing.append("课程简介")
-    if course.academic_term_id is None:
-        missing.append("所属学期")
-    if not course.teaching_class_links:
-        missing.append("教学班")
+    if not db.scalar(select(CourseOffering.id).where(CourseOffering.course_id == course.id, CourseOffering.status == "active")):
+        missing.append("管理员确认的授课安排")
     if not (course.cover or "").strip():
         missing.append("课程封面")
     if course.start_time is None:
@@ -408,6 +368,8 @@ def create_course(
             raise api_error(422, "ACADEMIC_TERM_NOT_FOUND", "学期不存在")
         if term.status == "closed":
             raise api_error(409, "ACADEMIC_TERM_CLOSED", "已关闭学期不能新建或调整课程")
+    if payload.teaching_class_ids and current_user.role != "admin":
+        raise api_error(403, "ADMIN_TEACHING_ALLOCATION_REQUIRED", "教学班授权由管理员分配")
     _set_course_classes(db, course, payload.teaching_class_ids)
     db.commit()
     db.refresh(course)
@@ -475,7 +437,9 @@ def update_course(
             raise api_error(409, "ACADEMIC_TERM_CLOSED", "已关闭学期不能新建或调整课程")
     for key, value in updates.items():
         setattr(course, key, value)
-    if class_ids is not None:
+    if class_ids is not None and current_user.role != "admin" and set(class_ids) != {link.teaching_class_id for link in course.teaching_class_links}:
+        raise api_error(403, "ADMIN_TEACHING_ALLOCATION_REQUIRED", "教学班授权由管理员分配")
+    if class_ids is not None and current_user.role == "admin":
         _set_course_classes(db, course, class_ids)
     elif "academic_term_id" in updates and course.teaching_class_links:
         if any(link.teaching_class.academic_term_id != course.academic_term_id for link in course.teaching_class_links):
@@ -520,6 +484,9 @@ def enroll_course(
     _ensure_course_term_writable(course)
     if course.status != "published":
         raise api_error(400, "COURSE_NOT_PUBLISHED", "课程尚未发布")
+    from app.services.offering_service import student_offering_ids
+    if not student_offering_ids(db, current_user.id, course_id):
+        raise api_error(403, "OFFERING_REQUIRED", "课程名单由管理员授课安排授权，请联系管理员")
     enrollment = db.scalar(
         select(CourseEnrollment).where(
             CourseEnrollment.course_id == course_id,
@@ -583,9 +550,13 @@ def list_course_students(course_id: int,
                          pagination: PaginationParams = Depends(pagination),
                          db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     page, page_size = pagination.page, pagination.page_size
-    course = require_course(course_id, db); ensure_course_manager(course, current_user)
-    filters = (CourseEnrollment.course_id == course_id, CourseEnrollment.status == "enrolled")
-    total = db.scalar(select(func.count()).select_from(CourseEnrollment).where(*filters)) or 0
+    from app.services.offering_service import teacher_offering_ids, scoped_student_ids
+    course = require_course(course_id, db)
+    if current_user.role != "admin" and not teacher_offering_ids(db, current_user.id, course_id):
+        raise api_error(403, "FORBIDDEN", "没有权限查看该课程班级名单")
+    filters = (CourseEnrollment.course_id == course_id, CourseEnrollment.status == "enrolled", User.id.in_(scoped_student_ids(db, current_user)))
+    total = db.scalar(select(func.count()).select_from(User)
+        .join(CourseEnrollment, CourseEnrollment.student_id == User.id).where(*filters)) or 0
     rows = db.execute(select(User, CourseEnrollment.origin).join(CourseEnrollment, CourseEnrollment.student_id == User.id)
         .where(*filters).order_by(User.student_no, User.id).offset((page - 1) * page_size).limit(page_size)).all()
     items = []
@@ -646,6 +617,8 @@ async def import_course_students(
     from app.services.account_service import lock_policy
     lock_policy(db)
     course = require_course(course_id, db)
+    if current_user.role != "admin":
+        raise api_error(403, "ADMIN_ROSTER_REQUIRED", "名单变更由管理员办理")
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
 
@@ -717,6 +690,8 @@ async def import_course_students(
 def add_course_student(course_id: int, payload: CourseStudentCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.services.account_service import lock_policy
     lock_policy(db)
+    if current_user.role != "admin":
+        raise api_error(403, "ADMIN_ROSTER_REQUIRED", "名单变更由管理员办理")
     course = require_course(course_id, db); ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
     student = db.get(User, payload.student_id)
@@ -736,12 +711,17 @@ def add_course_student(course_id: int, payload: CourseStudentCreate, db: Session
 def remove_course_student(course_id: int, student_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.services.account_service import lock_policy
     lock_policy(db)
+    if current_user.role != "admin":
+        raise api_error(403, "ADMIN_ROSTER_REQUIRED", "名单变更由管理员办理")
     course = require_course(course_id, db); ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
     enrollment = db.scalar(select(CourseEnrollment).where(CourseEnrollment.course_id == course_id, CourseEnrollment.student_id == student_id))
     if not enrollment:
         raise api_error(404, "COURSE_STUDENT_NOT_FOUND", "学生不在课程名单中")
     enrollment.status = "dropped"; enrollment.origin = "manual"
+    from app.models.teaching import OfferingEnrollment
+    for member in db.scalars(select(OfferingEnrollment).join(CourseOffering).where(CourseOffering.course_id == course_id, OfferingEnrollment.student_id == student_id)):
+        member.status, member.active_scope_key, member.origin = "removed", None, "manual"
     db.commit()
     return None
 
@@ -765,7 +745,11 @@ def list_chapters(
     )
     total = db.scalar(select(func.count()).select_from(Chapter).where(Chapter.course_id == course_id)) or 0
     chapters = db.scalars(query.offset((page - 1) * page_size).limit(page_size)).all()
-    return PaginatedResponse(items=[ChapterRead.model_validate(chapter) for chapter in chapters], page=page, page_size=page_size, total=total)
+    items = [ChapterRead.model_validate(chapter) for chapter in chapters]
+    if current_user.role == "student":
+        for item in items:
+            item.lessons = [lesson for lesson in item.lessons if lesson.status == "published"]
+    return PaginatedResponse(items=items, page=page, page_size=page_size, total=total)
 
 
 @router.post("/courses/{course_id}/chapters", response_model=ChapterRead, status_code=status.HTTP_201_CREATED)
@@ -913,11 +897,12 @@ def delete_lesson(
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(get_current_user),
 ):
-    lesson = db.get(Lesson, lesson_id)
+    lesson = db.scalar(select(Lesson).where(Lesson.id == lesson_id).with_for_update())
     if not lesson:
         raise api_error(404, "LESSON_NOT_FOUND", "课时不存在")
     ensure_course_manager(lesson.chapter.course, current_user)
     _ensure_course_term_writable(lesson.chapter.course)
+    _ensure_lessons_unused(db, [lesson.id])
     # 删除前保存对象绑定，数据库提交成功后清理本地文件
     old_key = lesson.video_storage_key
     old_object_id = lesson.video_object_id
@@ -931,6 +916,25 @@ def delete_lesson(
         legacy_key=old_key,
         logger_name="lesson_video",
     )
+
+
+def _ensure_lessons_unused(db, lesson_ids):
+    """Check shared content references without disclosing another class's records.
+
+    Core table probes intentionally bypass per-teacher ORM visibility: deleting
+    shared content must also protect records belonging to other instructors.
+    """
+    if not lesson_ids:
+        return
+    from app.models import ExperimentRecord, LessonProgress
+    from app.models.teaching import OfferingExperiment
+    for model in (ExperimentRecord, LessonProgress):
+        table = model.__table__
+        if db.scalar(select(table.c.id).where(table.c.lesson_id.in_(lesson_ids)).limit(1)):
+            raise api_error(409, "LESSON_HAS_HISTORY", "课时已有学习或提交记录，请改为草稿以保留历史")
+    delivery = OfferingExperiment.__table__
+    if db.scalar(select(delivery.c.id).where(delivery.c.entry_kind == "lesson", delivery.c.entry_id.in_(lesson_ids)).limit(1)):
+        raise api_error(409, "LESSON_IN_USE", "课时已关联授课班级，请改为草稿以保留教学记录")
 
 
 @router.patch("/chapters/{chapter_id}", response_model=ChapterRead)
@@ -961,11 +965,13 @@ def delete_chapter(
     current_user: User = Depends(get_current_user),
 ):
     """删除章节：级联删除章节内全部课时，并清理章节内所有本地视频文件"""
-    chapter = db.get(Chapter, chapter_id)
+    chapter = db.scalar(select(Chapter).where(Chapter.id == chapter_id).with_for_update())
     if not chapter:
         raise api_error(404, "CHAPTER_NOT_FOUND", "章节不存在")
     ensure_course_manager(chapter.course, current_user)
     _ensure_course_term_writable(chapter.course)
+    lesson_ids = list(db.scalars(select(Lesson.id).where(Lesson.chapter_id == chapter.id).with_for_update()))
+    _ensure_lessons_unused(db, lesson_ids)
     # 删除前收集章节内全部视频对象绑定，级联删除成功后逐个清理文件
     old_objects = [
         (lesson.video_object_id, lesson.video_storage_key)
@@ -989,6 +995,27 @@ def delete_chapter(
 # ── 课程白名单 ────────────────────────────────────────────────
 
 
+def _course_teacher_student_ids(db, course_id, current_user, *, write=False):
+    """Course content ownership never grants access to another instructor's roster."""
+    from app.models.teaching import CourseOffering, OfferingEnrollment
+    query = select(OfferingEnrollment.student_id).join(CourseOffering,
+        CourseOffering.id == OfferingEnrollment.offering_id).where(
+        CourseOffering.course_id == course_id, CourseOffering.teacher_id == current_user.id,
+        CourseOffering.status.in_(["active"] if write else ["active", "archived"]),
+        OfferingEnrollment.status == "active")
+    if write:
+        query = query.join(AcademicTerm, AcademicTerm.id == CourseOffering.academic_term_id)
+        query = query.join(TeachingClass, TeachingClass.id == CourseOffering.teaching_class_id)
+        query = query.where(AcademicTerm.status != "closed", TeachingClass.status == "active")
+    return query
+
+
+def _ensure_whitelist_student_scope(db, course_id, student_id, current_user):
+    if current_user.role == "teacher" and not db.scalar(select(User.id).where(
+        User.id == student_id, User.id.in_(_course_teacher_student_ids(db, course_id, current_user, write=True)))):
+        raise api_error(403, "STUDENT_SCOPE_FORBIDDEN", "只能管理本课程本人授课班级的学生")
+
+
 @router.get("/courses/{course_id}/whitelist", response_model=CourseWhitelistListRead)
 def list_whitelist(
     course_id: int,
@@ -1001,6 +1028,8 @@ def list_whitelist(
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     filters = [CourseWhitelistStudent.course_id == course_id]
+    if current_user.role == "teacher":
+        filters.append(CourseWhitelistStudent.student_id.in_(_course_teacher_student_ids(db, course_id, current_user)))
     if q:
         like = f"%{q}%"
         filters.append(or_(User.username.ilike(like), User.real_name.ilike(like)))
@@ -1037,6 +1066,7 @@ def add_whitelist_student(
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
+    _ensure_whitelist_student_scope(db, course_id, payload.student_id, current_user)
     student = db.get(User, payload.student_id)
     if not student:
         raise api_error(404, "USER_NOT_FOUND", "用户不存在")
@@ -1068,6 +1098,7 @@ def remove_whitelist_student(
     course = require_course(course_id, db)
     ensure_course_manager(course, current_user)
     _ensure_course_term_writable(course)
+    _ensure_whitelist_student_scope(db, course_id, student_id, current_user)
     entry = db.scalar(
         select(CourseWhitelistStudent).where(
             CourseWhitelistStudent.course_id == course_id,

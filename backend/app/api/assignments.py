@@ -34,6 +34,9 @@ from app.services.audience_service import (
     student_in_assignment_audience,
 )
 
+from app.services.offering_service import teacher_task_condition
+from sqlalchemy import and_, or_
+
 router = APIRouter(prefix="/assignments", tags=["assignments"])
 
 
@@ -83,12 +86,8 @@ def _submitted_map(db: Session, assignments: list[Assignment], student_id: int) 
 
 
 def ensure_assignment_manager(assignment: Assignment, user: User, db: Session):
-    if user.role == "admin":
-        return
-    course = db.get(Course, assignment.course_id)
-    if user.role == "teacher" and course and course.teacher_id == user.id:
-        return
-    raise api_error(403, "FORBIDDEN", "没有权限管理该作业")
+    from app.services.offering_service import task_content_manager
+    task_content_manager(db, assignment, user)
 
 
 def _assignment_has_submissions(db: Session, assignment_id: int) -> bool:
@@ -167,8 +166,8 @@ def list_assignments(
             .where(assignment_visible_condition(current_user.id))
         )
     elif current_user.role == "teacher":
-        query = query.join(Course, Assignment.course_id == Course.id).where(Course.teacher_id == current_user.id)
-        count_query = count_query.join(Course, Assignment.course_id == Course.id).where(Course.teacher_id == current_user.id)
+        query = query.join(Course, Assignment.course_id == Course.id).where(or_(teacher_task_condition(Assignment, current_user.id), and_(Assignment.offering_id.is_(None), Course.teacher_id == current_user.id)))
+        count_query = count_query.join(Course, Assignment.course_id == Course.id).where(or_(teacher_task_condition(Assignment, current_user.id), and_(Assignment.offering_id.is_(None), Course.teacher_id == current_user.id)))
     elif current_user.role != "admin":
         # Any unsupported role: empty
         query = query.where(Assignment.id == -1)
@@ -196,9 +195,13 @@ def create_assignment(
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     course = require_course(payload.course_id, db)
-    if current_user.role == "teacher":
-        if course.teacher_id != current_user.id:
-            raise api_error(403, "FORBIDDEN", "只能在自己的课程中创建作业")
+    if payload.offering_id:
+        from app.services.offering_service import require_offering
+        offering = require_offering(db, payload.offering_id, current_user, write=True)
+        if offering.course_id != course.id:
+            raise api_error(422, 'TASK_SCOPE_MISMATCH', '任务课程须与授课实例一致')
+    elif current_user.role == 'teacher' and course.teacher_id != current_user.id:
+        raise api_error(403, 'FORBIDDEN', '共享模板由课程负责人维护；班级任务请选择授课实例')
     data = payload.model_dump()
     audience_mode = data.pop("audience_mode")
     audience_class_ids = data.pop("audience_class_ids")

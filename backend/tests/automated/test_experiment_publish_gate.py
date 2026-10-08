@@ -2,6 +2,7 @@
 publish 需模板就绪、unpublish 专用端点、角色可见性。"""
 
 from app import models
+from teaching_test_support import grant_experiment
 from conftest import auth_header, create_user, login, seed_basic_environment
 
 API = "/api/v1"
@@ -223,6 +224,7 @@ def test_student_only_sees_published_and_teacher_lists_own_modules(client, db_se
         == 200
     )
 
+    grant_experiment(db_session_factory, "module", published["id"], ["stu"])
     # 学生列表只见 published
     stu_list = client.get(f"{API}/experiments/modules", headers=auth_header(stu_tok)).json()
     ids = [item["id"] for item in stu_list["items"]]

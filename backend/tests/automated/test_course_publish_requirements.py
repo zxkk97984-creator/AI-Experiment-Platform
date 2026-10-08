@@ -2,7 +2,7 @@
 from datetime import date
 
 from conftest import auth_header, create_user, login
-from app.models import AcademicTerm, Chapter, Lesson, NotebookTemplate, NotebookTemplateVersion, TeachingClass
+from app.models import AcademicTerm, Chapter, Course, Lesson, NotebookTemplate, NotebookTemplateVersion, TeachingClass
 
 
 API = "/api/v1"
@@ -14,7 +14,7 @@ def _teacher_token(client, db_session_factory):
     return token
 
 
-def _complete_course(client, token, term_id, class_id, title="Complete course"):
+def _complete_course(client, db_session_factory, token, term_id, class_id, title="Complete course"):
     created = client.post(
         f"{API}/courses",
         headers=auth_header(token),
@@ -23,7 +23,6 @@ def _complete_course(client, token, term_id, class_id, title="Complete course"):
             "description": "Course description",
             "status": "draft",
             "academic_term_id": term_id,
-            "teaching_class_ids": [class_id],
             "cover": "covers/complete.png",
             "start_time": "2026-09-01T08:00:00",
             "visibility": "public",
@@ -31,7 +30,19 @@ def _complete_course(client, token, term_id, class_id, title="Complete course"):
         },
     )
     assert created.status_code == 201, created.text
-    return created.json()["id"]
+    course_id = created.json()["id"]
+    # A content owner may prepare shared content; class authority is explicitly
+    # allocated by an administrator, never granted by the teacher's own payload.
+    create_user(db_session_factory, "publish_admin", "admin")
+    admin_token, _ = login(client, "publish_admin")
+    with db_session_factory() as db:
+        teacher_id = db.get(Course, course_id).teacher_id
+    allocated = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+        "course_id": course_id, "academic_term_id": term_id,
+        "teaching_class_id": class_id, "teacher_id": teacher_id,
+    })
+    assert allocated.status_code == 201, allocated.text
+    return course_id
 
 
 def _publish_ready_template(db_session_factory, owner_id, lesson_id):
@@ -132,32 +143,17 @@ def test_publish_rejects_incomplete_course(client, db_session_factory):
 
     assert response.status_code == 422, response.text
     assert response.json()["detail"]["code"] == "COURSE_INCOMPLETE"
-    assert "所属学期" in response.json()["detail"]["message"]
+    assert "管理员确认的授课安排" in response.json()["detail"]["message"]
     assert "课程封面" in response.json()["detail"]["message"]
 
 
 def test_publish_accepts_course_with_complete_basic_information(client, db_session_factory):
     token = _teacher_token(client, db_session_factory)
     term_id, class_id = _academic_data(db_session_factory)
-    created = client.post(
-        f"{API}/courses",
-        headers=auth_header(token),
-        json={
-            "title": "Complete course",
-            "description": "Course description",
-            "status": "draft",
-            "academic_term_id": term_id,
-            "teaching_class_ids": [class_id],
-            "cover": "covers/complete.png",
-            "start_time": "2026-09-01T08:00:00",
-            "visibility": "public",
-            "default_score": 100,
-        },
-    )
-    assert created.status_code == 201, created.text
+    course_id = _complete_course(client, db_session_factory, token, term_id, class_id)
 
     response = client.patch(
-        f"{API}/courses/{created.json()['id']}",
+        f"{API}/courses/{course_id}",
         headers=auth_header(token),
         json={"status": "published"},
     )
@@ -241,7 +237,7 @@ def test_plain_update_does_not_trigger_publish(client, db_session_factory):
 def test_publish_rejects_unconfigured_notebook_lesson(client, db_session_factory):
     token = _teacher_token(client, db_session_factory)
     term_id, class_id = _academic_data(db_session_factory)
-    course_id = _complete_course(client, token, term_id, class_id)
+    course_id = _complete_course(client, db_session_factory, token, term_id, class_id)
     _add_notebook_lesson(db_session_factory, course_id, "未配置的实验课")
 
     response = client.patch(
@@ -259,7 +255,7 @@ def test_publish_rejects_unconfigured_notebook_lesson(client, db_session_factory
 def test_publish_accepts_notebook_lesson_with_published_template(client, db_session_factory):
     token = _teacher_token(client, db_session_factory)
     term_id, class_id = _academic_data(db_session_factory)
-    course_id = _complete_course(client, token, term_id, class_id)
+    course_id = _complete_course(client, db_session_factory, token, term_id, class_id)
     lesson_id = _add_notebook_lesson(db_session_factory, course_id)
 
     with db_session_factory() as db:

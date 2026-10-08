@@ -129,3 +129,17 @@ describe('学生实验目录页', () => {
     expect(wrapper.text()).toContain('Python 基础实验')
   })
 })
+
+it('opens the selected class instance when one module is released in multiple semesters', async () => {
+  mocks.push.mockClear()
+  mocks.listStudentCatalog.mockResolvedValue(response({ items: [
+    { id: 8, offering_id: 12, name: '同一模块', learning_status: 'graded', term_name: '旧学期', class_name: '旧班' },
+    { id: 8, offering_id: 15, name: '同一模块', learning_status: 'not_started', term_name: '新学期', class_name: '新班' },
+  ], total: 2 }))
+  const wrapper = mountView()
+  await flushPromises()
+  expect(wrapper.text()).toContain('旧学期 · 旧班')
+  expect(wrapper.text()).toContain('新学期 · 新班')
+  await wrapper.findAll('.enter-button')[1].trigger('click')
+  expect(mocks.push).toHaveBeenCalledWith('/student/experiments/8?offering_id=15')
+})

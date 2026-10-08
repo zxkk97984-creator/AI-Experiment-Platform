@@ -100,7 +100,7 @@ def test_token_without_sv_is_rejected(client, db_session_factory):
     )
     # 模拟旧版签名（无 sv 字段）：手工构造 payload 再签名
     import datetime as dt
-    from jose import jwt
+    import jwt
 
     payload = {
         "sub": str(user_id),

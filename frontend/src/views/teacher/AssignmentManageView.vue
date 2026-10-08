@@ -1,6 +1,6 @@
 <script setup>
 import { vDialogFocus } from '../../directives/dialogFocus.js'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
@@ -9,6 +9,7 @@ import TeacherPageHeader from '../../components/teacher/TeacherPageHeader.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
 import { assignmentsAPI } from '../../api/assignments.js'
 import { coursesAPI } from '../../api/courses.js'
+import { offeringsAPI } from '../../api/offerings.js'
 import EnvironmentProfilePicker from '../../components/common/EnvironmentProfilePicker.vue'
 import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
 import { useAppStore } from '../../stores/app.js'
@@ -28,6 +29,13 @@ const importPolicy = ref('unrestricted')
 const allowedImports = ref([])
 // 课程弹窗：courses 为可选课程列表，courseModalOpen 控制弹窗开关，manualCourseId 为弹窗内手输 ID
 const courses = ref([])
+const offerings = ref([]), offeringId = ref('')
+const courseOfferings = computed(() => offerings.value.filter(o => o.course_id === Number(form.value.course_id) && o.status === 'active'))
+watch(() => form.value.course_id, () => { offeringId.value = '' })
+async function fetchOfferings() {
+  try { offerings.value = (await offeringsAPI.list()).data.items || [] }
+  catch { app.showToast('授课班级加载失败，请刷新后选择班级', 'error') }
+}
 const query = ref('')
 const statusFilter = ref('all')
 const deadlineFilter = ref('all')
@@ -120,7 +128,7 @@ const filteredAssignments = computed(() => {
 })
 const { page, pageSize, pageCount, pagedItems, goToPage, resetPage } = useClientPagination(filteredAssignments)
 const courseName = (assignment) => assignment.course_title || courses.value.find((course) => String(course.id) === String(assignment.course_id))?.title || '未关联课程'
-const courseClassLabel = (assignment) => courses.value.find((course) => String(course.id) === String(assignment.course_id))?.teaching_classes?.map((item) => item.name).join('、') || '未设置班级'
+const courseClassLabel = (assignment) => assignment.offering_id ? offerings.value.find(o => o.id === assignment.offering_id)?.class_name || '班级任务' : '共享课程模板'
 const selectedCourse = computed(
   () => courses.value.find((c) => String(c.id) === String(form.value.course_id)) || null,
 )
@@ -188,6 +196,7 @@ async function doCreate() {
   try {
     const payload = {
       ...form.value,
+      ...(offeringId.value ? { offering_id: Number(offeringId.value) } : {}),
       course_id: parseInt(form.value.course_id) || undefined,
       due_at: fromDateTimeLocal(form.value.due_at),
       environment_version_id: form.value.environment_version_id,
@@ -311,7 +320,7 @@ async function confirmUnpublish() {
   finally { unpublishing.value = false }
 }
 
-onMounted(() => { fetch(); fetchCourses() })
+onMounted(() => { fetch(); fetchCourses(); fetchOfferings() })
 </script>
 
 <template>
@@ -416,6 +425,8 @@ onMounted(() => { fetch(); fetchCourses() })
             </div>
             <div class="form-group"><label>截止时间</label><input v-model="form.due_at" type="datetime-local" /></div>
           </div>
+
+          <div class="form-group"><label for="assignment-offering">任务归属</label><select id="assignment-offering" v-model="offeringId"><option value="">共享课程模板（仅内容负责人可创建）</option><option v-for="o in courseOfferings" :key="o.id" :value="o.id">{{ o.term_name }} · {{ o.class_name }}</option></select><p class="form-hint">选择教学班后独立设置本班题目、时间和成绩。</p></div>
 
           <!-- ── 环境与 import 教学策略（Phase 4：教师选择） ────────── -->
           <div class="form-group">

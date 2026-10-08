@@ -146,7 +146,7 @@ def create_assignment_ai_grades(
             student = db.get(User, sub.student_id)
             archetype = demo_archetype(student.username if student else None)
             profile = ARCHETYPES[archetype]
-            rng = make_rng("ai_grade", sub.student_id,
+            rng = make_rng("ai_grade", student.username if student else "missing-demo-student",
                            getattr(question, "title", None) or getattr(question, "prompt", ""),
                            sub.attempt_count)
 
@@ -318,7 +318,8 @@ def create_exam_ai_grades(
                 if student is not None:
                     archetype = demo_archetype(student.username)
                 profile = ARCHETYPES[archetype]
-                rng = make_rng("exam_ai_grade", sub.student_id,
+                rng = make_rng("exam_ai_grade", student.username if student else "missing-demo-student",
+                               exam.title, question.order_index,
                                getattr(question, "title", None) or getattr(question, "prompt", ""))
 
                 existing = db.scalar(

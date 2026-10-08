@@ -24,6 +24,9 @@ class StorageArea(StrEnum):
     COVERS = "covers"
     VIDEOS = "videos"
     STUDIO = "studio"
+    DATASETS = "datasets"
+    ARTIFACTS = "artifacts"
+    MATERIALS = "materials"
 
 
 class StorageService:
@@ -50,6 +53,9 @@ class StorageService:
                     StorageArea.COVERS: backend,
                     StorageArea.VIDEOS: backend,
                     StorageArea.STUDIO: backend,
+                    StorageArea.DATASETS: backend,
+                    StorageArea.ARTIFACTS: backend,
+                    StorageArea.MATERIALS: backend,
                 },
                 backend_name="s3",
             )
@@ -63,9 +69,21 @@ class StorageService:
                 ),
                 StorageArea.VIDEOS: LocalFilesystemStorage(settings.video_storage_path),
                 StorageArea.STUDIO: LocalFilesystemStorage(settings.studio_storage_path),
+                StorageArea.DATASETS: LocalFilesystemStorage(
+                    settings.lab_storage_path / "datasets", key_prefix="datasets",
+                ),
+                StorageArea.ARTIFACTS: LocalFilesystemStorage(
+                    settings.lab_storage_path / "artifacts", key_prefix="artifacts",
+                ),
+                StorageArea.MATERIALS: LocalFilesystemStorage(settings.material_storage_path),
             },
             backend_name="local",
         )
+
+    @property
+    def configured_areas(self) -> frozenset[str]:
+        """Only inspect areas backed by this explicitly configured adapter."""
+        return frozenset(self._backends)
 
     def _backend(self, area: str | StorageArea) -> StorageBackend:
         name = area.value if isinstance(area, StorageArea) else area

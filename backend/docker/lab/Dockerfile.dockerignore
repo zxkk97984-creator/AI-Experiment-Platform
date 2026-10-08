@@ -1,0 +1,7 @@
+**
+!backend/
+!backend/docker/
+!backend/docker/lab/
+!backend/docker/lab/Dockerfile
+!backend/docker/kernel/
+!backend/docker/kernel/kernel_runner.py

@@ -90,6 +90,8 @@ def verify_current(user, password):
 
 
 def change_credentials(db, user, password_hash, *, temporary=False, days=7):
+    from app.services.credential_delivery_service import invalidate
+    invalidate(db, user.id)
     user.password_hash = password_hash
     user.must_change_password = temporary
     user.password_changed_at = utc_now()
@@ -158,6 +160,8 @@ def update_identity(db, user_id, updates, actor, *, request_id=None):
     if {'role', 'status', 'username'} & changes.keys():
         user.session_version += 1
         user.credential_version += 1
+        from app.services.credential_delivery_service import invalidate
+        invalidate(db, user.id)
     try:
         db.flush()
     except IntegrityError:

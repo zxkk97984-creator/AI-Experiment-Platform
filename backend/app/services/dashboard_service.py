@@ -9,7 +9,7 @@ from app.models import (
     Assignment, Chapter, CodeGrade, Course, CourseEnrollment, CourseTeachingClass, Exam, ExamAnswer,
     ExamQuestion, ExamSubmission, ExperimentModule, ExperimentRecord,
     ExperimentSubmission, JudgeQuestion, Lesson, Submission, TeachingClass,
-    TeachingClassStudent, User,
+    TeachingClassStudent, User, LabSubmission, LabGradeRevision, LabRun,
 )
 from app.services.announcement_service import (
     list_visible_announcements, unread_announcement_count,
@@ -24,6 +24,7 @@ from app.schemas.dashboard import (
 from app.services.submission_status import (
     assignment_display, exam_display, experiment_display,
 )
+from app.services.offering_service import teacher_course_condition
 from app.services.audience_service import (
     assignment_visible_condition, effective_student_ids, exam_visible_condition,
 )
@@ -304,7 +305,10 @@ def build_student_dashboard(db: Session, user: User, now: datetime | None = None
             select(
                 ExperimentSubmission, ExperimentRecord, Lesson.title,
                 ExperimentModule.name, Course.id, Course.title,
+                func.coalesce(LabGradeRevision.published_at, ExperimentSubmission.reviewed_at).label("published_at"),
             )
+            .outerjoin(LabSubmission, LabSubmission.submission_id == ExperimentSubmission.id)
+            .outerjoin(LabGradeRevision, LabGradeRevision.id == LabSubmission.published_grade_id)
             .join(ExperimentRecord, ExperimentRecord.id == ExperimentSubmission.record_id)
             .outerjoin(Lesson, Lesson.id == ExperimentRecord.lesson_id)
             .outerjoin(ExperimentModule, ExperimentModule.id == ExperimentRecord.module_id)
@@ -312,13 +316,13 @@ def build_student_dashboard(db: Session, user: User, now: datetime | None = None
             .outerjoin(Course, Course.id == Chapter.course_id)
             .where(
                 ExperimentRecord.student_id == user.id,
-                ExperimentSubmission.reviewed_at.is_not(None),
+                or_(LabGradeRevision.published_at.is_not(None), and_(LabSubmission.submission_id.is_(None), ExperimentSubmission.reviewed_at.is_not(None))),
                 # 课时实验反馈仅限当前已选 published 课程；独立模块实验（无课程）保留
                 or_(Course.id.is_(None), Course.id.in_(enrolled_ids)),
             )
-            .order_by(ExperimentSubmission.reviewed_at.desc())
+            .order_by(func.coalesce(LabGradeRevision.published_at, ExperimentSubmission.reviewed_at).desc())
         ).all()
-        for sub, record, lesson_title, module_name, course_id, course_title in exp_fb:
+        for sub, record, lesson_title, module_name, course_id, course_title, published_at in exp_fb:
             title = lesson_title or module_name
             route = (
                 f"/student/courses/{course_id}/notebook/{record.lesson_id}"
@@ -329,7 +333,7 @@ def build_student_dashboard(db: Session, user: User, now: datetime | None = None
                 RecentFeedback(
                     kind="experiment", id=sub.id, title=f"{title} 反馈",
                     course_title=course_title, score=sub.score, feedback=sub.feedback,
-                    graded_at=sub.reviewed_at, route=route,
+                    graded_at=published_at, route=route,
                 )
             )
         assign_fb = db.execute(
@@ -415,13 +419,16 @@ def _teacher_pending_review_rows(db: Session, owned_ids: list[int]):
             ExperimentModule.id, ExperimentModule.name, ExperimentModule.due_at,
             Course.id, Course.title,
         )
+        .outerjoin(LabSubmission, LabSubmission.submission_id == ExperimentSubmission.id)
+        .outerjoin(LabRun, LabRun.id == LabSubmission.current_run_id)
         .join(ExperimentRecord, ExperimentRecord.id == ExperimentSubmission.record_id)
         .outerjoin(Lesson, Lesson.id == ExperimentRecord.lesson_id)
         .outerjoin(ExperimentModule, ExperimentModule.id == ExperimentRecord.module_id)
         .outerjoin(Chapter, Chapter.id == Lesson.chapter_id)
         .outerjoin(Course, Course.id == Chapter.course_id)
         .join(User, User.id == ExperimentRecord.student_id)
-        .where(ExperimentSubmission.reviewed_at.is_(None), Course.id.in_(owned_ids))
+        .where(or_(LabSubmission.review_requested.is_(True), LabRun.status == "needs_review",
+                   and_(LabSubmission.submission_id.is_(None), ExperimentSubmission.reviewed_at.is_(None))), Course.id.in_(owned_ids))
         .order_by(ExperimentSubmission.submitted_at)
     ).all()
     ai_rows = db.execute(
@@ -640,7 +647,7 @@ def _teacher_recent_submissions(db: Session, owned_ids: list[int]):
 def build_teacher_dashboard_counts(db: Session, user: User, now: datetime | None = None):
     """侧栏徽标轻量计数；只统计数量，不组装工作队列与最近提交明细。"""
     now = now or datetime.now(timezone.utc)
-    owned_ids = list(db.scalars(select(Course.id).where(Course.teacher_id == user.id)).all())
+    owned_ids = list(db.scalars(select(Course.id).where(teacher_course_condition(user.id))).all())
     if not owned_ids:
         unread = unread_announcement_count(db, user, now)
         from app.schemas.dashboard import TeacherDashboardCounts
@@ -693,7 +700,7 @@ def build_teacher_dashboard(db: Session, user: User, now: datetime | None = None
 
     courses = (
         db.scalars(
-            select(Course).where(Course.teacher_id == user.id).order_by(Course.title)
+            select(Course).where(teacher_course_condition(user.id)).order_by(Course.title)
         ).all()
     )
     owned_ids = [course.id for course in courses]

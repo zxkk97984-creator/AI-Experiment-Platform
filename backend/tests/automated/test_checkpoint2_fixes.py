@@ -14,6 +14,7 @@ from app import models
 from app.database import Base
 from app.services.kernel_manager import KernelManager
 from conftest import auth_header, create_course_db, create_user, login, seed_basic_environment
+from teaching_test_support import grant_experiment
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -78,9 +79,9 @@ def _setup_lesson_with_template(client, db_session_factory, course_status="publi
         db.commit()
         lid = lesson.id
 
-    # 选课
+    # 管理员显式分班并冻结本班实验版本；共享课程本身不授予执行权。
     if course_status == "published":
-        client.post(f"/api/v1/courses/{cid}/enroll", headers=auth_header(s_tok))
+        grant_experiment(db_session_factory, "lesson", lid, ["s1"])
 
     return t_tok, s_tok, cid, lid, tid, vid
 
@@ -103,7 +104,7 @@ def test_current_version_id_has_fk_in_metadata():
 # ═══════════════════════════════════════════════════════════════
 
 def test_cross_user_record_access_denied(client, db_session_factory):
-    """A 成功创建 record，B GET/PUT/execute 全部 403"""
+    """A 成功创建 record，B GET/PUT/execute 全部 404，不泄露记录存在"""
     _, s_tok, _, lid, _, _ = _setup_lesson_with_template(client, db_session_factory)
     create_user(db_session_factory, "s2", "student")
     s2_tok, _ = login(client, "s2")
@@ -113,30 +114,30 @@ def test_cross_user_record_access_denied(client, db_session_factory):
     assert r.status_code in (200, 201), r.text
     rid = r.json()["id"]
 
-    # B GET detail → 403
+    # B GET detail → 404
     r = client.get(f"/api/v1/experiments/records/{rid}", headers=auth_header(s2_tok))
-    assert r.status_code == 403, f"B GET 应 403 实际 {r.status_code}"
-    assert r.json()["detail"]["code"] == "FORBIDDEN"
+    assert r.status_code == 404, f"B GET 应 404 实际 {r.status_code}"
+    assert r.json()["detail"]["code"] == "RECORD_NOT_FOUND"
 
-    # B PUT cells → 403
+    # B PUT cells → 404
     r = client.put(f"/api/v1/experiments/records/{rid}/cells", headers=auth_header(s2_tok), json={
         "cells": {"c1": "print(2)"}, "record_revision": 1,
     })
-    assert r.status_code == 403, f"B PUT 应 403 实际 {r.status_code}"
+    assert r.status_code == 404, f"B PUT 应 404 实际 {r.status_code}"
 
-    # B execute → 403
+    # B execute → 404
     r = client.post(f"/api/v1/experiments/records/{rid}/cells/c1/execute", headers=auth_header(s2_tok), json={
         "code": "print(1)",
     })
-    assert r.status_code == 403, f"B execute 应 403 实际 {r.status_code}"
+    assert r.status_code == 404, f"B execute 应 404 实际 {r.status_code}"
 
-    # B interrupt → 403
+    # B interrupt → 404
     r = client.post(f"/api/v1/experiments/records/{rid}/interrupt", headers=auth_header(s2_tok))
-    assert r.status_code == 403
+    assert r.status_code == 404
 
-    # B restart → 403
+    # B restart → 404
     r = client.post(f"/api/v1/experiments/records/{rid}/restart", headers=auth_header(s2_tok))
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -151,13 +152,20 @@ def test_dropped_enrollment_blocks_record_access(client, db_session_factory):
     assert r.status_code in (200, 201)
     rid = r.json()["id"]
 
-    # 退课
-    client.delete(f"/api/v1/courses/{cid}/enroll", headers=auth_header(s_tok))
+    # 班级学生不能自行退课；管理员移出后立即失去执行权。
+    dropped = client.delete(f"/api/v1/courses/{cid}/enroll", headers=auth_header(s_tok))
+    assert dropped.status_code == 409
+    create_user(db_session_factory, "roster_admin", "admin")
+    admin_token, _ = login(client, "roster_admin")
+    with db_session_factory() as db:
+        student_id = db.query(models.User).filter_by(username="s1").one().id
+    removed = client.delete(f"/api/v1/courses/{cid}/students/{student_id}", headers=auth_header(admin_token))
+    assert removed.status_code == 204, removed.text
 
     # GET detail 应拒绝
     r = client.get(f"/api/v1/experiments/records/{rid}", headers=auth_header(s_tok))
     assert r.status_code == 403, f"退课后应 403 实际 {r.status_code}"
-    assert r.json()["detail"]["code"] == "NOT_ENROLLED"
+    assert r.json()["detail"]["code"] == "LESSON_NOT_AVAILABLE"
 
     # PUT cells 应拒绝
     r = client.put(f"/api/v1/experiments/records/{rid}/cells", headers=auth_header(s_tok), json={
@@ -186,7 +194,7 @@ def test_not_enrolled_blocks_ensure(client, db_session_factory):
     _, _, _, lid, _, _ = _setup_lesson_with_template(client, db_session_factory)
     r = client.post(f"/api/v1/experiments/records/ensure-for-lesson/{lid}", headers=auth_header(s_tok))
     assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "NOT_ENROLLED"
+    assert r.json()["detail"]["code"] == "LESSON_NOT_AVAILABLE"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -508,6 +516,8 @@ def test_migration_downgrade_one_step_then_upgrade_head(tmp_path):
     # exercises the reversible path on a disposable SQLite database.
     env["DAI_ALLOW_ENVIRONMENT_V2_DOWNGRADE"] = "true"
     env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_LAB_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_TEACHING_DOWNGRADE"] = "1"
 
     _upgrade_head_seeded(env)
 
@@ -517,7 +527,7 @@ def test_migration_downgrade_one_step_then_upgrade_head(tmp_path):
     )
     assert r2.returncode == 0, f"downgrade -1 failed: {r2.stderr}\n{r2.stdout}"
 
-    # downgrade -1（迁移 B 降级）只删绑定列，basic 种子数据保留，可直接 upgrade head
+    # disposable school migration 单步回退后，保留旧表及种子数据，可重新升级。
     r3 = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT, capture_output=True, text=True, timeout=30, env=env,

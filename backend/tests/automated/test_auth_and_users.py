@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from conftest import auth_header, create_user, login
+from conftest import auth_header, create_user, grant_teaching_fixture, login
 
 
 def test_admin_can_create_user_and_logout_blacklists_token(client, db_session_factory):
@@ -83,19 +83,24 @@ def test_admin_user_list_exactly_matches_username_student_no_or_real_name(client
 
 
 def test_teacher_student_candidate_search_matches_partial_student_no(client, db_session_factory):
-    create_user(db_session_factory, "student-search-teacher", "teacher")
+    teacher = create_user(db_session_factory, "student-search-teacher", "teacher")
     create_user(
         db_session_factory,
         "student-search-target",
         "student",
         real_name="目标学生",
     )
+    outsider = create_user(db_session_factory, 'student-search-outsider', 'student')
     with db_session_factory() as db:
         from sqlalchemy import select
-        from app.models import User
+        from app.models import Course, User
 
         student = db.scalar(select(User).where(User.username == "student-search-target"))
         student.student_no = "2026001234"
+        db.get(User, outsider.id).student_no = '202699001234'
+        course = Course(title='Student search fixture', teacher_id=teacher.id, status='published')
+        db.add(course)
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     access_token, _ = login(client, "student-search-teacher")

@@ -42,6 +42,9 @@ def _setup(client, db_session_factory, *, with_submission=False, tag=""):
     ).json()
     qid = question["id"]
 
+    from teaching_test_support import grant_course_students
+    grant_course_students(db_session_factory, cid, [s_name])
+
     submission_id = None
     if with_submission:
         assert (
@@ -145,7 +148,7 @@ def test_delete_question_permissions(client, db_session_factory):
         ).status_code
         == 403
     )
-    # 其他教师 403
+    # Other teachers cannot enumerate tasks outside their teaching scope.
     other_name = f"del_other_{d['t_name']}"
     create_user(db_session_factory, other_name, "teacher")
     other_tok, _ = login(client, other_name)
@@ -154,8 +157,10 @@ def test_delete_question_permissions(client, db_session_factory):
             f"{API}/assignments/{d['aid']}/questions/{d['qid']}",
             headers=auth_header(other_tok),
         ).status_code
-        == 403
+        == 404
     )
+    with db_session_factory() as db:
+        assert db.get(JudgeQuestion, d['qid']) is not None
     # 404：题目不存在
     assert (
         client.delete(

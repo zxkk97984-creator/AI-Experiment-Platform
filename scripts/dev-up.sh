@@ -137,8 +137,8 @@ require_cmd npm
 require_cmd setsid
 require_cmd ps
 
-"$PY" -c 'import fastapi, sqlalchemy' >/dev/null 2>&1 \
-    || fail "后端虚拟环境缺少依赖，请在 backend 中安装 requirements-dev.txt"
+"$PY" -c 'import fastapi, sqlalchemy, jwt' >/dev/null 2>&1 \
+    || fail "当前 Python 缺少新版后端依赖（含 PyJWT）；请先用该 Python 安装 backend/requirements-dev.txt，或设置 DAI_PYTHON 指向已更新的虚拟环境"
 
 # Worker 需要直接访问 Docker socket。原脚本在 docker 无权限时用 sudo -u $USER
 # 启动 Python，但这不会给当前用户增加 docker 组权限，容易出现“API 能开、判题 Worker 不能用”。
@@ -193,12 +193,17 @@ echo "$API_PORT" >"$RUN_DIR/api.port"
 launch judge "$PROJECT_DIR/backend" "$PY" -m app.worker.judge_worker
 launch envbuilder "$PROJECT_DIR/backend" "$PY" -m app.worker.environment_builder_worker
 launch accounts "$PROJECT_DIR/backend" "$PY" -m app.worker.account_worker
+LAB_ENABLED="$(cd "$PROJECT_DIR/backend" && "$PY" -c 'from app.config import get_settings; print(int(get_settings().lab_enabled))')"
+if [ "$LAB_ENABLED" = "1" ]; then
+    launch lab "$PROJECT_DIR/backend" "$PY" -m app.worker.lab_worker
+fi
 
 # Worker 没有 HTTP 健康接口，至少确认启动后仍持续存活。
 sleep 1
 check_alive judge
 check_alive envbuilder
 check_alive accounts
+if [ "$LAB_ENABLED" = "1" ]; then check_alive lab; fi
 
 # ── 6. 前端 ───────────────────────────────────────────────────
 cd "$PROJECT_DIR/frontend"
@@ -230,6 +235,7 @@ check_alive api
 check_alive judge
 check_alive envbuilder
 check_alive accounts
+if [ "$LAB_ENABLED" = "1" ]; then check_alive lab; fi
 check_alive frontend
 
 printf '\n\033[32m✔ 全部启动完成，并已通过存活/HTTP 检查\033[0m\n'

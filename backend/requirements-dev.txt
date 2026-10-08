@@ -2,7 +2,7 @@
 
 # Test isolation and repository quality gates; never copied into the runtime image.
 fakeredis==2.26.2
-pytest==8.3.4
+pytest==9.1.1
 ruff==0.12.5
 radon==6.0.1
 moto[s3]==5.1.17

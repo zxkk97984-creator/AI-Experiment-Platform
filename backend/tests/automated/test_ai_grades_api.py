@@ -5,7 +5,7 @@ A/B/C 分类：B 类（最小父行）——submission/rubric 外键经共享工
 """
 import pytest
 from datetime import datetime, timezone
-from conftest import auth_header, create_user, login, make_course, make_rubric, make_submission
+from conftest import grant_teaching_fixture, auth_header, create_user, login, make_course, make_rubric, make_submission
 from sqlalchemy import text
 from app.dependencies import PaginationParams
 from app.models import Assignment, Course, Exam, ExamQuestion, ExamSubmission, ExamAnswer, JudgeQuestion, Submission, CodeGrade, QuestionRubric, User
@@ -53,7 +53,9 @@ class TestGradesQueryDedup:
                 submission_id=submission.id, rubric_id=rubric.id, mode="active",
                 status="completed", functional_score=60, robustness_score=10,
             )
-            db.add(grade); db.commit()
+            db.add(grade); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
 
             response = list_grades(
                 kind="assignment", question_id=None, student_id=None,
@@ -71,6 +73,7 @@ class TestGradesQueryDedup:
 
         with db_session_factory() as db:
             teacher = _make_user(db, "gqt1", "teacher")
+            student = _make_user(db, "gqt1_student", "student")
             course = Course(title="GCT1", status="published", teacher_id=teacher.id)
             db.add(course); db.flush()
             a = Assignment(title="GA1", course_id=course.id, status="published")
@@ -83,12 +86,14 @@ class TestGradesQueryDedup:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=datetime.now(timezone.utc))
             db.add(rub); db.flush()
-            sub = Submission(question_id=q.id, student_id=1, code="def f(): pass",
+            sub = Submission(question_id=q.id, student_id=student.id, code="def f(): pass",
                             status="graded", grading_status="completed", score=80)
             db.add(sub); db.flush()
             cg = CodeGrade(submission_id=sub.id, rubric_id=rub.id, mode="active",
                           status="completed", functional_score=60, robustness_score=10)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
 
             query, count_q = _build_grade_base_query(db, teacher, kind="assignment",
                                                      question_id=None, student_id=None, status=None)
@@ -103,6 +108,7 @@ class TestGradesQueryDedup:
 
         with db_session_factory() as db:
             teacher = _make_user(db, "gqt2", "teacher")
+            student = _make_user(db, "gqt2_student", "student")
             course = Course(title="GCT2", status="published", teacher_id=teacher.id)
             db.add(course); db.flush()
             exam = Exam(course_id=course.id, title="GE1", status="published", duration_minutes=60)
@@ -114,14 +120,16 @@ class TestGradesQueryDedup:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=datetime.now(timezone.utc))
             db.add(rub); db.flush()
-            es = ExamSubmission(exam_id=exam.id, student_id=1, status="grading")
+            es = ExamSubmission(exam_id=exam.id, student_id=student.id, status="grading")
             db.add(es); db.flush()
             ea = ExamAnswer(submission_id=es.id, question_id=eq.id, code_answer="x",
                            grading_status="completed", score=5)
             db.add(ea); db.flush()
             cg = CodeGrade(exam_answer_id=ea.id, rubric_id=rub.id, mode="active",
                           status="completed", functional_score=60, robustness_score=10)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
 
             query, count_q = _build_grade_base_query(db, teacher, kind="exam",
                                                      question_id=None, student_id=None, status=None)
@@ -135,6 +143,7 @@ class TestGradesQueryDedup:
 
         with db_session_factory() as db:
             teacher = _make_user(db, "gqt3", "teacher")
+            student = _make_user(db, "gqt3_student", "student")
             course = Course(title="GCT3", status="published", teacher_id=teacher.id)
             db.add(course); db.flush()
             a = Assignment(title="GA3", course_id=course.id, status="published")
@@ -147,12 +156,14 @@ class TestGradesQueryDedup:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=datetime.now(timezone.utc))
             db.add(rub); db.flush()
-            sub = Submission(question_id=q.id, student_id=1, code="def f(): pass",
+            sub = Submission(question_id=q.id, student_id=student.id, code="def f(): pass",
                             status="graded", grading_status="completed", score=80)
             db.add(sub); db.flush()
             cg = CodeGrade(submission_id=sub.id, rubric_id=rub.id, mode="active",
                           status="completed", functional_score=60, robustness_score=10)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
 
             query, count_q = _build_grade_base_query(db, teacher, kind="assignment",
                                                      question_id=q.id, student_id=None, status=None)
@@ -187,7 +198,9 @@ class TestRetryRejectsCompleted:
             db.add(sub); db.flush()
             cg = CodeGrade(submission_id=sub.id, rubric_id=rub.id, mode="active",
                           status="completed", functional_score=60, robustness_score=10)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
             grade_id = cg.id
 
         tok, _ = login(client, "rrc_t")
@@ -205,6 +218,7 @@ class TestRegradeSkipsRunning:
     def test_regrade_skips_running_codegrade(self, db_session_factory):
         with db_session_factory() as db:
             teacher = _make_user(db, "rsr_t", "teacher")
+            student = _make_user(db, "rsr_t_student", "student")
             course = Course(title="CRS", status="published", teacher_id=teacher.id)
             db.add(course); db.flush()
             a = Assignment(title="ARS", course_id=course.id, status="published")
@@ -218,12 +232,14 @@ class TestRegradeSkipsRunning:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=now)
             db.add(rub); db.flush()
-            sub = Submission(question_id=q.id, student_id=1, code="def f(): pass",
+            sub = Submission(question_id=q.id, student_id=student.id, code="def f(): pass",
                             status="running", grading_status="running", score=None)
             db.add(sub); db.flush()
             cg = CodeGrade(submission_id=sub.id, rubric_id=rub.id, mode="active",
                           status="running", functional_score=60, robustness_score=10)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
 
             existing = db.get(CodeGrade, cg.id)
             assert existing is not None
@@ -259,7 +275,9 @@ class TestOverrideStatusSync:
             cg = CodeGrade(exam_answer_id=ea.id, rubric_id=rub.id, mode="active",
                           status="review_required", functional_score=60, robustness_score=10,
                           algorithm_score=15, quality_score=5)
-            db.add(cg); db.commit()
+            db.add(cg); db.flush()
+            grant_teaching_fixture(db, course, [student.id])
+            db.commit()
             grade_id = cg.id
 
         tok, _ = login(client, "osc_t")
@@ -319,5 +337,6 @@ class TestDetailFailClosed:
             f"/api/v1/ai-grading/grades/{grade_id}",
             headers=auth_header(tok),
         )
-        # 关联缺失必须 403（fail-closed），不能是 200
-        assert resp.status_code == 403, f"缺失关联应 403: {resp.status_code}"
+        # Missing ownership evidence is hidden by the scoped query before
+        # loading the grade; 404 rejects access without revealing its existence.
+        assert resp.status_code == 404, f"缺失关联应隐藏为 404: {resp.status_code}"

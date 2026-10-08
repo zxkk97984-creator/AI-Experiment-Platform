@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import CodeBlock from '../../components/common/CodeBlock.vue'
 import MarkdownCell from '../../components/notebook/MarkdownCell.vue'
+import LabSubmissionFeedback from '../../components/labs/LabSubmissionFeedback.vue'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
 import { accountAPI, errorMessage } from '../../api/accountManagement.js'
@@ -45,6 +46,7 @@ watch(() => route.fullPath, load, { immediate: true })
         <article v-for="answer in detail.answers" :key="answer.question_id"><h3>题目 #{{ answer.question_id }}</h3><pre class="account-code">{{ answer.code ?? answer.selected_options ?? answer.text_answers }}</pre></article>
         <article v-for="cell in detail.cells" :key="cell.id"><h3>{{ cell.type }} · {{ cell.id }}</h3><MarkdownCell v-if="cell.type === 'markdown'" :cell="cell" /><CodeBlock v-else :code="cell.source || ''" /><pre v-if="cell.output" class="account-code">{{ JSON.stringify(cell.output, null, 2) }}</pre></article>
         <p v-if="detail.feedback">教师反馈：{{ detail.feedback }}</p>
+        <LabSubmissionFeedback v-if="detail.kind === 'experiment' && detail.lab_enabled" :key="route.params.id" :submission-id="route.params.id" />
       </section>
     </template>
     <template v-else-if="!route.params.id">

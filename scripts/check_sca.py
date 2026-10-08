@@ -40,6 +40,10 @@ def main() -> int:
         print(result.stderr or result.stdout, file=sys.stderr)
         return result.returncode or 1
 
+    if result.returncode not in (0, 1) or not isinstance(report, dict) or not report.get("dependencies"):
+        print("SCA 审计未成功完成，不能放行发布。", file=sys.stderr)
+        return 1
+
     offenders: list[str] = []
     for dep in report.get("dependencies", []):
         vulns = dep.get("vulns") or []
@@ -61,6 +65,9 @@ def main() -> int:
         )
         for line in offenders:
             print(f"  - {line}", file=sys.stderr)
+        return 1
+    if result.returncode == 1 and not any(dep.get("vulns") for dep in report["dependencies"]):
+        print("SCA 审计返回失败且没有完整漏洞结果，不能放行发布。", file=sys.stderr)
         return 1
     print(f"SCA 与接受记录一致（接受清单：{len(accepted)} 包）")
     return 0

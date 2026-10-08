@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from conftest import auth_header, create_user, login
+from conftest import auth_header, create_user, grant_teaching_fixture, login
 
 
 # ── 辅助函数 ───────────────────────────────────────────────────
@@ -25,9 +25,13 @@ def _enroll(db_session_factory, student, course):
     from app.models import CourseEnrollment
 
     with db_session_factory() as db:
-        db.add(
-            CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled")
-        )
+        if student.role == "student":
+            # 正常学生可见性来自管理员授课授权。
+            from app.models import Course
+            grant_teaching_fixture(db, db.get(Course, course.id), student_ids=[student.id])
+        else:
+            # 越权回归仍保留异常教师选课投影，证明它不能授予权限。
+            db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
         db.commit()
 
 

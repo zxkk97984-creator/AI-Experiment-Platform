@@ -9,10 +9,11 @@ const routerState = vi.hoisted(() => ({
   push: vi.fn(),
   leaveHook: null,
   updateHook: null,
+  route: { query: {} },
 }))
 
 vi.mock('vue-router', () => ({
-  useRouter: () => ({ push: routerState.push }),
+  useRouter: () => ({ push: routerState.push, currentRoute: { value: routerState.route } }),
   onBeforeRouteLeave: (hook) => {
     routerState.leaveHook = hook
   },
@@ -106,6 +107,7 @@ describe('NotebookPlayer', () => {
     vi.resetAllMocks()
     routerState.leaveHook = null
     routerState.updateHook = null
+    routerState.route = { query: {} }
     setActivePinia(createPinia())
     experimentsAPI.ensureForLesson.mockResolvedValue({
       data: { id: 101, record_revision: 2 },
@@ -176,6 +178,16 @@ describe('NotebookPlayer', () => {
     await expect(routerState.updateHook({ params: { id: '8' } }, {})).resolves.toBe(false)
     expect(experimentsAPI.ensureForModule).not.toHaveBeenCalled()
 
+    wrapper.unmount()
+  })
+  it('keeps the offering query on initial load and on an in-place route change', async () => {
+    routerState.route = { query: { offering_id: '11' } }
+    const wrapper = await mountPlayer()
+    expect(experimentsAPI.ensureForModule).toHaveBeenCalledWith(7, 11)
+    const store = useExperimentStore()
+    vi.spyOn(store, 'canNavigate').mockResolvedValue(true)
+    await routerState.updateHook({ params: { id: 8 }, query: { offering_id: '12' } }, {})
+    expect(experimentsAPI.ensureForModule).toHaveBeenCalledWith(8, 12)
     wrapper.unmount()
   })
   it('shows environment hint under the title (Phase 5)', async () => {

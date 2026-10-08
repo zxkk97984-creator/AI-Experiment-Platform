@@ -7,6 +7,7 @@ from sqlalchemy import event, select
 from app.models import (CourseEnrollment, Exam, ExamAnswer, ExamQuestion, ExamSubmission,
                         ExperimentRecord, ExperimentSubmission, Submission)
 from app.services.time_utils import utc_now
+from app.models.teaching import OfferingEnrollment
 from conftest import (auth_header, create_user, login, make_course, make_submission,
                       make_experiment_module, make_template_version)
 
@@ -94,7 +95,18 @@ def test_assignment_history_survives_course_removal_without_judge_secrets(client
     with db_session_factory() as db:
         submission = db.get(Submission, submission_id)
         course_id = submission.question.assignment.course_id
-        db.add(CourseEnrollment(course_id=course_id, student_id=owner.id, status='dropped', origin='manual'))
+        # Shared factories can already create the course enrollment projection.
+        enrollment = db.scalar(select(CourseEnrollment).where(CourseEnrollment.course_id == course_id,
+                                                              CourseEnrollment.student_id == owner.id))
+        if enrollment is None:
+            enrollment = CourseEnrollment(course_id=course_id, student_id=owner.id)
+            db.add(enrollment)
+        enrollment.status, enrollment.origin = 'dropped', 'manual'
+        membership = db.scalar(select(OfferingEnrollment).where(
+            OfferingEnrollment.offering_id == submission.question.assignment.offering_id,
+            OfferingEnrollment.student_id == owner.id))
+        assert membership is not None
+        membership.status, membership.active_scope_key = 'removed', None
         db.commit()
     response = client.get(f'{API}/assignment/{submission_id}', headers=headers)
     assert response.status_code == 200, response.text
@@ -105,6 +117,7 @@ def test_assignment_history_survives_course_removal_without_judge_secrets(client
     with db_session_factory() as db:
         row = db.scalar(select(CourseEnrollment).where(CourseEnrollment.student_id == owner.id))
         assert row.status == 'dropped'
+        assert db.scalar(select(OfferingEnrollment).where(OfferingEnrollment.student_id == owner.id)).status == 'removed'
 
 
 def test_experiment_history_uses_snapshot_and_removes_hidden_cells_and_outputs(client, db_session_factory, history_owner):

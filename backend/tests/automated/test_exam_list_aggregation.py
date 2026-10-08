@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import pytest
 import sqlalchemy as sa
-from conftest import auth_header, create_user, login
+from conftest import grant_teaching_fixture, auth_header, create_user, login
 from sqlalchemy import select
 
 from app.models import (
@@ -67,6 +67,7 @@ def exam_seed(db_session_factory):
                     exam_id=exam.id, student_id=students[0].id, status="submitted",
                     started_at=now, submitted_at=now,
                 ))
+        grant_teaching_fixture(db, course, [u.id for u in students])
         db.commit()
         return course.id, teacher.id
 

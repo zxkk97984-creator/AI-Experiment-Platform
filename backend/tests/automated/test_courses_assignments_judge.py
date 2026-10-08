@@ -1,8 +1,17 @@
 from __future__ import annotations
 from unittest.mock import patch
 
-from conftest import auth_header, create_assignment_db, create_course_db, create_user, login
+from conftest import auth_header, create_assignment_db, create_course_db, create_user, grant_teaching_fixture, login
 from app.worker.judge_worker import process_submission
+
+
+def _grant_student(db_session_factory, course_id):
+    from app.models import Course, User
+    from sqlalchemy import select
+    with db_session_factory() as db:
+        sid = db.scalar(select(User.id).where(User.username == "student"))
+        grant_teaching_fixture(db, db.get(Course, course_id), student_ids=[sid])
+        db.commit()
 
 
 def test_course_assignment_submission_and_worker_result(
@@ -12,7 +21,7 @@ def test_course_assignment_submission_and_worker_result(
     test_settings,
 ):
     create_user(db_session_factory, "teacher", "teacher")
-    create_user(db_session_factory, "student", "student")
+    student = create_user(db_session_factory, "student", "student")
     teacher_token, _ = login(client, "teacher")
     student_token, _ = login(client, "student")
 
@@ -24,6 +33,10 @@ def test_course_assignment_submission_and_worker_result(
         status="published",
         visibility="public",
     )
+    from app.models import Course
+    with db_session_factory() as db:
+        grant_teaching_fixture(db, db.get(Course, course_id), student_ids=[student.id])
+        db.commit()
 
     chapter_response = client.post(
         f"/api/v1/courses/{course_id}/chapters",
@@ -41,6 +54,7 @@ def test_course_assignment_submission_and_worker_result(
             "content_type": "markdown",
             "content": "# Linear Regression",
             "order_index": 1,
+            "status": "published",
         },
     )
     assert lesson_response.status_code == 201
@@ -65,6 +79,9 @@ def test_course_assignment_submission_and_worker_result(
         title="函数作业",
         status="draft",
     )
+    with db_session_factory() as db:
+        grant_teaching_fixture(db, db.get(Course, course_id), student_ids=[student.id])
+        db.commit()
 
     question_response = client.post(
         f"/api/v1/assignments/{assignment_id}/questions",
@@ -145,6 +162,7 @@ def test_worker_marks_wrong_answer(client, db_session_factory, redis_client, tes
         db_session_factory, course_id=course_id, teacher_username="teacher",
         title="A1", status="draft",
     )
+    _grant_student(db_session_factory, course_id)
     question_id = client.post(
         f"/api/v1/assignments/{assignment_id}/questions",
         headers=auth_header(teacher_token),
@@ -204,6 +222,7 @@ def test_assignment_list_returns_is_submitted_for_student(client, db_session_fac
         db_session_factory, course_id=course_id, teacher_username="teacher",
         title="函数作业", status="draft",
     )
+    _grant_student(db_session_factory, course_id)
     question_ids = []
     for i in range(2):
         resp = client.post(
@@ -257,6 +276,7 @@ def test_assignment_list_returns_is_submitted_for_student(client, db_session_fac
         title="无题作业",
         status="published",
     )
+    _grant_student(db_session_factory, course_id)
     by_id = {it["id"]: it["is_submitted"] for it in student_items()}
     assert by_id[noq_id] is False
 

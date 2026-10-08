@@ -23,12 +23,14 @@ import { judgeAPI } from '../../api/judge.js'
 import { aiGradingAPI } from '../../api/aiGrading.js'
 import { useAppStore } from '../../stores/app.js'
 import { formatDateTime, fromDateTimeLocal, parseApiDateTime, toDateTimeLocal } from '../../utils/format.js'
+import { taskEditorReturn } from '../../utils/taskEditorNavigation.js'
 
 const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
 
 const assignment = ref(null)
+const returnNavigation = computed(() => taskEditorReturn({ role: route.meta?.role, kind: 'assignment', task: assignment.value, query: route.query }))
 const questions = ref([])
 const loading = ref(true)
 
@@ -522,7 +524,7 @@ function applyRecommendedMemory() {
 }
 
 function cancel() {
- router.push('/teacher/assignments')
+ router.push(returnNavigation.value.destination)
 }
 
 // 保存成功时间戳（「今天 14:32 已保存」）
@@ -698,11 +700,12 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
                 <h3 class="qe-side-title">发布范围</h3>
                 <span v-if="!assignmentDraft" class="badge badge-neutral">已有提交后受限</span>
               </div>
-              <p class="qe-side-sub">选择班级或学生，白名单学生无需提前选课。</p>
+              <p class="qe-side-sub">{{ assignment?.offering_id ? '从本授课班名单中选择发布范围。' : '设置共享模板的发布范围，分配班级后再确认在册学生。' }}</p>
               <TaskAudiencePicker
                 task-kind="assignment"
                 :task-id="route.params.id"
                 :course-id="assignment?.course_id"
+                :offering-id="assignment?.offering_id"
                 :audience-mode="audienceMode"
                 :class-ids="audienceClassIds"
                 :whitelist-ids="audienceWhitelistIds"
@@ -854,7 +857,7 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
             <span v-else-if="activeId === 'new'" class="qe-bottom-id">新题目</span>
           </div>
           <div class="qe-bottom-actions">
-            <button type="button" class="btn btn-sm" @click="cancel">取消</button>
+            <button type="button" class="btn btn-sm" @click="cancel">{{ returnNavigation.label }}</button>
             <button type="button" class="btn btn-sm btn-primary" :disabled="saving || activeId === null" @click="submitQuestion">
               {{ saving ? '保存中...' : (activeId === 'new' ? '保存题目并下一题' : '保存题目') }}
             </button>

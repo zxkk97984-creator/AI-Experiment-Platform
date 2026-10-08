@@ -8,7 +8,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
-from conftest import make_assignment, make_course, make_exam, make_student
+from conftest import grant_teaching_fixture, make_assignment, make_course, make_exam, make_student
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -275,7 +275,9 @@ class TestOverrideScaledScore:
                           status="review_required", functional_score=0, robustness_score=0,
                           algorithm_score=14, quality_score=10, raw_total=24,
                           final_score_100=24, scaled_score=4.8)
-            db.add(cg); db.commit()
+            db.add(cg)
+            grant_teaching_fixture(db, course, student_ids=[student.id], bind_tasks=True)
+            db.commit()
             grade_id = cg.id
 
         tok, _ = login(client, "orp_t")
@@ -319,7 +321,9 @@ class TestOverrideScaledScore:
                           status="review_required", functional_score=60, robustness_score=10,
                           algorithm_score=10, quality_score=5, raw_total=85,
                           final_score_100=85, scaled_score=25.5)
-            db.add(cg); db.commit()
+            db.add(cg)
+            grant_teaching_fixture(db, course, student_ids=[student.id], bind_tasks=True)
+            db.commit()
             gid = cg.id
 
         tok, _ = login(client, "oss_t")
@@ -368,7 +372,9 @@ class TestOverrideScaledScore:
                           status="review_required", functional_score=60, robustness_score=10,
                           algorithm_score=10, quality_score=5, raw_total=85,
                           final_score_100=50, scaled_score=10.0)  # 50/100*20=10
-            db.add(cg); db.commit()
+            db.add(cg)
+            grant_teaching_fixture(db, course, student_ids=[student.id], bind_tasks=True)
+            db.commit()
             gid = cg.id
 
         tok, _ = login(client, "osc2_t")
@@ -585,7 +591,9 @@ class TestShadowNoLeak:
                           status="completed", functional_score=60, robustness_score=10,
                           algorithm_score=18, quality_score=8,
                           ai_result={"student_feedback": {"strengths":["good"],"issues":[],"suggestions":[]}})
-            db.add(cg); db.commit()
+            db.add(cg)
+            grant_teaching_fixture(db, c, student_ids=[s.id], bind_tasks=True)
+            db.commit()
 
         tok, _ = login(client, "snl_s")
         resp = client.get(f"/api/v1/exams/{e.id}/my-grade", headers=auth_header(tok))

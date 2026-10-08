@@ -3,6 +3,8 @@
 本清单把仓库内可复现的代码/CI 证据与部署方必须在真实环境提供的证据分开。
 仓库测试、disposable Compose smoke 或占位 digest **不能替代**生产证据；未勾选的外部门禁保持 NO-GO。
 
+单校教学升级的功能、迁移和试点步骤见[教学升级操作](school-teaching-upgrade.md)，本轮本机验证范围见[交付验证](school-release-verification.md)。200名独立学生、30分钟混合负载的准备和运行方法见[容量验收](school-capacity.md)，本地只读smoke不计入该门禁。
+
 ## 仓库内可复现证据
 
 - [x] 空库 bootstrap 使用统一的两阶段入口：迁移到 `b4c5d6e7f890`、写入真实 basic 环境、再迁移到 head。

@@ -28,6 +28,8 @@ def _require_lesson(lesson_id: int, db: Session, current_user: User) -> Lesson:
         raise api_error(404, "LESSON_NOT_FOUND", "课时不存在")
     if not can_access_course_content(lesson.chapter.course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限访问该课时")
+    if current_user.role == "student" and lesson.status != "published":
+        raise api_error(403, "LESSON_UNPUBLISHED", "课时尚未发布")
     return lesson
 
 
@@ -36,11 +38,12 @@ def _student_only(current_user: User) -> None:
         raise api_error(403, "STUDENT_ONLY", "仅学生可记录学习进度")
 
 
-def _get_progress(db: Session, lesson_id: int, student_id: int) -> LessonProgress | None:
+def _get_progress(db: Session, lesson_id: int, student_id: int, offering_id: int) -> LessonProgress | None:
     return db.scalar(
         select(LessonProgress).where(
             LessonProgress.lesson_id == lesson_id,
             LessonProgress.student_id == student_id,
+            LessonProgress.offering_id == offering_id,
         )
     )
 
@@ -55,10 +58,14 @@ def _upsert_progress(
     - in_progress（revert，force=True）：completed → in_progress 撤回
     """
     now = datetime.now(UTC)
-    row = _get_progress(db, lesson_id, student_id)
+    from app.services.offering_service import resolve_student_offering
+    lesson = db.get(Lesson, lesson_id)
+    offering = resolve_student_offering(db, lesson.chapter.course_id, db.get(User, student_id))
+    row = _get_progress(db, lesson_id, student_id, offering.id)
     if row is None:
         row = LessonProgress(
-            lesson_id=lesson_id, student_id=student_id, status=target_status
+            lesson_id=lesson_id, student_id=student_id, status=target_status,
+            offering_id=offering.id, scope_key=f"offering:{offering.id}"
         )
         row.last_accessed_at = now
         db.add(row)
@@ -121,16 +128,18 @@ def get_course_progress(
     if not can_access_course_content(course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限查看该课程进度")
 
+    from app.services.offering_service import resolve_student_offering
+    offering = resolve_student_offering(db, course_id, current_user)
     lessons = db.scalars(
         select(Lesson)
         .join(Chapter, Chapter.id == Lesson.chapter_id)
-        .where(Chapter.course_id == course_id)
+        .where(Chapter.course_id == course_id, Lesson.status == "published")
         .order_by(Chapter.order_index, Chapter.id, Lesson.order_index, Lesson.id)
     ).all()
     progress_rows = {
         row.lesson_id: row
         for row in db.scalars(
-            select(LessonProgress).where(LessonProgress.student_id == current_user.id)
+            select(LessonProgress).where(LessonProgress.student_id == current_user.id, LessonProgress.offering_id == offering.id)
         ).all()
     }
     total = len(lessons)

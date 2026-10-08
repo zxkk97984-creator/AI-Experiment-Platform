@@ -379,7 +379,7 @@ def test_destroy_clears_all_session_and_initialization_metadata():
     fake_redis = MagicMock()
 
     with patch("redis.from_url", return_value=fake_redis), \
-         patch("subprocess.run"):
+         patch("subprocess.run", return_value=MagicMock(returncode=0, stderr="")):
         km.destroy(1)
 
     fake_redis.delete.assert_any_call("kernel:session:1")
@@ -400,7 +400,7 @@ def test_restart_preserves_existing_course_mount_by_default():
         km.restart(1)
 
     # Phase 5：restart 沿用现有 session 的环境身份（digest/环境版本从 session 继承）
-    create.assert_called_once_with(1, "C:/course-assets", image_ref=None, environment_version_id=None)
+    create.assert_called_once_with(1, "C:/course-assets", image_ref=None, environment_version_id=None, memory_mb=256, cpus=1.0, resource_factory=None)
 
 
 # ═══════════════════════════════════════════════════════════════

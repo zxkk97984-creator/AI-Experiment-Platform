@@ -8,7 +8,7 @@ different object key.
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, BinaryIO
 
 from .backend import (
@@ -354,4 +354,8 @@ def _secret_value(value: Any) -> str:
 
 
 def _as_datetime(value: Any) -> datetime | None:
-    return value if isinstance(value, datetime) else None
+    if not isinstance(value, datetime):
+        return None
+    # botocore returns dateutil tzutc(), while RFC 7231's usegmt formatter
+    # requires datetime.timezone.utc specifically. Normalize at the boundary.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)

@@ -76,7 +76,7 @@ async function previewReset() {
       </section>
       <section class="account-panel"><h2>批量重置学生密码</h2>
         <form class="account-form" @submit.prevent="previewReset">
-          <p class="account-muted">使用系统临时密码，成功后旧登录失效。禁用或正在考试的学生会跳过。</p>
+          <p class="account-muted">每人生成独立随机临时密码，成功后旧登录失效。禁用或正在考试的学生会跳过。完成后请下载凭据发放。</p>
           <label>选择范围<DsSelect v-model="resetScope"><option value="class">整个教学班</option><option value="filter">全部匹配学生</option></DsSelect></label>
           <label v-if="resetScope === 'class'">教学班<DsSelect v-model="classId" required><option value="">请选择</option><option v-for="c in classes" :key="c.id" :value="c.id">{{ c.name }} · {{ c.code }}</option></DsSelect></label>
           <label v-else>精确匹配姓名、账号或学号<input v-model="resetQuery" placeholder="留空表示所有学生，下一步核对人数" /></label>

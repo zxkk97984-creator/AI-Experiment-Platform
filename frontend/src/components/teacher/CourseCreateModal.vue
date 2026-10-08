@@ -7,6 +7,7 @@ import TeachingClassMultiSelect from './TeachingClassMultiSelect.vue'
 import { coursesAPI } from '../../api/courses.js'
 import { academicsAPI } from '../../api/academics.js'
 import { useAppStore } from '../../stores/app.js'
+import { useAuthStore } from '../../stores/auth.js'
 
 const props = defineProps({
   terms: { type: Array, default: () => [] },
@@ -14,6 +15,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'created'])
 const app = useAppStore()
+const auth = useAuthStore()
 
 const titleInput = ref(null)
 const form = reactive({
@@ -182,7 +184,7 @@ function buildPayload() {
     code: form.code.trim() || null,
     description: form.description.trim() || null,
     academic_term_id: form.academic_term_id || null,
-    teaching_class_ids: form.teaching_class_ids.map((id) => Number(id)),
+    teaching_class_ids: auth.isAdmin ? form.teaching_class_ids.map((id) => Number(id)) : [],
     start_time: form.start_time ? form.start_time.slice(0, 16) : null,
     visibility: form.visibility,
     default_score: Number(form.default_score || 100),
@@ -341,11 +343,11 @@ onBeforeUnmount(() => {
             </label>
 
             <label class="course-create-field course-create-field-full">
-              <span>教学班 <small>可多选，可稍后设置</small></span>
+              <span>教学班 <small>{{ auth.isAdmin ? "可多选，可稍后安排授课" : "由管理员在授课安排中分配" }}</small></span>
               <TeachingClassMultiSelect
                 v-model="form.teaching_class_ids"
                 :options="availableClasses"
-                :disabled="isBusy || !form.academic_term_id || classesLoading"
+                :disabled="!auth.isAdmin || isBusy || !form.academic_term_id || classesLoading"
                 :loading="classesLoading"
                 placeholder="请先选择所属学期"
                 empty-text="该学期暂无教学班"

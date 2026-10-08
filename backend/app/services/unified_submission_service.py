@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Assignment, Chapter, CodeGrade, Course, Exam, ExamSubmission,
     ExperimentModule, ExperimentRecord, ExperimentSubmission, JudgeQuestion,
-    Lesson, Submission, User,
+    Lesson, Submission, User, LabSubmission, LabRun,
 )
 from app.schemas.unified_submissions import (
     UnifiedSubmissionFilterOption, UnifiedSubmissionFilterOptions,
@@ -22,7 +22,7 @@ PAGE_SIZE_MAX = 50
 def _teacher_course_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return []
-    return list(db.scalars(select(Course.id).where(Course.teacher_id == user.id)).all())
+    return list(db.scalars(select(Course.id).where(teacher_course_condition(user.id))).all())
 
 
 def _course_scope(db: Session, user: User) -> list[int] | None:
@@ -58,27 +58,35 @@ def _experiment_stmt(db: Session, user: User):
             Course.id.label("course_id"),
             Course.title.label("course_title"),
             case(
+                (LabSubmission.review_requested.is_(True), "review_required"),
+                (LabRun.status == "needs_review", "review_required"),
+                (LabRun.status == "failed", "failed"),
+                (LabRun.status.in_(("queued", "running", "recovering")), "pending_grading"),
                 (ExperimentSubmission.score.is_(None), "pending_grading"),
                 else_="graded",
             ).label("status"),
             case(
+                (LabSubmission.review_requested.is_(True), "warning"),
+                (LabRun.status.in_(("needs_review", "failed", "queued", "running", "recovering")), "warning"),
                 (ExperimentSubmission.score.is_(None), "warning"),
                 else_="success",
             ).label("status_tone"),
             literal_column("NULL").label("tests_passed"),
             literal_column("NULL").label("tests_total"),
-            literal_column("NULL").label("ai_score"),
+            case((LabSubmission.published_grade_id.is_not(None), ExperimentSubmission.score), else_=None).label("ai_score"),
             ExperimentSubmission.score.label("score"),
             ExperimentSubmission.submitted_at.label("submitted_at"),
             func.coalesce(Lesson.id, ExperimentModule.id).label("entry_id"),
             literal_column("NULL").label("context_id"),
         )
         .select_from(ExperimentSubmission)
+        .outerjoin(LabSubmission, LabSubmission.submission_id == ExperimentSubmission.id)
+        .outerjoin(LabRun, LabRun.id == LabSubmission.current_run_id)
         .join(ExperimentRecord, ExperimentRecord.id == ExperimentSubmission.record_id)
         .outerjoin(Lesson, Lesson.id == ExperimentRecord.lesson_id)
         .outerjoin(ExperimentModule, ExperimentModule.id == ExperimentRecord.module_id)
         .outerjoin(Chapter, Chapter.id == Lesson.chapter_id)
-        .outerjoin(Course, Course.id == Chapter.course_id)
+        .outerjoin(Course, Course.id == func.coalesce(Chapter.course_id, select(CourseOffering.course_id).where(CourseOffering.id == ExperimentRecord.offering_id).correlate(ExperimentRecord).scalar_subquery()))
         .join(User, User.id == ExperimentRecord.student_id)
     )
     if scope is not None:
@@ -363,3 +371,7 @@ def list_unified_submissions(
         courses=_course_options(db, user),
         entries=_entry_options(db, user),
     )
+
+from app.services.offering_service import teacher_course_condition
+
+from app.models.teaching import CourseOffering

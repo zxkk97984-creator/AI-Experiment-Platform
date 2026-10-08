@@ -8,7 +8,7 @@
 """
 from datetime import datetime, timezone
 
-from conftest import auth_header, create_user, login, seed_basic_environment
+from conftest import grant_teaching_fixture, auth_header, create_user, login, seed_basic_environment
 
 from app.models import (
     CodeGrade, Course, Exam, ExamAnswer, ExamGrade, ExamQuestion, ExamSubmission, QuestionRubric,
@@ -65,6 +65,7 @@ def _seed_review_required(db, teacher, student):
         code_answer="def f(): pass", grading_status="completed", score=None,
     )
     db.add_all([ans_choice, ans_code])
+    grant_teaching_fixture(db, course, [student.id])
     db.commit()
     return es.id, ans_code.id, code.id
 

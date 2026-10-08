@@ -16,6 +16,7 @@ from app.worker.judge_worker import (
     process_submission,
 )
 from conftest import auth_header, create_assignment_db, create_course_db, create_user, login
+from teaching_test_support import grant_course_students
 
 
 def _setup_course(client, db_session_factory, course_status="published", assignment_status="published"):
@@ -35,6 +36,7 @@ def _setup_course(client, db_session_factory, course_status="published", assignm
         'public_cases': [{'args': [1, 2], 'expected': 3}],
         'hidden_tests': 'HIDDEN_SENTINEL_XYZ\ndef test_hidden(): assert add(1,2)==3',
     })
+    grant_course_students(db_session_factory, cid, ['s_j'])
     if assignment_status == 'published':
         pub = client.post(f'/api/v1/assignments/{aid}/publish', headers=auth_header(t_tok))
         assert pub.status_code == 200, pub.text
@@ -81,6 +83,7 @@ def test_sample_run_permission_denied_all_cases(client, db_session_factory):
     with db_session_factory() as db:
         aud = db.query(models.User).filter(models.User.username == "s_perm2_aud").first()
         aud_id = aud.id
+    grant_course_students(db_session_factory, cid, ['s_perm2_aud'])
     # 当前发布要求有效 audience；s_perm2 保持未选课，另建一名受众学生用于发布
     r = client.patch(f'/api/v1/assignments/{aid}', headers=auth_header(t_tok), json={
         "audience_mode": "whitelist_only",
@@ -96,7 +99,7 @@ def test_sample_run_permission_denied_all_cases(client, db_session_factory):
 
     r = client.post(f'/api/v1/judge/questions/{qid}/sample-run',
                     headers=auth_header(s_tok), json={'question_id': qid, 'code': 'pass'})
-    assert r.status_code == 403, f"未选课: {r.status_code}"
+    assert r.status_code == 404, f"未授课授权的任务不泄露存在: {r.status_code}"
 
     # teacher
     r = client.post(f'/api/v1/judge/questions/{qid}/sample-run',
@@ -114,6 +117,7 @@ def test_sample_run_permission_denied_all_cases(client, db_session_factory):
     q2 = client.post(f'/api/v1/assignments/{a2.json()["id"]}/questions', headers=auth_header(t_da), json={
         'title':'Q2','function_name':'f','hidden_tests':'def test(): pass',
     })
+    grant_course_students(db_session_factory, c2id, ['s_da2'])
     r = client.post(f'/api/v1/judge/questions/{q2.json()["id"]}/sample-run',
                     headers=auth_header(s_da), json={'question_id':q2.json()['id'],'code':'pass'})
     assert r.status_code == 403, f"draft assignment: {r.status_code}"
@@ -132,6 +136,7 @@ def test_sample_run_permission_denied_all_cases(client, db_session_factory):
     with db_session_factory() as db:
         dc_student = db.query(models.User).filter(models.User.username == "s_dc2").first()
         dc_student_id = dc_student.id
+    grant_course_students(db_session_factory, c3id, ['s_dc2'])
     # 草稿课程无法 enroll，使用 whitelist_only 作为有效 audience
     r = client.patch(f'/api/v1/assignments/{a3id}', headers=auth_header(t_dc), json={
         "audience_mode": "whitelist_only",

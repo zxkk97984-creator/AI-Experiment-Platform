@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app import models
-from conftest import auth_header, create_course_db, create_user, login
+from conftest import auth_header, create_course_db, create_user, grant_teaching_fixture, login
 
 API = "/api/v1"
 
@@ -51,12 +51,18 @@ def _setup(client, db_session_factory, visibility="public", enroll="s_yes"):
         visibility=visibility,
     )
     if enroll == "s_yes":
-        client.post(f"{API}/courses/{cid}/enroll", headers=auth_header(tok["s_yes"]))
+        with db_session_factory() as db:
+            student = db.query(models.User).filter_by(username="s_yes").one()
+            grant_teaching_fixture(db, db.get(models.Course, cid), student_ids=[student.id])
+            db.commit()
+        response = client.post(f"{API}/courses/{cid}/enroll", headers=auth_header(tok["s_yes"]))
+        assert response.status_code == 201, response.text
     ch = client.post(f"{API}/courses/{cid}/chapters", headers=auth_header(tok["t_own"]), json={"title": "Ch"})
     chid = ch.json()["id"]
     le = client.post(f"{API}/chapters/{chid}/lessons", headers=auth_header(tok["t_own"]), json={
         "title": "视频课", "content_type": "video",
         "video_url": "https://v.example.com/old.mp4",
+        "status": "published",
     })
     lid = le.json()["id"]
     # 一个非视频课时（用于 409 场景）
@@ -527,14 +533,16 @@ def test_media_denied_after_drop_enrollment(client, db_session_factory):
         f"{API}/lessons/{d['lid']}/video-playback-url",
         headers=auth_header(d["tok"]["s_yes"]),
     ).json()["url"]
-    # 学生退课
-    r = client.delete(f"{API}/courses/{d['cid']}/enroll", headers=auth_header(d["tok"]["s_yes"]))
+    # 管理员撤销授课名单，已经签发的学生媒体 URL 也立即失效。
+    with db_session_factory() as db:
+        student = db.query(models.User).filter_by(username="s_yes").one()
+    r = client.delete(f"{API}/courses/{d['cid']}/students/{student.id}", headers=auth_header(d["tok"]["admin"]))
     assert r.status_code == 204
     resp = client.get(url)
     assert resp.status_code == 403, "退课后媒体端点必须拒绝"
 
 
-def test_media_denied_after_whitelist_removal(client, db_session_factory):
+def test_media_authority_comes_from_offering_roster_not_whitelist(client, db_session_factory):
     d = _uploaded_setup(client, db_session_factory)
     # 课程改为白名单可见，加白名单学生后重新签发，再移出白名单
     client.patch(f"{API}/courses/{d['cid']}", headers=auth_header(d["tok"]["t_own"]), json={"visibility": "whitelist"})
@@ -548,6 +556,10 @@ def test_media_denied_after_whitelist_removal(client, db_session_factory):
     # 重新签发后移出白名单
     url = client.get(f"{API}/lessons/{d['lid']}/video-playback-url", headers=auth_header(d["tok"]["s_yes"])).json()["url"]
     client.delete(f"{API}/courses/{d['cid']}/whitelist/{student.id}", headers=auth_header(d["tok"]["t_own"]))
+    resp = client.get(url)
+    assert resp.status_code == 200, "内容白名单变更不撤销管理员授课授权"
+    revoked = client.delete(f"{API}/courses/{d['cid']}/students/{student.id}", headers=auth_header(d["tok"]["admin"]))
+    assert revoked.status_code == 204
     resp = client.get(url)
     assert resp.status_code == 403
 

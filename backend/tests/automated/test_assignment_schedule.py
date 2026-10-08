@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from conftest import auth_header, create_course_db, create_user, login
 from app.api import judge as judge_api
 from app.models import Assignment
+from teaching_test_support import grant_course_students
 
 
 def _setup(client, db_session_factory):
@@ -25,7 +26,7 @@ def _setup(client, db_session_factory):
     return teacher_token, other_token, student_token, course_id
 
 
-def _assignment(client, teacher_token, course_id, *, due_at=None):
+def _assignment(client, db_sf, teacher_token, course_id, *, due_at=None):
     response = client.post(
         "/api/v1/assignments",
         headers=auth_header(teacher_token),
@@ -37,6 +38,7 @@ def _assignment(client, teacher_token, course_id, *, due_at=None):
         },
     )
     assert response.status_code == 201, response.text
+    grant_course_students(db_sf, course_id, ["schedule_student"])
     return response.json()
 
 
@@ -57,8 +59,8 @@ def _question(client, teacher_token, assignment_id):
     return response.json()["id"]
 
 
-def _published_assignment_with_question(client, teacher_token, course_id, *, due_at=None):
-    assignment = _assignment(client, teacher_token, course_id, due_at=due_at)
+def _published_assignment_with_question(client, db_sf, teacher_token, course_id, *, due_at=None):
+    assignment = _assignment(client, db_sf, teacher_token, course_id, due_at=due_at)
     question_id = _question(client, teacher_token, assignment["id"])
     response = client.post(
         f"/api/v1/assignments/{assignment['id']}/publish",
@@ -74,7 +76,7 @@ def _iso(delta: timedelta) -> str:
 
 def test_first_published_at_survives_unpublish_and_republish(client, db_session_factory):
     teacher, _, _, course_id = _setup(client, db_session_factory)
-    assignment = _assignment(client, teacher, course_id)
+    assignment = _assignment(client, db_session_factory, teacher, course_id)
     _question(client, teacher, assignment["id"])
 
     first = client.post(
@@ -100,7 +102,7 @@ def test_first_published_at_survives_unpublish_and_republish(client, db_session_
 def test_direct_published_create_gets_first_published_at(client, db_session_factory):
     """首次发布写入 published_at（创建旁路已关闭：只能经 /publish 进入 published）"""
     teacher, _, _, course_id = _setup(client, db_session_factory)
-    assignment = _assignment(client, teacher, course_id)
+    assignment = _assignment(client, db_session_factory, teacher, course_id)
     assert assignment["published_at"] is None
     _question(client, teacher, assignment["id"])
     published = client.post(
@@ -114,7 +116,7 @@ def test_direct_published_create_gets_first_published_at(client, db_session_fact
 def test_deadline_blocks_sample_run_and_submission(client, db_session_factory):
     teacher, _, student, course_id = _setup(client, db_session_factory)
     assignment, question_id = _published_assignment_with_question(
-        client, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
+        client, db_session_factory, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
     )
 
     sample = client.post(
@@ -148,7 +150,7 @@ def test_deadline_boundary_is_inclusive(monkeypatch):
 def test_extending_deadline_reopens_sample_run(client, db_session_factory):
     teacher, _, student, course_id = _setup(client, db_session_factory)
     assignment, question_id = _published_assignment_with_question(
-        client, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
+        client, db_session_factory, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
     )
 
     blocked = client.post(
@@ -177,7 +179,7 @@ def test_extending_deadline_reopens_sample_run(client, db_session_factory):
 def test_clearing_deadline_reopens_assignment(client, db_session_factory):
     teacher, _, student, course_id = _setup(client, db_session_factory)
     assignment, question_id = _published_assignment_with_question(
-        client, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
+        client, db_session_factory, teacher, course_id, due_at=_iso(timedelta(minutes=-1))
     )
 
     cleared = client.patch(
@@ -198,7 +200,7 @@ def test_clearing_deadline_reopens_assignment(client, db_session_factory):
 
 def test_no_deadline_remains_open_and_non_manager_cannot_change_it(client, db_session_factory):
     teacher, other, student, course_id = _setup(client, db_session_factory)
-    assignment, question_id = _published_assignment_with_question(client, teacher, course_id)
+    assignment, question_id = _published_assignment_with_question(client, db_session_factory, teacher, course_id)
 
     open_response = client.post(
         f"/api/v1/judge/questions/{question_id}/sample-run",
@@ -212,7 +214,7 @@ def test_no_deadline_remains_open_and_non_manager_cannot_change_it(client, db_se
         headers=auth_header(other),
         json={"due_at": _iso(timedelta(days=1))},
     )
-    assert forbidden.status_code == 403, forbidden.text
+    assert forbidden.status_code == 404, forbidden.text  # Scoped lookup hides another teacher's task.
 
     with db_session_factory() as db:
         assert db.get(Assignment, assignment["id"]).due_at is None

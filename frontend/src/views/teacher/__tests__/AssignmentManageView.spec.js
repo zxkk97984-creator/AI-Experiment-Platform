@@ -25,6 +25,8 @@ vi.mock('../../../api/assignments', () => ({
   assignmentsAPI: { list: vi.fn(), create: vi.fn(), update: vi.fn(), publish: vi.fn(), deleteAssignment: vi.fn(), unpublishAssignment: vi.fn() },
 }))
 
+vi.mock('../../../api/offerings', () => ({ offeringsAPI: { list: vi.fn() } }))
+
 vi.mock('../../../api/courses', () => ({
   coursesAPI: { list: vi.fn() },
 }))
@@ -38,6 +40,7 @@ vi.mock('../../../stores/app', () => ({
 }))
 
 import { assignmentsAPI } from '../../../api/assignments.js'
+import { offeringsAPI } from '../../../api/offerings.js'
 import { coursesAPI } from '../../../api/courses.js'
 import { environmentsAPI } from '../../../api/environments.js'
 
@@ -104,6 +107,7 @@ describe('作业管理页 AssignmentManageView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    offeringsAPI.list.mockResolvedValue({ data: { items: [] } })
     pushMock.mockClear()
     environmentsAPI.listAvailable.mockResolvedValue({ data: envOptions })
   })
@@ -626,4 +630,27 @@ describe('作业管理页 AssignmentManageView', () => {
     expect(showToastMock).toHaveBeenCalledWith('仅已发布的作业可取消发布', 'error')
     expect(wrapper.find('.confirm-panel').exists()).toBe(true)
   })
+})
+
+
+it('binds a new assignment to the selected class offering', async () => {
+  setActivePinia(createPinia())
+  assignmentsAPI.list.mockResolvedValue({ data: { items: [] } })
+  assignmentsAPI.create.mockResolvedValue({ data: { id: 9 } })
+  coursesAPI.list.mockResolvedValue({ data: { items: courses } })
+  environmentsAPI.listAvailable.mockResolvedValue({ data: envOptions })
+  offeringsAPI.list.mockResolvedValue({ data: { items: [
+    { id: 5, course_id: 10001, status: 'active', term_name: '秋季', class_name: '一班' },
+    { id: 6, course_id: 10002, status: 'active', term_name: '秋季', class_name: '另一个课程' },
+  ] } })
+  const wrapper = await mountPage()
+  await flushPromises()
+  await openCreateModal(wrapper)
+  await wrapper.find('input[placeholder="输入作业名称"]').setValue('本班作业')
+  await openCourseModal(wrapper)
+  await pickCourseItem(wrapper, 10001)
+  expect(wrapper.get('#assignment-offering').text()).not.toContain('另一个课程')
+  await wrapper.get('#assignment-offering').setValue('5')
+  await submitCreate(wrapper)
+  expect(assignmentsAPI.create).toHaveBeenLastCalledWith(expect.objectContaining({ course_id: 10001, offering_id: 5 }))
 })

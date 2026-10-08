@@ -4,7 +4,7 @@
 - 完成显式操作、可撤回；跨设备（新客户端）读到同一服务端事实
 - 选课鉴权；课程进度聚合（total/completed/percent/next_lesson_id）
 """
-from conftest import auth_header, create_user, login
+from conftest import auth_header, create_user, grant_teaching_fixture, login
 from sqlalchemy import select
 
 from app.models import (
@@ -35,6 +35,7 @@ def _setup_course(db_session_factory, *, teacher_name="lp-teacher", course_title
             lesson = Lesson(
                 chapter_id=chapter.id, title=f"课时{i}",
                 content_type="markdown", content=f"内容 {i}", order_index=0,
+                status="published",
             )
             db.add(lesson)
             db.flush()
@@ -46,7 +47,7 @@ def _setup_course(db_session_factory, *, teacher_name="lp-teacher", course_title
 def _enroll(db_session_factory, course_id, student_name):
     student = create_user(db_session_factory, student_name, "student")
     with db_session_factory() as db:
-        db.add(CourseEnrollment(course_id=course_id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, db.get(Course, course_id), student_ids=[student.id])
         db.commit()
         return student.id
 

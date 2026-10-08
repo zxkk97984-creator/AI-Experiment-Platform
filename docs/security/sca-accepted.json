@@ -1,9 +1,4 @@
 {
-  "_comment": "TASK-026 Python SCA 门禁的机器可读接受清单。责任人/到期日/不可达性论证见同目录 sca-acceptances.md；到期复核时同步更新本文件。",
-  "accepted": {
-    "starlette": ["0.41.3"],
-    "pyasn1": ["0.4.8"],
-    "ecdsa": ["0.19.2"],
-    "pytest": ["8.3.4"]
-  }
+  "_comment": "2026-10-08：旧接受记录已到期并移除。当前 Python 运行依赖要求 pip-audit 零已知漏洞，不延长或复用旧接受项。",
+  "accepted": {}
 }

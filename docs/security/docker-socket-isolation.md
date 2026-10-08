@@ -21,12 +21,14 @@
    “容器 RCE 后主机控制”风险，本任务以专用主机 + 风险接受方式处理；
    远程 Runner 为独立项目，触发条件见 §5。
 
-## 2. Socket 持有者清单（2026-08-14 核查）
+## 2. Socket 持有者清单（2026-09-26 更新）
 
 | 服务 | 是否挂载 Socket | 用途 |
 | --- | --- | --- |
 | api | 是 | 同步判题路径（legacy 判题/实验执行）需要启动判题容器 |
 | worker | 是 | 确定性作业/考试队列消费者，启动判题容器 |
+| lab-worker | 是 | 实验训练、独立推理与检查容器的可信调度控制进程 |
+| account-worker | 否 | 账号批次与密码摘要，不执行学生代码 |
 | ai-worker | 否 | 可选 AI 队列消费者；只调用 AI 服务，不执行 Docker 判题，默认 profile 不启动 |
 | environment-builder | 是 | 环境档位镜像构建（低频管理任务） |
 | frontend / mysql / redis / migrate | 否 | 无容器生命周期职责 |
@@ -36,18 +38,20 @@
 不继承 Docker Socket、`judge-work` 或 Registry Secret。AI worker 的队列/角色隔离
 由 `test_phase4_worker_isolation.py` 一并守护。
 
+实验升级新增 `lab-worker`：它是可信调度控制进程，持有 Docker socket，用于创建训练、推理与检查容器；学生容器永不继承 socket、数据库／对象存储凭据或 AI 密钥。任务仅挂载对应公开数据或无标签测试输入，隐藏标签由容器退出后的平台评分器读取。运行目录使用有容量上限的临时卷，停止和回收必须确认容器删除后才释放资源。
+
 ## 3. 学生容器隔离基线
 
-学生提交的代码只在以下两类容器中执行，两者均满足：
+学生提交的代码只在判题、交互内核及实验训练／推理容器中执行，两者均满足：
 
 - `--network none`（无网络，不能访问宿主机/内网/外网）
 - `--cap-drop ALL` + `no-new-privileges` + `--read-only` + tmpfs
-- `--user 1000:1000`（非 root）、`--pids-limit 50`
-- CPU/内存配额（判题 `--cpus`/`--memory`，内核 `--cpus 1`/`--memory 256m`）
+- `--user 1000:1000`（非 root）、PID 数量限制
+- CPU/内存配额（判题 `--cpus`/`--memory`，内核按环境最低要求和实验预算分配；训练与内核共享资源账本）
 - 不挂载 `/var/run/docker.sock`、无 `--privileged`、无 host 网络
 
 代码位置：`app/worker/judge_worker.py`（`run_pytest_in_docker`）、
-`app/services/kernel_manager.py`。回归：test_docker_socket_isolation.py
+`app/services/kernel_manager.py`、`app/services/lab_runtime.py`。回归：test_docker_socket_isolation.py
 静态断言上述参数在代码中存在且全仓无 `--privileged` / host 网络模式。
 
 ## 4. 威胁模型与剩余风险

@@ -7,7 +7,7 @@
 """
 from datetime import datetime, timezone
 
-from conftest import auth_header, create_user, login, seed_basic_environment
+from conftest import grant_teaching_fixture, auth_header, create_user, login, seed_basic_environment
 
 from app.models import (
     CodeGrade, Course, Exam, ExamAnswer, ExamQuestion, ExamSubmission, QuestionRubric,
@@ -74,6 +74,7 @@ def _seed_exam_with_grades(db, teacher, student):
         finished_at=datetime.now(timezone.utc),
     )
     db.add(cg)
+    grant_teaching_fixture(db, course, [student.id])
     db.commit()
     db.refresh(es)
     return es.id
@@ -155,6 +156,7 @@ def test_grade_detail_without_code_grade(client, db_session_factory):
             submission_id=es.id, question_id=code.id,
             code_answer="print(1)", grading_status="completed", score=10,
         ))
+        grant_teaching_fixture(db, course, [student.id])
         db.commit()
         db.refresh(es)
         exam_id, sub_id = exam.id, es.id

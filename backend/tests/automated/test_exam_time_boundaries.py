@@ -6,6 +6,7 @@ import pytest
 from app.services.time_utils import as_utc, utc_now
 from conftest import auth_header, create_course_db, create_user, login
 
+from teaching_test_support import grant_course_students
 API = "/api/v1"
 
 
@@ -25,6 +26,7 @@ def _setup_exam(client, db_sf):
         "end_at": (now + timedelta(hours=1)).isoformat(),
     })
     eid = e.json()["id"]
+    grant_course_students(db_sf, cid, ["szt"])
     client.post(f"{API}/exams/{eid}/questions", headers=auth_header(t_tok), json={
         "question_type": "single_choice", "prompt": "Q",
         "options": {"A": "A", "B": "B"}, "correct_answer": {"correct": ["A"]}, "points": 10,
@@ -95,6 +97,7 @@ def test_exam_not_started_yet(client, db_session_factory):
         "start_at": future, "end_at": far_future,
     })
     eid = e.json()["id"]
+    grant_course_students(db_session_factory, cid, ["fut_s"])
     client.post(f"{API}/exams/{eid}/questions", headers=auth_header(t_tok), json={
         "question_type": "single_choice", "prompt": "Q",
         "options": {"A": "A", "B": "B"}, "correct_answer": {"correct": ["A"]}, "points": 10,
@@ -124,6 +127,7 @@ def test_exam_ended_no_submit(client, db_session_factory):
         "start_at": past_start, "end_at": past_end,
     })
     eid = e.json()["id"]
+    grant_course_students(db_session_factory, cid, ["end_s"])
     client.post(f"{API}/exams/{eid}/questions", headers=auth_header(t_tok), json={
         "question_type": "single_choice", "prompt": "Q",
         "options": {"A": "A", "B": "B"}, "correct_answer": {"correct": ["A"]}, "points": 10,
@@ -156,6 +160,7 @@ def test_exam_without_time_window_cannot_publish(client, db_session_factory):
         "course_id": cid, "title": "NoWin", "duration_minutes": 60,
     })
     eid = e.json()["id"]
+    grant_course_students(db_session_factory, cid, ["ntw_s"])
     client.post(f"{API}/exams/{eid}/questions", headers=auth_header(t_tok), json={
         "question_type": "single_choice", "prompt": "Q",
         "options": {"A": "A", "B": "B"}, "correct_answer": {"correct": ["A"]}, "points": 10,

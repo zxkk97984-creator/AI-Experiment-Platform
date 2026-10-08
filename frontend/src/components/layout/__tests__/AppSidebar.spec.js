@@ -69,7 +69,7 @@ describe('AppSidebar 角色首页导航', () => {
 
   it('活动路由项声明 aria-current="page"，其余项不声明（TASK-024）', () => {
     const { wrapper } = mountAs('student', '/student/courses')
-    const courses = wrapper.findAll('.nav-item').find((n) => n.text().includes('课程'))
+    const courses = wrapper.findAll('.nav-item').find((n) => n.attributes('aria-label') === '课程')
     expect(courses.attributes('aria-current')).toBe('page')
     for (const item of wrapper.findAll('.nav-item')) {
       if (item.element === courses.element) continue
@@ -140,7 +140,7 @@ describe('AppSidebar 角色首页导航', () => {
       expect(item.attributes('aria-label')).toBeTruthy()
     }
     expect(navItems[0].attributes('aria-label')).toBe('工作台')
-    expect(navItems[1].attributes('aria-label')).toBe('课程管理')
+    expect(navItems.find(n => n.attributes('aria-label') === '课程管理')).toBeTruthy()
   })
 
   it('/student/feedback 镜像参考图 01，高亮首页', () => {

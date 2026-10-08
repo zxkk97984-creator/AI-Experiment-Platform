@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from conftest import make_assignment, make_exam, make_student
+from conftest import grant_teaching_fixture, make_assignment, make_exam, make_student
 
 
 def _create_course_and_exam(client, db_session_factory, username: str):
@@ -423,9 +423,13 @@ def test_teacher_no_kind_question_filter_has_no_duplicate_joins(db_session_facto
         )
         db.add(rubric)
         db.flush()
+        student = User(username='no_kind_student', real_name='No Kind Student',
+                       role='student', status='active', password_hash='fixture')
+        db.add(student)
+        db.flush()
         submission = Submission(
             question_id=question.id,
-            student_id=1,
+            student_id=student.id,
             code="def solve(): pass",
             status="graded",
             grading_status="completed",
@@ -441,6 +445,7 @@ def test_teacher_no_kind_question_filter_has_no_duplicate_joins(db_session_facto
                 status="completed",
             )
         )
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
         query, count_query = _build_grade_base_query(

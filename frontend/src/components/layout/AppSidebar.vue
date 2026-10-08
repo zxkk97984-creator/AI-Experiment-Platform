@@ -42,6 +42,9 @@ const menuItems = computed(() => {
   })
   const base = [
     { path: '/student/history', label: '学习记录', sub: 'History', icon: 'clipboard', key: 'history' },
+    { path: '/student/materials', label: '课程资料', sub: 'Materials', icon: 'course', key: 'materials' },
+    { path: '/student/offerings', label: '我的教学班', sub: 'Classes', icon: 'user', key: 'offerings' },
+    { path: '/student/gradebook', label: '课程成绩', sub: 'Grades', icon: 'chart', key: 'gradebook' },
     { path: '/student/courses',     label: '课程',     sub: 'Courses',     icon: 'course',     key: 'courses' },
     { path: '/student/assignments', label: '作业',     sub: 'Assignments', icon: 'assignment', key: 'assignments' },
     { path: '/student/exams',       label: '考试',     sub: 'Exams',       icon: 'exam',       key: 'exams' },
@@ -49,6 +52,9 @@ const menuItems = computed(() => {
   ]
   if (auth.isTeacher) return [
     { path: '/teacher',                label: '工作台',     sub: 'Workbench',     icon: 'home',        key: 'home' },
+    { path: '/teacher/materials', label: '课程资料', sub: 'Materials', icon: 'course', key: 'materials' },
+    { path: '/teacher/offerings', label: '班级授课', sub: 'Classes', icon: 'user', key: 'offerings' },
+    { path: '/teacher/gradebook', label: '课程成绩簿', sub: 'Gradebook', icon: 'chart', key: 'gradebook' },
     { path: '/teacher/courses',        label: '课程管理',   sub: 'Courses',       icon: 'course',      key: 'courses' },
     { path: '/teacher/assignments',    label: '作业管理',   sub: 'Assignments',   icon: 'assignment',  key: 'assignments' },
     { path: '/teacher/experiments',    label: '实验管理',   sub: 'Experiments',   icon: 'experiment',  key: 'experiments' },
@@ -65,6 +71,9 @@ const menuItems = computed(() => {
     { path: '/admin/account-security', label: '账号安全与审计', sub: 'Security', icon: 'settings', key: 'security' },
     { path: '/admin/users',         label: '用户管理', sub: 'Users',       icon: 'user',       key: 'users' },
     { path: '/admin/academics',     label: '教务管理', sub: 'Academics',   icon: 'course',     key: 'academics' },
+    { path: '/admin/materials', label: '课程资料', sub: 'Materials', icon: 'course', key: 'materials' },
+    { path: '/admin/offerings', label: '授课安排', sub: 'Offerings', icon: 'user', key: 'offerings' },
+    { path: '/admin/gradebook', label: '课程成绩簿', sub: 'Gradebook', icon: 'chart', key: 'gradebook' },
     { path: '/admin/courses',       label: '课程管理', sub: 'Courses',     icon: 'course',     key: 'courses' },
     { path: '/admin/experiments',   label: '实验管理', sub: 'Experiments', icon: 'experiment', key: 'experiments' },
     { path: '/admin/environments',  label: '环境档位', sub: 'Environments', icon: 'experiment', key: 'environments' },
@@ -80,15 +89,15 @@ const navGroups = computed(() => {
   const pick = (keys) => items.filter((item) => keys.includes(item.key))
   if (auth.isTeacher) {
     return [
-      { label: '教学', items: pick(['home', 'courses', 'assignments', 'experiments', 'exams', 'classes']) },
-      { label: '评分', items: pick(['submissions', 'ai-grading', 'grades']) },
+      { label: '教学', items: pick(['home', 'courses', 'materials', 'offerings', 'assignments', 'experiments', 'exams', 'classes']) },
+      { label: '评分', items: pick(['submissions', 'ai-grading', 'gradebook', 'grades']) },
       { label: '系统', items: pick(['environments', 'settings']) },
     ]
   }
   if (auth.isAdmin) {
     return [
-      { label: '教务', items: pick(['users', 'academics', 'courses', 'experiments']) },
-      { label: '评分', items: pick(['ai-grading']) },
+      { label: '教务', items: pick(['users', 'academics', 'offerings', 'courses', 'materials', 'experiments']) },
+      { label: '评分', items: pick(['ai-grading', 'gradebook']) },
       { label: '系统', items: pick(['environments', 'logs', 'accounts', 'security']) },
     ]
   }

@@ -251,7 +251,7 @@ def _fill_midterm(db, clock, users, exam, students, archetype_map):
     for student in students:
         archetype = archetype_map.get(student.username, BACKGROUND_ARCHETYPE)
         profile = ARCHETYPES[archetype]
-        rng = make_rng("exam_midterm", student.username, exam.id)
+        rng = make_rng("exam_midterm", student.username, exam.title)
 
         sub = db.scalar(
             select(ExamSubmission).where(
@@ -380,7 +380,7 @@ def _fill_quiz(db, clock, users, exam, students, archetype_map):
     teacher = users["teacher_chen"]
     enrolled = [u for u in students if u.username.startswith("student_")][:12]
     for student in enrolled:
-        rng = make_rng("exam_quiz", student.username, exam.id)
+        rng = make_rng("exam_quiz", student.username, exam.title)
         existing = db.scalar(
             select(ExamSubmission).where(
                 ExamSubmission.exam_id == exam.id,

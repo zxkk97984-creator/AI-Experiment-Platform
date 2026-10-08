@@ -1,8 +1,9 @@
 """实验 API 测试 — v5 统一模型后的验收测试"""
 from sqlalchemy import select
 
-from app.models import ExperimentModule, NotebookTemplate
+from app.models import Course, ExperimentModule, ExperimentRecord, NotebookTemplate, User
 
+from teaching_test_support import grant_course_students, grant_experiment
 from conftest import auth_header, create_course_db, create_user, login, seed_basic_environment
 
 
@@ -40,6 +41,10 @@ def _seed_student_catalog(db_session_factory):
         db.add(version)
         db.flush()
 
+        template.current_version_id = version.id
+        course = Course(title="Catalog course", teacher_id=owner.id, status="published")
+        db.add(course); db.flush()
+        course_id = course.id
         modules = [
             ExperimentModule(name="01 Python 入门", status="published", owner_id=owner.id),
             ExperimentModule(name="02 NumPy 基础", status="published", owner_id=owner.id),
@@ -47,6 +52,7 @@ def _seed_student_catalog(db_session_factory):
             ExperimentModule(name="04 数据清洗", status="published", owner_id=owner.id),
             ExperimentModule(name="隐藏草稿", status="draft", owner_id=owner.id),
         ]
+        for module in modules: module.template_id = template.id
         db.add_all(modules)
         db.flush()
 
@@ -83,6 +89,17 @@ def _seed_student_catalog(db_session_factory):
         ])
         db.commit()
 
+    for module in modules[:4]:
+        offering_id = grant_experiment(db_session_factory, 'module', module.id,
+            ['catalog_student', 'catalog_other'], course_id=course_id)
+        with db_session_factory() as db:
+            for row in db.scalars(select(ExperimentRecord).where(ExperimentRecord.module_id == module.id)):
+                row.offering_id, row.scope_key = offering_id, f'offering:{offering_id}'
+                # Granting setup authority must not replace the intentionally
+                # distinct history timestamps under test.
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(row, 'updated_at')
+            db.commit()
     return student
 
 
@@ -136,6 +153,99 @@ def test_student_catalog_search_filter_sort_and_pagination(client, db_session_fa
     assert [item["name"] for item in recent.json()["items"]] == [
         "01 Python 入门", "04 数据清洗",
     ]
+
+
+def _new_catalog_offering(db, student, module, course, code):
+    """Explicit fixture grant for a second term using the shared module."""
+    from datetime import date
+    from app.models import AcademicTerm, TeachingClass
+    from app.models.teaching import CourseOffering, OfferingExperiment
+    from app.services.offering_service import enroll_student
+
+    term = AcademicTerm(code=code, name=f"学期 {code}", start_date=date(2027, 9, 1),
+                        end_date=date(2028, 1, 1), status="active")
+    db.add(term); db.flush()
+    klass = TeachingClass(academic_term_id=term.id, code=code, name=f"教学班 {code}", status="active")
+    db.add(klass); db.flush()
+    offering = CourseOffering(course_id=course.id, academic_term_id=term.id,
+                              teaching_class_id=klass.id, teacher_id=course.teacher_id, status="active")
+    db.add(offering); db.flush()
+    enroll_student(db, offering, student.id)
+    version_id = db.get(NotebookTemplate, module.template_id).current_version_id
+    db.add(OfferingExperiment(offering_id=offering.id, entry_kind="module", entry_id=module.id,
+                             template_version_id=version_id, status="published"))
+    db.flush()
+    return offering, version_id
+
+
+def test_student_catalog_new_term_does_not_reuse_archived_record(client, db_session_factory):
+    from app.models import AcademicTerm
+    from app.models.teaching import CourseOffering
+
+    student = _seed_student_catalog(db_session_factory)
+    with db_session_factory() as db:
+        module = db.scalar(select(ExperimentModule).where(ExperimentModule.name == "03 可视化"))
+        old_record = db.scalar(select(ExperimentRecord).where(
+            ExperimentRecord.module_id == module.id, ExperimentRecord.student_id == student.id))
+        old_offering = db.get(CourseOffering, old_record.offering_id)
+        old_offering.status = "archived"
+        db.get(AcademicTerm, old_offering.academic_term_id).status = "closed"
+        course = db.get(Course, old_offering.course_id)
+        new_offering, _ = _new_catalog_offering(db, student, module, course, "NEW-TERM")
+        new_id, old_record_id = new_offering.id, old_record.id
+        db.commit()
+
+    token, _ = login(client, "catalog_student")
+    response = client.get("/api/v1/experiments/modules/student-catalog", headers=auth_header(token))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert body["summary"] == {"total": 1, "not_started": 1, "started": 0, "submitted": 0, "graded": 0}
+    item = body["items"][0]
+    assert item["offering_id"] == new_id and item["learning_status"] == "not_started"
+    assert item["last_learning_at"] is None
+    assert (item["course_title"], item["term_name"], item["class_name"]) == (
+        "Catalog course", "学期 NEW-TERM", "教学班 NEW-TERM")
+    with db_session_factory() as db:
+        assert db.get(ExperimentRecord, old_record_id).status == "graded"
+
+
+def test_student_catalog_separates_shared_module_offerings_and_their_records(client, db_session_factory):
+    from app.models.teaching import CourseOffering
+
+    student = _seed_student_catalog(db_session_factory)
+    with db_session_factory() as db:
+        module = db.scalar(select(ExperimentModule).where(ExperimentModule.name == "02 NumPy 基础"))
+        old_record = db.scalar(select(ExperimentRecord).where(
+            ExperimentRecord.module_id == module.id, ExperimentRecord.student_id == student.id))
+        original_id = old_record.offering_id
+        course = db.get(Course, db.get(CourseOffering, original_id).course_id)
+        new_offering, version_id = _new_catalog_offering(db, student, module, course, "PARALLEL")
+        db.add(ExperimentRecord(module_id=module.id, template_version_id=version_id,
+            student_id=student.id, offering_id=new_offering.id, scope_key=f"offering:{new_offering.id}", status="graded"))
+        other_student = db.scalar(select(User).where(User.username == "catalog_other"))
+        _new_catalog_offering(db, other_student, module, course, "OTHER-CLASS")
+        new_id, module_id = new_offering.id, module.id
+        db.commit()
+
+    token, _ = login(client, "catalog_student")
+    headers = auth_header(token)
+    response = client.get("/api/v1/experiments/modules/student-catalog", headers=headers)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 5
+    assert body["summary"] == {"total": 5, "not_started": 1, "started": 1, "submitted": 1, "graded": 2}
+    assert [(item["offering_id"], item["learning_status"]) for item in body["items"] if item["id"] == module_id] == [
+        (original_id, "submitted"), (new_id, "graded")]
+    assert len({(item["offering_id"], item["id"]) for item in body["items"]}) == 5
+    filtered = client.get("/api/v1/experiments/modules/student-catalog?status=graded&q=NumPy", headers=headers)
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 1 and filtered.json()["items"][0]["offering_id"] == new_id
+    assert filtered.json()["summary"] == body["summary"]
+    paged = client.get("/api/v1/experiments/modules/student-catalog?page=2&page_size=2", headers=headers)
+    assert paged.status_code == 200, paged.text
+    assert paged.json()["total"] == 5
+    assert [(item["id"], item["offering_id"]) for item in paged.json()["items"]][0] == (module_id, new_id)
 
 
 def test_student_catalog_rejects_non_student_roles(client, db_session_factory):
@@ -319,14 +429,18 @@ def test_ensure_record_validation(client, db_session_factory):
     le = client.post(f"/api/v1/chapters/{ch.json()['id']}/lessons", headers=auth_header(t_tok), json={
         "title": "Lesson", "content_type": "markdown",
     })
-    client.post(f"/api/v1/courses/{cid}/enroll", headers=auth_header(s_tok))
+    grant_course_students(db_session_factory, cid, ["student_s"])
+    with db_session_factory() as db:
+        from app.models import Lesson
+        db.get(Lesson, le.json()["id"]).status = "published"
+        db.commit()
 
     r = client.post(
         f"/api/v1/experiments/records/ensure-for-lesson/{le.json()['id']}",
         headers=auth_header(s_tok),
     )
-    assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "TEMPLATE_NOT_FOUND"
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "EXPERIMENT_NOT_RELEASED"
 
 
 def test_p0_4_teacher_submission_isolation(client, db_session_factory):
@@ -385,6 +499,7 @@ def test_p0_4_teacher_submission_isolation(client, db_session_factory):
         lesson.template_id = tpl_a_id
         db.commit()
 
+    grant_experiment(db_session_factory, "lesson", lid_a, ["s_iso_a"])
     # 学生 A 创建实验记录并提交
     rec_a = client.post(f"/api/v1/experiments/records/ensure-for-lesson/{lid_a}",
                         headers=auth_header(s_a_tok))
@@ -437,6 +552,7 @@ def test_p0_4b_teacher_sees_own_module_submissions(client, db_session_factory):
     assert pub_mod.status_code == 200, pub_mod.text
 
     # 学生 A 创建模块实验记录并提交
+    grant_experiment(db_session_factory, "module", mod_id, ["s_mod_a"])
     rec = client.post(f"/api/v1/experiments/records/ensure-for-module/{mod_id}",
                       headers=auth_header(s_a_tok))
     assert rec.status_code == 200, rec.text

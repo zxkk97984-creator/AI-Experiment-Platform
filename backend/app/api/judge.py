@@ -56,7 +56,8 @@ def can_view_submission(submission: Submission, user: User, db: Session) -> bool
             assignment = db.get(Assignment, question.assignment_id)
             if assignment:
                 course = db.get(Course, assignment.course_id)
-                if course and course.teacher_id == user.id:
+                from app.services.offering_service import teacher_offering_ids
+                if assignment.offering_id in teacher_offering_ids(db, user.id):
                     return True
         return False
     return submission.student_id == user.id
@@ -76,7 +77,9 @@ def create_submission(
     if not question:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
     assignment = db.get(Assignment, question.assignment_id)
-    if not assignment or assignment.status != "published":
+    if not assignment:
+        raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
+    if assignment.status != "published":
         raise api_error(400, "ASSIGNMENT_NOT_AVAILABLE", "作业不可提交")
     course = db.get(Course, assignment.course_id)
     if current_user.role == "student":
@@ -274,7 +277,9 @@ def sample_run(
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
 
     assignment = db.get(Assignment, question.assignment_id)
-    if not assignment or assignment.status != "published":
+    if not assignment:
+        raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
+    if assignment.status != "published":
         raise api_error(403, "ASSIGNMENT_NOT_AVAILABLE", "作业未发布")
     course = db.get(Course, assignment.course_id)
     if not course or course.status != "published":

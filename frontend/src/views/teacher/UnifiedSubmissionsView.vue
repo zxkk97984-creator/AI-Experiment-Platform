@@ -34,6 +34,13 @@ const filters = reactive({
 })
 
 const statusMap = {
+  queued: { label: '等待评测', tone: 'badge-info' },
+  running: { label: '评测中', tone: 'badge-info' },
+  evaluating: { label: '评测中', tone: 'badge-info' },
+  recovering: { label: '正在恢复评测', tone: 'badge-info' },
+  needs_review: { label: '待复核', tone: 'badge-warning' },
+  published: { label: '成绩已发布', tone: 'badge-success' },
+  cancelled: { label: '已取消', tone: 'badge-neutral' },
   pending_grading: { label: '待评分', tone: 'badge-warning' },
   graded: { label: '已评分', tone: 'badge-success' },
   review_required: { label: '待复核', tone: 'badge-info' },

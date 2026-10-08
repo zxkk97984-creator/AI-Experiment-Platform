@@ -13,6 +13,7 @@ from app.schemas import PaginatedResponse, PasswordUpdate, StatusUpdate, UserCre
 from app.schemas.preferences import UserPreferencesRead, UserPreferencesUpdate
 from app.security import hash_password, validate_password_rules
 from app.services import account_service as accounts
+from app.services import credential_delivery_service as credentials
 from app.services.time_utils import utc_now
 from datetime import timedelta
 
@@ -73,8 +74,10 @@ def create_user(
     if student_no and db.scalar(select(User).where(User.student_no == student_no)):
         raise api_error(409, "STUDENT_NO_EXISTS", "学号已存在")
     days = 7
+    delivery = None
     if payload.role == 'student':
-        password, days, _version = accounts.temporary_policy(db, settings)
+        _legacy_password, days, _version = accounts.temporary_policy(db, settings)
+        delivery, password = credentials.prepare(db, _.id, settings, f'student:{student_no}')
     else:
         password = payload.password
     try:
@@ -88,6 +91,8 @@ def create_user(
     db.add(user)
     try:
         db.flush()
+        if delivery:
+            credentials.issue(db, delivery, user, settings)
         accounts.audit(db, _.id, 'user.create', 'user', user.id)
         db.commit()
     except IntegrityError:
@@ -107,7 +112,8 @@ def list_students(
 ):
     """学生候选列表——教师选择白名单学生用，只暴露 active student"""
     page, page_size = pagination.page, pagination.page_size
-    filters = (User.role == "student", User.status == "active")
+    from app.services.offering_service import scoped_student_ids
+    filters = (User.role == "student", User.status == "active", User.id.in_(scoped_student_ids(db, _)))
     query = select(User).where(*filters)
     count_query = select(func.count()).select_from(User).where(*filters)
     if exclude_class_id:
@@ -209,7 +215,7 @@ def reset_password(user_id: int, payload: ResetRequest, request: Request, db: Se
     if user_id == actor.id:
         raise api_error(422, 'USE_SELF_PASSWORD', '请通过本人改密修改自己的密码')
     from app.api.account_management import verify_admin
-    verify_admin(request, actor, payload.current_password, redis, settings)
+    verify_admin(request, actor, payload.current_password, redis, settings, db)
     target = db.scalar(select(User).where(User.id == user_id).with_for_update())
     if not target:
         raise api_error(404, 'USER_NOT_FOUND', '用户不存在')
@@ -219,14 +225,19 @@ def reset_password(user_id: int, payload: ResetRequest, request: Request, db: Se
     if db.scalar(select(ExamSubmission.id).where(ExamSubmission.student_id == target.id,
                                                  ExamSubmission.status == 'started').limit(1)):
         raise api_error(409, 'EXAM_IN_PROGRESS', '学生正在考试，暂不重置')
-    password, days, _version = accounts.temporary_policy(db, settings)
-    if target.role != 'student':
+    _legacy_password, days, _version = accounts.temporary_policy(db, settings)
+    delivery = None
+    if target.role == 'student':
+        delivery, password = credentials.prepare(db, actor.id, settings, f'user:{target.id}', identity=target.username)
+    else:
         password = payload.password or ''
     try:
         validate_password_rules(password, target.username)
     except ValueError as exc:
         raise api_error(422, 'PASSWORD_POLICY', str(exc))
     accounts.change_credentials(db, target, hash_password(password), temporary=True, days=days)
+    if delivery:
+        credentials.issue(db, delivery, target, settings)
     accounts.audit(db, actor.id, 'password.reset', 'user', target.id, reason=payload.reason)
     db.commit()
     return target

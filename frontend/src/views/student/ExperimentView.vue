@@ -27,7 +27,7 @@ const summaryItems = computed(() => [
   { key: 'not_started', label: '未开始', value: summary.value.not_started },
   { key: 'submitted', label: '已提交', value: summary.value.submitted },
   { key: 'graded', label: '已评分', value: summary.value.graded },
-  { key: 'total', label: '模块总数', value: summary.value.total },
+  { key: 'total', label: '实验总数', value: summary.value.total },
 ])
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
@@ -73,7 +73,7 @@ function goToPage(value) {
 }
 
 function enterExperiment(module) {
-  router.push(`/student/experiments/${module.id}`)
+  router.push(`/student/experiments/${module.id}${module.offering_id ? `?offering_id=${module.offering_id}` : ''}`)
 }
 
 watch(searchInput, (value) => {

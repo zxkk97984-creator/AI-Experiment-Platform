@@ -5,6 +5,8 @@ from sqlalchemy import select
 from app.models import ExperimentRecord, ExperimentSubmission, Lesson
 from conftest import auth_header, create_course_db, create_user, login
 
+from teaching_test_support import grant_experiment
+
 API = "/api/v1"
 
 
@@ -52,6 +54,7 @@ def _setup_submission(client, db_sf):
         lesson.template_id = nbid
         db.commit()
 
+    grant_experiment(db_sf, "lesson", leid, ["erv_s"])
     rec = client.post(f"{API}/experiments/records/ensure-for-lesson/{leid}",
                       headers=auth_header(s_tok))
     rid = rec.json()["id"]
@@ -201,7 +204,7 @@ def test_other_teacher_cannot_review(client, db_session_factory):
     r = client.patch(f"{API}/experiments/submissions/{ctx['sub_id']}/review",
                      headers=auth_header(t2_tok),
                      json={"score": 90.0})
-    assert r.status_code == 403
+    assert r.status_code == 404  # Unauthorized records are hidden by scoped queries.
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -267,6 +270,7 @@ def test_teacher_can_view_and_review_module_submission(client, db_session_factor
     pub_mod = client.post(f"{API}/experiments/modules/{mod_id}/publish", headers=auth_header(t_tok))
     assert pub_mod.status_code == 200, pub_mod.text
 
+    grant_experiment(db_session_factory, "module", mod_id, ["erv_ms"])
     # 学生创建模块实验记录并提交
     rec = client.post(f"{API}/experiments/records/ensure-for-module/{mod_id}",
                       headers=auth_header(s_tok))
@@ -311,8 +315,8 @@ def test_teacher_can_view_and_review_module_submission(client, db_session_factor
 
     # 其他教师查看详情与评分均 403
     other_detail = client.get(f"{API}/experiments/submissions/{sub_id}", headers=auth_header(t2_tok))
-    assert other_detail.status_code == 403
+    assert other_detail.status_code == 404
     other_review = client.patch(f"{API}/experiments/submissions/{sub_id}/review",
                                 headers=auth_header(t2_tok),
                                 json={"score": 90.0})
-    assert other_review.status_code == 403
+    assert other_review.status_code == 404

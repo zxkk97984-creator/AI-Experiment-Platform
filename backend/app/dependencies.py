@@ -70,6 +70,7 @@ def get_current_payload(
 def get_authenticated_user(
     payload: dict = Depends(get_current_payload),
     db: Session = Depends(get_db),
+    redis_client=Depends(get_redis_client),
 ) -> User:
     user_id = payload.get("sub")
     user = db.get(User, int(user_id)) if user_id else None
@@ -80,12 +81,20 @@ def get_authenticated_user(
     token_sv = payload.get("sv")
     if token_sv is None or int(token_sv) != user.session_version:
         raise api_error(401, "SESSION_REVOKED", "会话已失效，请重新登录")
+    # A long-running request must also notice a single-token logout before
+    # committing completion metadata. Never retain the raw bearer token.
+    db.info['teaching_token_jti'] = payload.get('jti')
+    db.info['teaching_token_redis'] = redis_client
     return user
 
 
-def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
+def get_current_user(user: User = Depends(get_authenticated_user), db: Session = Depends(get_db), request: Request = None) -> User:
     from app.services.account_service import ensure_full_account
     ensure_full_account(user)
+    from app.services.teaching_query_policy import install_request_scope
+    install_request_scope(db, user)
+    if request is not None:
+        db.info["teaching_request_method"] = request.method
     return user
 
 

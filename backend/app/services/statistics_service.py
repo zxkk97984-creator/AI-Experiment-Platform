@@ -6,13 +6,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Course, CourseEnrollment, Exam, ExamSubmission, User
+from app.services.offering_service import teacher_course_condition
 from app.services.audience_service import effective_student_ids
 from app.schemas.statistics import ExamStatisticsRead, TeacherGradeStatisticsRead
 
 
 def build_teacher_grade_statistics(db: Session, user: User) -> TeacherGradeStatisticsRead:
     courses = db.scalars(
-        select(Course).where(Course.teacher_id == user.id).order_by(Course.title)
+        select(Course).where(teacher_course_condition(user.id)).order_by(Course.title)
     ).all()
     course_ids = [course.id for course in courses]
     result = TeacherGradeStatisticsRead(

@@ -24,6 +24,8 @@ vi.mock('../../../api/exams', () => ({
   examsAPI: { list: vi.fn(), create: vi.fn(), update: vi.fn() },
 }))
 
+vi.mock('../../../api/offerings', () => ({ offeringsAPI: { list: vi.fn() } }))
+
 vi.mock('../../../api/courses', () => ({
   coursesAPI: { list: vi.fn() },
 }))
@@ -33,6 +35,7 @@ vi.mock('../../../stores/app', () => ({
 }))
 
 import { examsAPI } from '../../../api/exams.js'
+import { offeringsAPI } from '../../../api/offerings.js'
 import { coursesAPI } from '../../../api/courses.js'
 
 const courses = [
@@ -88,6 +91,7 @@ describe('考试管理页 ExamManageView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    offeringsAPI.list.mockResolvedValue({ data: { items: [] } })
     pushMock.mockClear()
     examsAPI.list.mockResolvedValue({ data: { items: [] } })
   })

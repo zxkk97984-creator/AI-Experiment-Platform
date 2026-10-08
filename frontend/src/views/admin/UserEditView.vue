@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
+import CredentialExportPanel from '../../components/admin/CredentialExportPanel.vue'
 import { accountAPI, errorMessage } from '../../api/accountManagement.js'
 import { usersAPI } from '../../api/users.js'
 import { useAppStore } from '../../stores/app.js'
@@ -42,8 +43,14 @@ async function handleSave() {
   try {
     if (isNew.value) {
       if (form.value.role !== 'student' && !form.value.password) { app.showToast('请输入密码', 'error'); saving.value = false; return }
-      await usersAPI.create({ ...form.value, password: form.value.role === 'student' ? undefined : form.value.password })
+      const result = await usersAPI.create({ ...form.value, password: form.value.role === 'student' ? undefined : form.value.password })
       app.showToast('用户已创建', 'success')
+      if (result.data.role === 'student') {
+        user.value = result.data; isNew.value = false
+        form.value.username = result.data.username
+        await router.replace(`/admin/users/${result.data.id}/edit`)
+        return
+      }
     } else {
       await usersAPI.update(route.params.id, {
         real_name: form.value.real_name,
@@ -88,7 +95,7 @@ async function resetOther() {
         </div>
       </header>
 
-      <p v-if="isNew && form.role === 'student'" class="account-notice">学号作为登录账号，使用系统临时密码，首次登录必须改密。</p>
+      <p v-if="isNew && form.role === 'student'" class="account-notice">学号作为登录账号，系统为学生生成独立随机临时密码。创建后请下载凭据发放，首次登录必须改密。</p>
       <form class="card form-card" @submit.prevent="handleSave">
         <div v-if="form.role !== 'student' || !isNew" class="form-group"><label for="user-username">登录用户名</label><input id="user-username" v-model="form.username" :disabled="!isNew" placeholder="输入用户名" /><small v-if="!isNew">原账号保留；更正学号时，以原学号登录的账号会同步更正</small></div>
         <div v-if="form.role === 'student'" class="form-group"><label for="user-student_no">学号</label><input id="user-student_no" v-model="form.student_no" required placeholder="输入唯一学号" /></div>
@@ -113,6 +120,7 @@ async function resetOther() {
           <button type="button" class="btn-ghost" @click="router.push('/admin/users')">取消</button>
         </div>
       </form>
+      <CredentialExportPanel v-if="user?.role === 'student'" :user-id="user.id" />
       <section v-if="user" class="account-panel">
         <h2>独立密码重置</h2><p>重置会撤销该用户旧登录；资料保存不会修改密码。</p>
         <button v-if="user.role === 'student'" class="btn-ghost" :disabled="resetBusy" @click="resetStudent">预览学生密码重置</button>

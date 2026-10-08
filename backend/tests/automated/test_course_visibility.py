@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from conftest import auth_header, create_course_db, create_user, login
+from conftest import auth_header, create_course_db, create_user, grant_teaching_fixture, login
 from sqlalchemy import select
 
 from app.models import AcademicTerm, Course, CourseTeachingClass, TeachingClass, TeachingClassStudent, User
@@ -40,6 +40,25 @@ def _enroll(client, token, course_id):
 
 def _chapters(client, token, course_id):
     return client.get(f"{API}/courses/{course_id}/chapters", headers=auth_header(token))
+
+
+def _grant_students(db_session_factory, course_id, *names):
+    with db_session_factory() as db:
+        ids = list(db.scalars(select(User.id).where(User.username.in_(names))))
+        offering = grant_teaching_fixture(db, db.get(Course, course_id), student_ids=ids)
+        db.commit()
+        return offering.id
+
+
+def _grant_candidates(db_session_factory, teacher_name):
+    cid = create_course_db(db_session_factory, teacher_username=teacher_name, title="候选名单测试课程")
+    _grant_students(db_session_factory, cid, "stu_a", "stu_b")
+
+
+def _revoke_student(client, db_session_factory, course_id, student_token):
+    admin_token = _token(client, db_session_factory, "visibility-revoke-admin", "admin")
+    result = client.delete(f"{API}/courses/{course_id}/students/{_student_id(client, student_token)}", headers=auth_header(admin_token))
+    assert result.status_code == 204, result.text
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -141,6 +160,7 @@ def test_class_visibility_allows_class_members_and_teacher_added_students(client
         course = db.get(Course, course_id)
         sync_course_class_enrollments(db, course)
         db.commit()
+    _grant_students(db_session_factory, course_id, "stu-class-member")
 
     member_list = client.get(f"{API}/courses", headers=auth_header(member_token))
     assert member_list.status_code == 200, member_list.text
@@ -163,10 +183,11 @@ def test_class_visibility_allows_class_members_and_teacher_added_students(client
     outsider_id = _student_id(client, outsider_token)
     manual_add = client.post(
         f"{API}/courses/{course_id}/students",
-        headers=auth_header(teacher_token),
+        headers=auth_header(_token(client, db_session_factory, "class-scope-admin", "admin")),
         json={"student_id": outsider_id},
     )
     assert manual_add.status_code == 201, manual_add.text
+    _grant_students(db_session_factory, course_id, "stu-class-outsider")
     assert manual_add.json()["enrollment_origin"] == "manual"
 
     outsider_list = client.get(f"{API}/courses", headers=auth_header(outsider_token))
@@ -181,7 +202,7 @@ def test_class_visibility_allows_class_members_and_teacher_added_students(client
     # 教师移除例外学生后立即撤销访问权限。
     manual_remove = client.delete(
         f"{API}/courses/{course_id}/students/{outsider_id}",
-        headers=auth_header(teacher_token),
+        headers=auth_header(login(client, "class-scope-admin")[0]),
     )
     assert manual_remove.status_code == 204, manual_remove.text
     assert client.get(f"{API}/courses/{course_id}", headers=auth_header(outsider_token)).status_code == 403
@@ -209,6 +230,7 @@ def _seed_users(db_session_factory):
 
 def test_students_endpoint_teacher_and_admin(client, db_session_factory):
     _seed_users(db_session_factory)
+    _grant_candidates(db_session_factory, "t_other")
     # t_other 已在 _seed_users 创建
     create_user(db_session_factory, "admin1", "admin")
     for name in ("t_other", "admin1"):
@@ -229,6 +251,7 @@ def test_students_endpoint_forbidden_for_student(client, db_session_factory):
 def test_students_endpoint_q_filters_username_and_real_name(client, db_session_factory):
     _seed_users(db_session_factory)
     token = _token(client, db_session_factory, "t_q", "teacher")
+    _grant_candidates(db_session_factory, "t_q")
     resp = client.get(f"{API}/users/students", headers=auth_header(token), params={"q": "张三"})
     assert resp.status_code == 200
     usernames = {item["username"] for item in resp.json()["items"]}
@@ -241,6 +264,7 @@ def test_students_endpoint_q_filters_username_and_real_name(client, db_session_f
 def test_students_endpoint_pagination(client, db_session_factory):
     _seed_users(db_session_factory)
     token = _token(client, db_session_factory, "t_pg", "teacher")
+    _grant_candidates(db_session_factory, "t_pg")
     resp = client.get(f"{API}/users/students", headers=auth_header(token), params={"page": 1, "page_size": 1})
     data = resp.json()
     assert len(data["items"]) == 1
@@ -253,7 +277,7 @@ def test_students_endpoint_pagination(client, db_session_factory):
 # ═══════════════════════════════════════════════════════════════
 
 
-def _setup_whitelist_course(client, db_session_factory):
+def _setup_whitelist_course(client, db_session_factory, *, authorize=True):
     t_tok = _token(client, db_session_factory, "t_wl")
     s_tok = _token(client, db_session_factory, "s_wl", "student")
     cid = create_course_db(
@@ -263,6 +287,8 @@ def _setup_whitelist_course(client, db_session_factory):
         status="published",
         visibility="whitelist",
     )
+    if authorize:
+        _grant_students(db_session_factory, cid, "s_wl")
     return t_tok, s_tok, cid
 
 
@@ -336,6 +362,9 @@ def test_whitelist_management_forbidden_for_non_owner(client, db_session_factory
 def test_whitelist_add_validation(client, db_session_factory):
     t_tok, s_tok, course_id = _setup_whitelist_course(client, db_session_factory)
     s_id = _student_id(client, s_tok)
+    # Whole-school user validation is administrator-owned; teachers only see
+    # students in their explicitly allocated offering.
+    t_tok = _token(client, db_session_factory, "validation-wl-admin", "admin")
 
     # 用户不存在
     resp = client.post(
@@ -461,20 +490,21 @@ def test_public_course_visible_enroll_then_content(client, db_session_factory):
     cid = create_course_db(db_session_factory, teacher_username="t_pub", title="可见范围课程", status="published", visibility="public")
     _add_chapter_lesson(client, t_tok, cid)
 
-    # 未选学生：list/get 可见、can_enroll=true、chapters 拒绝
+    # public 是共享内容属性，未获授课授权的学生不能发现或读取课程。
     for tok in (s1, s2):
         resp = client.get(f"{API}/courses", headers=auth_header(tok))
-        items = resp.json()["items"]
-        assert len(items) == 1
-        assert items[0]["id"] == cid
-        assert items[0]["is_enrolled"] is False
-        assert items[0]["can_enroll"] is True
+        assert resp.json()["total"] == 0
         resp = client.get(f"{API}/courses/{cid}", headers=auth_header(tok))
-        assert resp.status_code == 200
-        assert resp.json()["can_enroll"] is True
+        assert resp.status_code == 403
         assert _chapters(client, tok, cid).status_code == 403
+        assert _enroll(client, tok, cid).status_code == 403
+    with db_session_factory() as db:
+        from sqlalchemy import func, select
+        from app.models import CourseEnrollment
+        assert db.scalar(select(func.count()).select_from(CourseEnrollment).where(CourseEnrollment.course_id == cid)) == 0
 
-    # 选课后可读章节
+    # 管理员明确授课授权后可读章节；另一个学生仍不可见。
+    _grant_students(db_session_factory, cid, "s_pub1")
     assert _enroll(client, s1, cid).status_code == 201
     resp = _chapters(client, s1, cid)
     assert resp.status_code == 200
@@ -482,6 +512,7 @@ def test_public_course_visible_enroll_then_content(client, db_session_factory):
     resp = client.get(f"{API}/courses/{cid}", headers=auth_header(s1))
     assert resp.json()["is_enrolled"] is True
     assert resp.json()["can_enroll"] is False
+    assert client.get(f"{API}/courses", headers=auth_header(s2)).json()["total"] == 0
 
 
 def _add_chapter_lesson(client, token, course_id, lesson_title="课时一"):
@@ -493,7 +524,7 @@ def _add_chapter_lesson(client, token, course_id, lesson_title="课时一"):
     chapter_id = resp.json()["id"]
     resp = client.post(
         f"{API}/chapters/{chapter_id}/lessons", headers=auth_header(token),
-        json={"title": lesson_title, "content_type": "markdown", "content": "# 内容", "order_index": 1},
+        json={"title": lesson_title, "content_type": "markdown", "content": "# 内容", "order_index": 1, "status": "published"},
     )
     assert resp.status_code == 201, resp.text
     return chapter_id
@@ -508,15 +539,15 @@ def test_whitelist_member_visibility_and_enroll(client, db_session_factory):
     )
     _add_chapter_lesson(client, t_tok, course_id)
 
-    # 名单内学生：list/get 可见、未选课 chapters 拒绝
+    # 已授课授权的名单内学生可读课程，旧选课入口幂等。
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok))
     items = resp.json()["items"]
     assert len(items) == 1
-    assert items[0]["is_enrolled"] is False
-    assert items[0]["can_enroll"] is True
+    assert items[0]["is_enrolled"] is True
+    assert items[0]["can_enroll"] is False
     resp = client.get(f"{API}/courses/{course_id}", headers=auth_header(s_tok))
     assert resp.status_code == 200
-    assert _chapters(client, s_tok, course_id).status_code == 403
+    assert _chapters(client, s_tok, course_id).status_code == 200
 
     # 选课后可读章节
     assert _enroll(client, s_tok, course_id).status_code == 201
@@ -538,7 +569,7 @@ def test_whitelist_non_member_denied_everywhere(client, db_session_factory):
     assert resp.status_code == 403
 
 
-def test_removed_from_whitelist_loses_access_immediately(client, db_session_factory):
+def test_roster_revoke_loses_access_without_whitelist_authority(client, db_session_factory):
     t_tok, s_tok, course_id = _setup_whitelist_course(client, db_session_factory)
     s_id = _student_id(client, s_tok)
     client.post(
@@ -550,7 +581,11 @@ def test_removed_from_whitelist_loses_access_immediately(client, db_session_fact
     resp = client.delete(f"{API}/courses/{course_id}/whitelist/{s_id}", headers=auth_header(t_tok))
     assert resp.status_code == 204
 
-    # 已选学生被移出名单后立即失去目录、详情与内容权限
+    # 内容白名单不覆盖管理员授课授权；移除名单不会撤销班级身份。
+    assert client.get(f"{API}/courses", headers=auth_header(s_tok)).json()["total"] == 1
+    assert client.get(f"{API}/courses/{course_id}", headers=auth_header(s_tok)).status_code == 200
+    _revoke_student(client, db_session_factory, course_id, s_tok)
+    # 管理员移出授课名单后立即失去目录、详情与内容权限。
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok))
     assert resp.json()["total"] == 0
     resp = client.get(f"{API}/courses/{course_id}", headers=auth_header(s_tok))
@@ -560,7 +595,7 @@ def test_removed_from_whitelist_loses_access_immediately(client, db_session_fact
 
 
 def test_empty_whitelist_hidden_from_all_students(client, db_session_factory):
-    t_tok, s_tok, course_id = _setup_whitelist_course(client, db_session_factory)
+    t_tok, s_tok, course_id = _setup_whitelist_course(client, db_session_factory, authorize=False)
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok))
     assert resp.json()["total"] == 0
     assert client.get(f"{API}/courses/{course_id}", headers=auth_header(s_tok)).status_code == 403
@@ -571,6 +606,7 @@ def test_private_enrolled_student_keeps_access(client, db_session_factory):
     t_tok = _token(client, db_session_factory, "t_priv")
     s_tok = _token(client, db_session_factory, "s_priv", "student")
     cid = create_course_db(db_session_factory, teacher_username="t_priv", title="可见范围课程", status="published", visibility="public")
+    _grant_students(db_session_factory, cid, "s_priv")
     _add_chapter_lesson(client, t_tok, cid)
     assert _enroll(client, s_tok, cid).status_code == 201
     resp = client.patch(
@@ -591,15 +627,14 @@ def test_private_dropped_student_cannot_use_history_to_reenroll(client, db_sessi
     t_tok = _token(client, db_session_factory, "t_prd")
     s_tok = _token(client, db_session_factory, "s_prd", "student")
     cid = create_course_db(db_session_factory, teacher_username="t_prd", title="可见范围课程", status="published", visibility="public")
+    _grant_students(db_session_factory, cid, "s_prd")
     assert _enroll(client, s_tok, cid).status_code == 201
     resp = client.patch(
         f"{API}/courses/{cid}", headers=auth_header(t_tok),
         json={"visibility": "private"},
     )
     assert resp.status_code == 200, resp.text
-    assert client.delete(
-        f"{API}/courses/{cid}/enroll", headers=auth_header(s_tok)
-    ).status_code == 204
+    _revoke_student(client, db_session_factory, cid, s_tok)
     # 退课后 private 课程从列表消失
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok))
     assert resp.json()["total"] == 0
@@ -676,6 +711,8 @@ def test_student_list_total_matches_filtered_no_duplicates(client, db_session_fa
     s_id = _student_id(client, s_tok)
     pub = create_course_db(db_session_factory, teacher_username="t_mix", title="公开课", status="published", visibility="public")
     wl = create_course_db(db_session_factory, teacher_username="t_mix", title="白名单课", status="published", visibility="whitelist")
+    _grant_students(db_session_factory, pub, "s_mix")
+    _grant_students(db_session_factory, wl, "s_mix")
     create_course_db(db_session_factory, teacher_username="t_mix", title="私密课", status="published", visibility="private")
     client.post(
         f"{API}/courses/{wl}/whitelist", headers=auth_header(t_tok),
@@ -691,8 +728,8 @@ def test_student_list_total_matches_filtered_no_duplicates(client, db_session_fa
     by_id = {item["id"]: item for item in data["items"]}
     assert by_id[pub]["is_enrolled"] is True
     assert by_id[pub]["can_enroll"] is False
-    assert by_id[wl]["is_enrolled"] is False
-    assert by_id[wl]["can_enroll"] is True
+    assert by_id[wl]["is_enrolled"] is True
+    assert by_id[wl]["can_enroll"] is False
 
     # 分页一页一条，total 不变
     resp = client.get(f"{API}/courses", headers=auth_header(s_tok), params={"page": 1, "page_size": 1})
@@ -716,6 +753,7 @@ def _setup_activity_course(client, db_session_factory, visibility):
     # whitelist 课程：创建一个白名单成员并让作业/考试按 whitelist_only 发布。
     member_tok = _token(client, db_session_factory, "s_act_member", "student")
     member_id = _student_id(client, member_tok)
+    _grant_students(db_session_factory, cid, "s_act_member")
     audience_payload = {}
     if visibility == "public":
         resp = _enroll(client, member_tok, cid)
@@ -736,6 +774,7 @@ def _setup_activity_course(client, db_session_factory, visibility):
         json={"course_id": cid, "title": "作业", "status": "draft", **audience_payload},
     )
     aid = resp.json()["id"]
+    _grant_students(db_session_factory, cid, "s_act_member")
     resp = client.post(
         f"{API}/assignments/{aid}/questions", headers=auth_header(t_tok),
         json={"title": "题", "function_name": "f", "hidden_tests": "SECRET", "grading_mode": "legacy"},
@@ -755,6 +794,7 @@ def _setup_activity_course(client, db_session_factory, visibility):
         },
     )
     eid = resp.json()["id"]
+    _grant_students(db_session_factory, cid, "s_act_member")
     client.post(f"{API}/exams/{eid}/questions", headers=auth_header(t_tok), json={
         "question_type": "single_choice", "prompt": "Q?", "options": {"A": "a", "B": "b"},
         "correct_answer": {"correct": ["A"]}, "points": 1,
@@ -773,44 +813,51 @@ def test_public_not_enrolled_cannot_participate(client, db_session_factory):
     assert resp.status_code == 200
     assert len(resp.json()["items"]) == 0
     resp = client.get(f"{API}/assignments/{aid}", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.get(f"{API}/assignments/{aid}/questions", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
     # 考试：不能开始/提交/看题目
     resp = client.get(f"{API}/exams/{eid}", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.post(f"{API}/exams/{eid}/start", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.post(f"{API}/exams/{eid}/submit", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.get(f"{API}/exams/{eid}/questions", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
     # Judge：不能提交代码
     resp = client.post(f"{API}/judge/submissions", headers=auth_header(s_tok), json={
         "question_id": qid, "code": "def f(): pass",
     })
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 def test_whitelist_member_not_enrolled_cannot_participate(client, db_session_factory):
     t_tok, cid, aid, qid, eid = _setup_activity_course(client, db_session_factory, "whitelist")
     s_tok = _token(client, db_session_factory, "s_wn2", "student")
     s_id = _student_id(client, s_tok)
-    client.post(
+    denied = client.post(
         f"{API}/courses/{cid}/whitelist", headers=auth_header(t_tok),
         json={"student_id": s_id},
     )
+    assert denied.status_code == 403
+    admin_tok = _token(client, db_session_factory, "activity-whitelist-admin", "admin")
+    listed = client.post(
+        f"{API}/courses/{cid}/whitelist", headers=auth_header(admin_tok),
+        json={"student_id": s_id},
+    )
+    assert listed.status_code == 201, listed.text
 
-    # 可见元数据（list/get 200），但未选课不能参加活动
+    # 内容白名单不能代替授课授权，仍不能查看课程或参加活动。
     resp = client.get(f"{API}/courses/{cid}", headers=auth_header(s_tok))
-    assert resp.status_code == 200
+    assert resp.status_code == 403
     resp = client.get(f"{API}/assignments/{aid}/questions", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.post(f"{API}/exams/{eid}/start", headers=auth_header(s_tok))
-    assert resp.status_code == 403
+    assert resp.status_code == 404
     resp = client.post(f"{API}/judge/submissions", headers=auth_header(s_tok), json={
         "question_id": qid, "code": "def f(): pass",
     })
-    assert resp.status_code == 403
+    assert resp.status_code == 404

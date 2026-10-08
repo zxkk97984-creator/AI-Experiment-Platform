@@ -1,4 +1,5 @@
 <script setup>
+import LabRuntimePanel from '../../components/labs/LabRuntimePanel.vue'
 // 环境档位管理（管理员）——一个页面三个 tab：
 // 环境档位（档位 + 不可变版本）/ 构建任务（轮询 + 脱敏日志 + 重试）/ 库清单（受控包目录）
 import { computed, ref } from 'vue'
@@ -36,6 +37,7 @@ function handleV2Detected() {
           <p class="page-sub">管理员维护不可变判题/实验环境：受控包目录 → 档位版本 → 构建与镜像审计</p>
         </div>
       </header>
+      <LabRuntimePanel />
 
       <!-- ── Tabs ─────────────────────────────────────────────────────── -->
       <div class="tab-bar" role="tablist">

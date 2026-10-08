@@ -116,9 +116,10 @@ function actionLabel(value) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="module in items" :key="module.id">
+          <tr v-for="module in items" :key="`${module.offering_id || 'legacy'}:${module.id}`">
             <td data-label="实验名称">
               <strong class="module-name" :title="module.name">{{ module.name }}</strong>
+              <small v-if="module.offering_id" class="offering-context">{{ [module.course_title, module.term_name, module.class_name].filter(Boolean).join(' · ') }}</small>
             </td>
             <td data-label="状态">
               <UiStatusPill
@@ -144,6 +145,7 @@ function actionLabel(value) {
 </template>
 
 <style scoped>
+.offering-context { display: block; margin-top: 6px; color: var(--muted); white-space: normal; }
 .catalog-section {
   display: flex;
   flex-direction: column;

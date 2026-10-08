@@ -355,6 +355,8 @@ def _run_alembic_command(db_path: Path, *args: str) -> subprocess.CompletedProce
     env["DAI_ENVIRONMENT"] = "development"
     env["DAI_ALLOW_ENVIRONMENT_V2_DOWNGRADE"] = "true"
     env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_LAB_DOWNGRADE"] = "true"
+    env["DAI_ALLOW_TEACHING_DOWNGRADE"] = "1"  # This helper always targets its disposable tmp_path SQLite file.
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND_DIR,

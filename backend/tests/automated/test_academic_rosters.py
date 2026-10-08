@@ -7,7 +7,7 @@ from conftest import auth_header, create_user, login
 API = "/api/v1"
 
 
-def _publish_course(client, teacher_token, **payload):
+def _publish_course(client, teacher_token, admin_token, teacher_id, **payload):
     """draft 创建 + PATCH 发布的合法链路；返回 PATCH 响应（序列化与旧 POST 一致）"""
     data = {
         "description": "课程简介",
@@ -17,8 +17,18 @@ def _publish_course(client, teacher_token, **payload):
         "default_score": 100,
     }
     data.update(payload)
+    class_ids = data.pop("teaching_class_ids", [])
     created = client.post(f"{API}/courses", headers=auth_header(teacher_token), json=data)
     assert created.status_code == 201, created.text
+    cid = created.json()["id"]
+    confirmed = client.post(f"{API}/courses/{cid}/content-owner", headers=auth_header(admin_token),
+        json={"teacher_id": teacher_id, "reason": "管理员确认共享课程负责人"})
+    assert confirmed.status_code == 200, confirmed.text
+    for class_id in class_ids:
+        approved = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+            "course_id": cid, "teaching_class_id": class_id, "academic_term_id": data["academic_term_id"], "teacher_id": teacher_id,
+        })
+        assert approved.status_code == 201, approved.text
     published = client.patch(
         f"{API}/courses/{created.json()['id']}",
         headers=auth_header(teacher_token),
@@ -56,7 +66,7 @@ def test_class_roster_syncs_course_counts_and_student_metadata(client, db_sessio
     add = client.post(f"{API}/teaching-classes/{class_id}/students", headers=auth_header(admin_token), json={"student_ids": [student.id]})
     assert add.status_code == 200, add.text
 
-    course = _publish_course(client, teacher_token, **{
+    course = _publish_course(client, teacher_token, admin_token, _teacher.id, **{
         "title": "数据结构", "visibility": "private",
         "academic_term_id": term.json()["id"], "teaching_class_ids": [class_id],
     })
@@ -127,11 +137,13 @@ def test_manual_drop_is_not_reactivated_by_class_sync(client, db_session_factory
         "academic_term_id": term["id"], "code": "AI-01", "name": "人工智能一班",
     }).json()["id"]
     client.post(f"{API}/teaching-classes/{class_id}/students", headers=auth_header(admin_token), json={"student_ids": [student.id]})
-    course_id = _publish_course(client, teacher_token, **{
+    course_id = _publish_course(client, teacher_token, admin_token, _teacher.id, **{
         "title": "机器学习", "visibility": "private",
         "academic_term_id": term["id"], "teaching_class_ids": [class_id],
     }).json()["id"]
-    removed = client.delete(f"{API}/courses/{course_id}/students/{student.id}", headers=auth_header(teacher_token))
+    denied = client.delete(f"{API}/courses/{course_id}/students/{student.id}", headers=auth_header(teacher_token))
+    assert denied.status_code == 403
+    removed = client.delete(f"{API}/courses/{course_id}/students/{student.id}", headers=auth_header(admin_token))
     assert removed.status_code == 204
     client.post(f"{API}/teaching-classes/{class_id}/students", headers=auth_header(admin_token), json={"student_ids": [student.id]})
     with db_session_factory() as db:
@@ -150,11 +162,11 @@ def test_student_number_required_and_unique(client, db_session_factory):
     })
     assert missing.status_code == 422
     first = client.post(f"{API}/users", headers=auth_header(token), json={
-        "username": "stu-a", "student_no": "S001", "password": "Passw0rd!", "real_name": "A", "role": "student",
+        "username": "S001", "student_no": "S001", "password": "Passw0rd!", "real_name": "A", "role": "student",
     })
     assert first.status_code == 201
     duplicate = client.post(f"{API}/users", headers=auth_header(token), json={
-        "username": "stu-b", "student_no": "S001", "password": "Passw0rd!", "real_name": "B", "role": "student",
+        "username": "S001", "student_no": "S001", "password": "Passw0rd!", "real_name": "B", "role": "student",
     })
     assert duplicate.status_code == 409
 
@@ -177,16 +189,29 @@ def test_multi_class_course_deduplicates_students_and_rejects_term_mismatch(clie
         class_ids.append(response.json()["id"])
         client.post(f"{API}/teaching-classes/{class_ids[-1]}/students", headers=auth_header(admin_token), json={"student_ids": [student.id]})
 
-    mismatch = client.post(f"{API}/courses", headers=auth_header(teacher_token), json={
+    unauthorized = client.post(f"{API}/courses", headers=auth_header(teacher_token), json={
         "title": "Mismatch", "academic_term_id": term_ids[0], "teaching_class_ids": [class_ids[2]],
     })
-    assert mismatch.status_code == 422
+    assert unauthorized.status_code == 403
 
     course = client.post(f"{API}/courses", headers=auth_header(teacher_token), json={
-        "title": "Combined", "academic_term_id": term_ids[0], "teaching_class_ids": class_ids[:2],
+        "title": "Combined", "academic_term_id": term_ids[0],
     })
     assert course.status_code == 201, course.text
-    assert course.json()["student_count"] == 1
+    cid = course.json()["id"]
+    mismatch = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+        "course_id": cid, "academic_term_id": term_ids[0], "teaching_class_id": class_ids[2], "teacher_id": _teacher.id,
+    })
+    assert mismatch.status_code == 422
+    first = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+        "course_id": cid, "academic_term_id": term_ids[0], "teaching_class_id": class_ids[0], "teacher_id": _teacher.id,
+    })
+    assert first.status_code == 201, first.text
+    duplicate = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+        "course_id": cid, "academic_term_id": term_ids[0], "teaching_class_id": class_ids[1], "teacher_id": _teacher.id,
+    })
+    assert duplicate.status_code == 409
+    assert client.get(f"{API}/courses/{cid}", headers=auth_header(teacher_token)).json()["student_count"] == 1
 
 
 def test_closed_term_is_read_only_and_rosters_are_permissioned(client, db_session_factory):
@@ -199,6 +224,13 @@ def test_closed_term_is_read_only_and_rosters_are_permissioned(client, db_sessio
     course = client.post(f"{API}/courses", headers=auth_header(teacher_token), json={
         "title": "Read only course", "academic_term_id": term["id"],
     }).json()
+    klass = client.post(f"{API}/teaching-classes", headers=auth_header(admin_token), json={
+        "academic_term_id": term["id"], "code": "CLOSED-CLASS", "name": "结课班级",
+    }).json()
+    offering = client.post(f"{API}/offerings", headers=auth_header(admin_token), json={
+        "course_id": course["id"], "academic_term_id": term["id"], "teaching_class_id": klass["id"], "teacher_id": _teacher.id,
+    })
+    assert offering.status_code == 201, offering.text
 
     student_roster = client.get(f"{API}/courses/{course['id']}/students", headers=auth_header(student_token))
     assert student_roster.status_code == 403
@@ -208,5 +240,8 @@ def test_closed_term_is_read_only_and_rosters_are_permissioned(client, db_sessio
     closed = client.delete(f"{API}/academic-terms/{term['id']}", headers=auth_header(admin_token))
     assert closed.status_code == 200
     assert client.patch(f"{API}/academic-terms/{term['id']}", headers=auth_header(admin_token), json={"status": "active"}).status_code == 409
-    assert client.patch(f"{API}/courses/{course['id']}", headers=auth_header(teacher_token), json={"title": "Changed"}).status_code == 409
-    assert client.post(f"{API}/courses/{course['id']}/students", headers=auth_header(teacher_token), json={"student_id": student.id}).status_code == 409
+    # Shared content can serve another term; teaching-instance writes stay frozen.
+    assert client.patch(f"{API}/courses/{course['id']}", headers=auth_header(teacher_token), json={"title": "Changed"}).status_code == 200
+    assert client.post(f"{API}/courses/{course['id']}/students", headers=auth_header(teacher_token), json={"student_id": student.id}).status_code == 403
+    assert client.post(f"{API}/offerings/{offering.json()['id']}/students", headers=auth_header(admin_token),
+        json={"student_ids": [student.id], "reason": "结课后不得变更名单"}).status_code == 409

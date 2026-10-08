@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.dependencies import get_db, pagination, PaginationParams, require_roles
 from app.errors import api_error
 from app.models import (Assignment, Chapter, Course, Exam, ExamAnswer, ExamSubmission, ExperimentModule,
-                        ExperimentRecord, ExperimentSubmission, JudgeQuestion, Lesson, Submission, User)
+                        ExperimentRecord, ExperimentSubmission, JudgeQuestion, Lesson, Submission, User, LabSubmission, LabRun)
 
 router = APIRouter(prefix='/users/me/history', tags=['student-history'])
 
@@ -27,8 +27,13 @@ def history_query(student_id):
     ).where(ExamSubmission.student_id == student_id, ExamSubmission.status != 'started')
     experiment = select(literal('experiment'), ExperimentSubmission.id,
         func.coalesce(Lesson.title, ExperimentModule.name), Course.id, Course.title, ExperimentSubmission.submitted_at,
-        case((ExperimentSubmission.reviewed_at.is_not(None), 'graded'), else_='submitted'),
-        case((ExperimentSubmission.reviewed_at.is_not(None), ExperimentSubmission.score), else_=None)
+        case((LabSubmission.published_grade_id.is_not(None), 'graded'),
+             (LabSubmission.submission_id.is_not(None), func.coalesce(LabRun.status, 'submitted')),
+             (ExperimentSubmission.reviewed_at.is_not(None), 'graded'), else_='submitted'),
+        case((LabSubmission.published_grade_id.is_not(None), ExperimentSubmission.score),
+             ((LabSubmission.submission_id.is_(None)) & ExperimentSubmission.reviewed_at.is_not(None), ExperimentSubmission.score), else_=None)
+    ).outerjoin(LabSubmission, LabSubmission.submission_id == ExperimentSubmission.id
+    ).outerjoin(LabRun, LabRun.id == LabSubmission.current_run_id
     ).join(ExperimentRecord, ExperimentRecord.id == ExperimentSubmission.record_id
     ).outerjoin(Lesson, Lesson.id == ExperimentRecord.lesson_id).outerjoin(Chapter, Chapter.id == Lesson.chapter_id
     ).outerjoin(Course, Course.id == Chapter.course_id).outerjoin(ExperimentModule, ExperimentModule.id == ExperimentRecord.module_id
@@ -46,10 +51,12 @@ def list_history(kind: Literal['all', 'assignment', 'exam', 'experiment'] = 'all
         filters.append(history.c.kind == kind)
     if course_id is not None:
         filters.append(history.c.course_id == course_id)
-    total = db.scalar(select(func.count()).select_from(history).where(*filters))
+    total = db.scalar(select(func.count()).select_from(history).where(*filters).execution_options(teaching_history=True))
     rows = db.execute(select(history).where(*filters).order_by(history.c.submitted_at.desc(), history.c.kind,
-                       history.c.submission_id.desc()).offset((page.page - 1) * page.page_size).limit(page.page_size)).mappings().all()
-    options = db.execute(select(history.c.course_id, history.c.course_title).where(history.c.course_id.is_not(None)).distinct()).all()
+                       history.c.submission_id.desc()).offset((page.page - 1) * page.page_size).limit(page.page_size)
+                       .execution_options(teaching_history=True)).mappings().all()
+    options = db.execute(select(history.c.course_id, history.c.course_title).where(history.c.course_id.is_not(None))
+                         .distinct().execution_options(teaching_history=True)).all()
     return {'items': [{**r, 'score_visible': r['score'] is not None} for r in rows], 'total': total,
             'page': page.page, 'page_size': page.page_size,
             'courses': [{'id': r[0], 'name': r[1]} for r in options]}
@@ -59,7 +66,8 @@ def list_history(kind: Literal['all', 'assignment', 'exam', 'experiment'] = 'all
 def history_detail(kind: Literal['assignment', 'exam', 'experiment'], submission_id: int,
                    db: Session = Depends(get_db), user: User = Depends(require_roles('student'))):
     history = history_query(user.id)
-    row = db.execute(select(history).where(history.c.kind == kind, history.c.submission_id == submission_id)).mappings().first()
+    row = db.execute(select(history).where(history.c.kind == kind, history.c.submission_id == submission_id)
+                     .execution_options(teaching_history=True)).mappings().first()
     if row is None:
         raise api_error(404, 'SUBMISSION_NOT_FOUND', '提交记录不存在')
     result = {**row, 'score_visible': row['score'] is not None}
@@ -82,6 +90,10 @@ def history_detail(kind: Literal['assignment', 'exam', 'experiment'], submission
         cells = sorted((c for c in (version.cells if version else []) if not c.get('source_hidden')), key=lambda c:c.get('order', 0))
         result['cells'] = [{'id': c['id'], 'type': c.get('type', 'code'), 'source': snapshot[c['id']],
                             'output': (submission.outputs_snapshot or {}).get(c['id'])} for c in cells if c['id'] in snapshot]
-        result['feedback'] = submission.feedback if submission.reviewed_at else None
+        lab = db.get(LabSubmission, submission.id)
+        run = db.get(LabRun, lab.current_run_id) if lab and lab.current_run_id else None
+        result['lab_enabled'] = lab is not None
+        result['lab_status'] = run.status if run else None
+        result['feedback'] = submission.feedback if row['score'] is not None else None
         result['attempt_number'] = submission.attempt_number
     return result

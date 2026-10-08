@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import auth_header, create_user, login, seed_basic_environment
+from conftest import auth_header, create_user, grant_teaching_fixture, login, seed_basic_environment
 
 NOW = datetime.now(timezone.utc)
 
@@ -110,12 +110,16 @@ def _seed(db_session_factory):
             record_id=record.id, attempt_number=1, client_request_id="wb-exp-1",
             cells_snapshot={}, submitted_at=NOW - timedelta(minutes=30),
         ))
+        # Explicit administrator teaching authorization, independent of ownership.
+        offering = grant_teaching_fixture(db, course_a, student_ids=[student.id])
+        grant_teaching_fixture(db, course_b)
         db.commit()
         return {
             "teacher": teacher, "other": other, "student": student,
             "course_a": course_a, "course_b": course_b,
             "lesson": lesson, "assignment": assignment, "exam": exam,
             "class_a": class_a, "class_b": class_b,
+            "offering": offering,
         }
 
 
@@ -209,6 +213,7 @@ def test_unified_submissions_includes_module_experiments(client, db_session_fact
         db.flush()
         record = ExperimentRecord(
             module_id=module.id, template_version_id=ver.id,
+            offering_id=g["offering"].id, scope_key=f"offering:{g['offering'].id}",
             student_id=g["student"].id, status="graded",
             submitted_at=NOW - timedelta(minutes=10),
         )
@@ -359,6 +364,14 @@ def test_course_student_csv_import(client, db_session_factory):
         f"/api/v1/courses/{g['course_a'].id}/students/import",
         files={"file": ("roster.csv", csv_content.encode("utf-8-sig"), "text/csv")},
         headers=headers,
+    )
+    assert response.status_code == 403
+    admin = create_user(db_session_factory, "wb-csv-admin", "admin")
+    admin_token, _ = login(client, admin.username)
+    response = client.post(
+        f"/api/v1/courses/{g['course_a'].id}/students/import",
+        files={"file": ("roster.csv", csv_content.encode("utf-8-sig"), "text/csv")},
+        headers=auth_header(admin_token),
     )
     assert response.status_code == 200
     body = response.json()

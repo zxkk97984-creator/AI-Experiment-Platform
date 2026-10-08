@@ -138,7 +138,7 @@ def test_teacher_cannot_override_other_course(client, db_session_factory):
         headers=auth_header(t2_tok),
         json={"reason": "跨课程覆盖测试", "final_score_100": 80},
     )
-    assert resp.status_code == 403, f"跨课程覆盖应 403: {resp.status_code} {resp.text}"
+    assert resp.status_code == 404, f"跨课程覆盖隐藏记录应 404: {resp.status_code} {resp.text}"
 
 
 # ── P0: exam finalize 阻止 active score=None ──

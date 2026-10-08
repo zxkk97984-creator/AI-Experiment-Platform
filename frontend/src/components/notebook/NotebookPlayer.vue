@@ -2,6 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router'
 import MarkdownCell from './MarkdownCell.vue'
+import ReportCell from './ReportCell.vue'
+import LabStudentPanel from '../labs/LabStudentPanel.vue'
 import CodeCell from './CodeCell.vue'
 import { useExperimentStore } from '../../stores/experiment.js'
 import { useAppStore } from '../../stores/app.js'
@@ -13,12 +15,15 @@ const props = defineProps({
 })
 
 const router = useRouter()
+const route = router.currentRoute?.value || { query: {} }
 const store = useExperimentStore()
 const app = useAppStore()
 
 const loading = ref(true)
 const loadError = ref(null)
 const showMenu = ref(false)
+const labEnabled = ref(false)
+const labPanel = ref(null)
 let leaving = false
 
 const statusClass = computed(() => {
@@ -40,9 +45,9 @@ const statusText = computed(() => {
 onMounted(async () => {
   try {
     if (props.mode === 'lesson') {
-      await store.openLesson(props.entryId, props.courseId)
+      await (route.query.offering_id ? store.openLesson(props.entryId, props.courseId, Number(route.query.offering_id)) : store.openLesson(props.entryId, props.courseId))
     } else {
-      await store.openModule(props.entryId)
+      await (route.query.offering_id ? store.openModule(props.entryId, Number(route.query.offering_id)) : store.openModule(props.entryId))
     }
     // 加载提交历史
     await store.loadSubmissions()
@@ -71,9 +76,9 @@ onBeforeRouteUpdate(async (to, _from) => {
   loading.value = true
   try {
     if (to.params.lid) {
-      await store.openLesson(to.params.lid, to.params.id)
+      await store.openLesson(to.params.lid, to.params.id, to.query.offering_id ? Number(to.query.offering_id) : null)
     } else if (to.params.id) {
-      await store.openModule(to.params.id)
+      await store.openModule(to.params.id, to.query.offering_id ? Number(to.query.offering_id) : null)
     }
   } catch { app.showToast('加载失败', 'error') }
   finally { loading.value = false }
@@ -162,8 +167,8 @@ function handleUpdateSource(cellId, source) {
             </button>
             <div class="menu-divider"></div>
             <button class="menu-item menu-submit" role="menuitem"
-              @click="store.submitExperiment(); showMenu = false"
-              :disabled="store.submitting">
+              @click="(labEnabled || store.labEnabled) ? labPanel?.submit() : store.submitExperiment(); showMenu = false"
+              :disabled="store.submitting || (store.labEnabled && !labPanel?.canSubmit)">
               📤 {{ store.submitting ? '提交中…' : '提交实验' }}
             </button>
           </div>
@@ -188,6 +193,8 @@ function handleUpdateSource(cellId, source) {
       </span>
     </div>
 
+    <LabStudentPanel v-if="store.recordId && store.labEnabled" :key="store.recordId" ref="labPanel" @enabled="labEnabled = $event" />
+
     <!-- 提交状态栏 -->
     <div v-if="store.submitAttemptCount > 0 || store.submitting" class="submit-bar">
       <span v-if="store.submitting" class="submit-status submitting">📤 正在提交...</span>
@@ -206,7 +213,8 @@ function handleUpdateSource(cellId, source) {
       <p>暂无内容</p>
     </div>
     <div v-for="cell in store.cells" :key="cell.id" class="cell-wrapper">
-      <MarkdownCell v-if="cell.type === 'markdown'" :cell="cell" />
+      <ReportCell v-if="cell.type === 'markdown' && cell.student_editable" :cell="cell" @update:source="handleUpdateSource" />
+      <MarkdownCell v-else-if="cell.type === 'markdown'" :cell="cell" />
       <CodeCell
         v-else-if="cell.type === 'code'"
         :cell="cell"
@@ -214,6 +222,7 @@ function handleUpdateSource(cellId, source) {
         :disabled="store.executingCellId !== null && store.executingCellId !== cell.id"
         :readonly="!cell.student_editable"
         :is-executing="store.executingCellId === cell.id"
+        :check-result="(store.cellCheckResults || {})[cell.id]"
         @execute="handleRun"
         @update:source="handleUpdateSource"
       />
@@ -322,6 +331,13 @@ function handleUpdateSource(cellId, source) {
 @media (max-width: 768px) {
   .notebook-player { max-width: 100%; padding: 0 var(--space-2); }
   .player-title { font-size: var(--text-base); }
+}
+
+@media (max-width: 600px) {
+  .player-topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .topbar-center { grid-row: 2; grid-column: 1 / -1; }
+  .topbar-right { justify-content: flex-end; }
+  .btn-back { justify-self: start; }
 }
 
 .notebook-player { max-width: 1180px; }

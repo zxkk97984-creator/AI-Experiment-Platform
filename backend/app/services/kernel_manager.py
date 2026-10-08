@@ -11,6 +11,7 @@ Kernel Session 管理器
 """
 import json
 import logging
+import math
 import os
 import secrets
 import subprocess
@@ -38,7 +39,10 @@ class KernelSession:
                  initialized_template_version_id: int | None = None,
                  environment_version_id: int | None = None,
                  image_ref: str | None = None,
-                 runner_path: str | None = None):
+                 runner_path: str | None = None,
+                 memory_mb: int = 256,
+                 cpus: float = 1.0,
+                 resource_token: str | None = None):
         self.record_id = record_id
         self.container_name = container_name
         self.conn_info = conn_info
@@ -47,6 +51,9 @@ class KernelSession:
         self.environment_version_id = environment_version_id
         self.image_ref = image_ref
         self.runner_path = runner_path
+        self.memory_mb = memory_mb
+        self.cpus = cpus
+        self.resource_token = resource_token
         self.last_active_at = time.time()
 
     @property
@@ -81,6 +88,9 @@ class KernelSession:
             "environment_version_id": self.environment_version_id,
             "image_ref": self.image_ref,
             "runner_path": self.runner_path,
+            "memory_mb": self.memory_mb,
+            "cpus": self.cpus,
+            "resource_token": self.resource_token,
         }
 
     @classmethod
@@ -94,6 +104,9 @@ class KernelSession:
             environment_version_id=data.get("environment_version_id"),
             image_ref=data.get("image_ref"),
             runner_path=data.get("runner_path"),
+            memory_mb=data.get("memory_mb", 256),
+            cpus=data.get("cpus", 1.0),
+            resource_token=data.get("resource_token"),
         )
 
 
@@ -103,6 +116,51 @@ class KernelManager:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self._sessions: dict[int, KernelSession] = {}
+        # Factories come only from an authenticated caller's db bind. Never
+        # silently reach the application's global DB from a test or preview.
+        self._resource_factories = {}
+        self._resource_tokens = {}
+
+    def _reserve(self, record_id, token, memory_mb, cpus, factory):
+        from app.services.lab_resources import reserve_resources, touch_resources
+        with factory() as db:
+            reservation = reserve_resources(db, key=f"kernel:{record_id}", token=token,
+                kind="kernel", cpus=cpus, memory_mb=memory_mb, settings=self.settings)
+            if reservation is None:
+                raise RuntimeError("交互计算资源已占满，请稍后再试")
+            touch_resources(db, f"kernel:{record_id}", token, self.settings)
+            db.commit()
+        self._resource_factories[record_id] = factory
+        self._resource_tokens[record_id] = token
+
+    def _touch_resources(self, record_id, session):
+        factory = self._resource_factories.get(record_id)
+        if factory is None:
+            return
+        from app.services.lab_resources import touch_resources
+        with factory() as db:
+            if not touch_resources(db, f"kernel:{record_id}", session.resource_token, self.settings):
+                raise RuntimeError("交互计算资源租约已失效，请重启实验内核")
+            db.commit()
+
+    def _adopt_resources(self, session, factory):
+        factory = factory or self._resource_factories.get(session.record_id)
+        if factory is not None:
+            token = session.resource_token or secrets.token_hex(16)
+            self._reserve(session.record_id, token, session.memory_mb, session.cpus, factory)
+            session.resource_token = token
+            self._write_session_redis(session.record_id, session)
+        session.last_active_at = time.time()
+
+    @staticmethod
+    def _remove_container(container_name):
+        try:
+            result = subprocess.run(["docker", "rm", "-f", container_name],
+                capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("无法确认实验容器已停止，计算资源暂不释放") from exc
+        if result.returncode and "No such container" not in (result.stderr or ""):
+            raise RuntimeError("无法确认实验容器已停止，计算资源暂不释放")
 
     def _make_container_name(self, record_id: int) -> str:
         return f"dai-kernel-rec-{record_id}"
@@ -217,11 +275,35 @@ class KernelManager:
                 logger.warning("Redis 删除 kernel init 标记 %d 失败", record_id, exc_info=True)
             raise RuntimeError(f"Kernel 初始化标记持久化失败: {exc}") from exc
 
-    def create_session(self, record_id: int,
+    def create_session(self, record_id: int, lesson_storage_dir: str = "", *,
+                       image_ref: str | None = None, environment_version_id: int | None = None,
+                       memory_mb: int | None = None, cpus: float | None = None,
+                       resource_factory=None) -> KernelSession:
+        from app.services.lab_node import require_interactive_node
+        require_interactive_node(self.settings)
+        memory_mb = int(memory_mb if memory_mb is not None else self.settings.judge_memory_limit_mb)
+        cpus = float(cpus if cpus is not None else self.settings.judge_cpu_limit)
+        if memory_mb < 128 or not math.isfinite(cpus) or cpus <= 0:
+            raise RuntimeError("实验运行资源配置无效")
+        factory = resource_factory or self._resource_factories.get(record_id)
+        token = secrets.token_hex(16) if factory is not None else None
+        if factory is not None:
+            self._reserve(record_id, token, memory_mb, cpus, factory)
+        try:
+            return self._launch_session(record_id, lesson_storage_dir, image_ref=image_ref,
+                environment_version_id=environment_version_id, memory_mb=memory_mb,
+                cpus=cpus, resource_token=token)
+        except Exception:
+            # The reservation stays occupied if Docker cannot confirm removal.
+            self.destroy(record_id)
+            raise
+
+    def _launch_session(self, record_id: int,
                        lesson_storage_dir: str = "",
                        *,
                        image_ref: str | None = None,
-                       environment_version_id: int | None = None) -> KernelSession:
+                       environment_version_id: int | None = None,
+                       memory_mb: int, cpus: float, resource_token: str | None) -> KernelSession:
         """创建 Kernel 容器（Phase 5：镜像参数使用环境 digest）。
 
         - 位置参数保持旧签名兼容：create_session(record_id, lesson_storage_dir)。
@@ -231,8 +313,10 @@ class KernelManager:
         - 安全参数全部保留：--network none / --cap-drop ALL / no-new-privileges /
           --read-only / tmpfs / pids / cpu / 内存限制——只改镜像，不放松安全。
         """
+        from app.services.lab_node import require_interactive_node
+        require_interactive_node(self.settings)
         container_name = self._make_container_name(record_id)
-        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+        self._remove_container(container_name)
 
         conn_path, conn_info = self._generate_conn_file(record_id)
 
@@ -252,7 +336,7 @@ class KernelManager:
             "--security-opt", "no-new-privileges",
             "--read-only",
             "--tmpfs", "/tmp:exec,size=64m",
-            "--cpus", "1", "--memory", "256m", "--pids-limit", "50",
+            "--cpus", f"{cpus:g}", "--memory", f"{memory_mb}m", "--pids-limit", "50",
             "-e", "OPENBLAS_NUM_THREADS=4",
             "-e", "OMP_NUM_THREADS=4",
             "-e", "MKL_NUM_THREADS=4",
@@ -262,12 +346,17 @@ class KernelManager:
             cmd.extend(["-l", f"dai.environment_version_id={environment_version_id}"])
         if image_ref:
             cmd.extend(["-l", f"dai.image_digest={image_ref}"])
+        if resource_token:
+            cmd.extend(["-l", f"dai.lab_resource_token={resource_token}"])
+        cmd.extend(["-l", f"dai.memory_mb={memory_mb}", "-l", f"dai.cpus={cpus:g}"])
+        if lesson_storage_dir:
+            cmd.extend(["-l", f"dai.course_dir={lesson_storage_dir}"])
         cmd.extend([
             "-v", f"{host_conn_path}:/tmp/conn.json:ro",
             "-v", f"{host_work_dir}:/work:rw",
         ])
         if os.path.isdir(lesson_storage_dir):
-            cmd.extend(["-v", f"{lesson_storage_dir}:/course:ro"])
+            cmd.extend(["-v", f"{self._docker_host_path(lesson_storage_dir)}:/course:ro"])
         cmd.extend([image_ref or self.settings.kernel_image,
                     "python", "-m", "ipykernel_launcher", "-f", "/tmp/conn.json"])
 
@@ -311,10 +400,6 @@ class KernelManager:
                 capture_output=True, text=True,
             )
             if not alive.stdout.strip():
-                subprocess.run(
-                    ["docker", "rm", "-f", container_name],
-                    capture_output=True,
-                )
                 raise RuntimeError("Kernel 容器 exec 探测超时")
             logger.warning(
                 "Kernel 容器 exec 探测未就绪，降级继续 record_id=%d", record_id
@@ -328,7 +413,6 @@ class KernelManager:
             )
             if runner_probe.returncode != 0:
                 detail = (runner_probe.stderr or runner_probe.stdout or "runner missing").strip()
-                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
                 raise RuntimeError(
                     f"环境镜像缺少可用 Kernel runner {RUNNER_PATH}: {detail}"
                 )
@@ -338,15 +422,9 @@ class KernelManager:
                                 lesson_storage_dir=lesson_storage_dir,
                                 environment_version_id=environment_version_id,
                                 image_ref=image_ref or self.settings.kernel_image,
-                                runner_path=runner_path)
-        try:
-            self._write_session_redis(record_id, session)
-        except Exception:
-            subprocess.run(
-                ["docker", "rm", "-f", container_name],
-                capture_output=True,
-            )
-            raise
+                                runner_path=runner_path, memory_mb=memory_mb,
+                                cpus=cpus, resource_token=resource_token)
+        self._write_session_redis(record_id, session)
         self._sessions[record_id] = session
         return session
 
@@ -354,7 +432,9 @@ class KernelManager:
                               lesson_storage_dir: str = "",
                               *,
                               image_ref: str | None = None,
-                              environment_version_id: int | None = None) -> KernelSession:
+                              environment_version_id: int | None = None,
+                              memory_mb: int | None = None, cpus: float | None = None,
+                              resource_factory=None) -> KernelSession:
         """获取或创建 Kernel session（计划 9.3 重建策略）。
 
         位置参数保持旧签名兼容：get_or_create_session(record_id, lesson_storage_dir)。
@@ -363,13 +443,20 @@ class KernelManager:
         销毁旧容器后按新 digest 重建；环境 profile 新增 v2 不主动重建任何旧 record
         （期望环境未变时仍复用）；900 秒空闲清理策略保持不变。
         """
+        if resource_factory is not None:
+            self._resource_factories[record_id] = resource_factory
+        def matches(session):
+            return (session.matches_environment(image_ref, environment_version_id)
+                and (memory_mb is None or session.memory_mb == memory_mb)
+                and (cpus is None or session.cpus == cpus)
+                and (not lesson_storage_dir or session.lesson_storage_dir == lesson_storage_dir))
+
         session = self._sessions.get(record_id)
-        if session and session.is_alive:
-            if session.matches_environment(image_ref, environment_version_id):
-                session.last_active_at = time.time()
+        if session:
+            if session.is_alive and matches(session):
+                self._adopt_resources(session, resource_factory)
                 return session
-            # 环境不匹配：销毁旧容器，走重建
-            logger.info("Kernel session %d 环境不匹配，销毁重建（期望 env=%s）",
+            logger.info("Kernel session %d 已停止或配置不匹配，销毁重建（期望 env=%s）",
                         record_id, environment_version_id)
             self.destroy(record_id)
 
@@ -380,29 +467,31 @@ class KernelManager:
                 capture_output=True, text=True,
             )
             if alive.stdout.strip():
-                if session.matches_environment(image_ref, environment_version_id):
+                if matches(session):
+                    self._adopt_resources(session, resource_factory)
                     self._sessions[record_id] = session
                     return session
                 # Redis 记录的环境与期望不一致（含旧格式无环境字段）：销毁重建
                 logger.info("Kernel session %d Redis 记录环境不匹配，销毁重建", record_id)
+                self._sessions[record_id] = session
                 self.destroy(record_id)
             else:
-                try:
-                    import redis
-                    r = redis.from_url(self.settings.redis_url)
-                    r.delete(f"kernel:session:{record_id}")
-                except Exception:
-                    logger.warning("Redis 删除旧 kernel session %d 失败", record_id, exc_info=True)
+                self._sessions[record_id] = session
+                self.destroy(record_id)
 
         return self.create_session(record_id, image_ref=image_ref,
                                    environment_version_id=environment_version_id,
-                                   lesson_storage_dir=lesson_storage_dir)
+                                   lesson_storage_dir=lesson_storage_dir, memory_mb=memory_mb,
+                                   cpus=cpus, resource_factory=resource_factory)
 
     def execute(self, record_id: int, code: str) -> dict:
         """通过 docker exec + trusted runner 在持久 ipykernel 中执行代码"""
+        from app.services.lab_node import require_interactive_node
+        require_interactive_node(self.settings)
         session = self._sessions.get(record_id)
         if not session or not session.is_alive:
             raise RuntimeError(f"Kernel session {record_id} 不可用")
+        self._touch_resources(record_id, session)
 
         # Redis 互斥锁（fail closed）
         import redis
@@ -445,7 +534,9 @@ class KernelManager:
                 self.destroy(record_id)
                 # 立即重建
                 try:
-                    self.create_session(record_id, old_storage)
+                    self.create_session(record_id, old_storage, image_ref=session.image_ref,
+                        environment_version_id=session.environment_version_id,
+                        memory_mb=session.memory_mb, cpus=session.cpus)
                 except Exception as rebuild_err:
                     raise RuntimeError(
                         f"代码执行超时（>{KERNEL_HARD_TIMEOUT}s），重建 kernel 失败: {rebuild_err}"
@@ -486,9 +577,12 @@ class KernelManager:
                 logger.debug("锁释放失败或已过期 record_id=%d", record_id, exc_info=True)
             session.last_active_at = time.time()
 
-    def interrupt(self, record_id: int):
-        session = self._sessions.get(record_id)
+    def interrupt(self, record_id: int, *, resource_factory=None):
+        session = self._sessions.get(record_id) or self._read_session_redis(record_id)
         if session and session.is_alive:
+            self._adopt_resources(session, resource_factory)
+            self._sessions[record_id] = session
+            self._touch_resources(record_id, session)
             subprocess.run(
                 ["docker", "exec", session.container_name, "kill", "-INT", "1"],
                 capture_output=True,
@@ -498,7 +592,14 @@ class KernelManager:
                 lesson_storage_dir: str = "",
                 *,
                 image_ref: str | None = None,
-                environment_version_id: int | None = None) -> KernelSession:
+                environment_version_id: int | None = None,
+                memory_mb: int | None = None, cpus: float | None = None,
+                resource_factory=None) -> KernelSession:
+        if resource_factory is not None:
+            self._resource_factories[record_id] = resource_factory
+        existing = self._sessions.get(record_id) or self._read_session_redis(record_id)
+        if existing:
+            self._sessions[record_id] = existing
         if not lesson_storage_dir:
             existing = self._sessions.get(record_id)
             if existing:
@@ -514,15 +615,24 @@ class KernelManager:
         self.destroy(record_id)
         return self.create_session(record_id, lesson_storage_dir,
                                    image_ref=image_ref,
-                                   environment_version_id=environment_version_id)
+                                   environment_version_id=environment_version_id,
+                                   memory_mb=memory_mb if memory_mb is not None else existing.memory_mb if existing else None,
+                                   cpus=cpus if cpus is not None else existing.cpus if existing else None,
+                                   resource_factory=resource_factory)
 
     def destroy(self, record_id: int):
-        session = self._sessions.pop(record_id, None)
-        if session:
-            subprocess.run(
-                ["docker", "rm", "-f", session.container_name],
-                capture_output=True,
-            )
+        session = self._sessions.get(record_id) or self._read_session_redis(record_id)
+        container_name = session.container_name if session else self._make_container_name(record_id)
+        self._remove_container(container_name)
+        factory = self._resource_factories.get(record_id)
+        token = (session.resource_token if session else None) or self._resource_tokens.get(record_id)
+        if factory is not None and token:
+            from app.services.lab_resources import release_resources
+            with factory() as db:
+                release_resources(db, f"kernel:{record_id}", token)
+                db.commit()
+        self._sessions.pop(record_id, None)
+        self._resource_tokens.pop(record_id, None)
         try:
             import redis
             r = redis.from_url(self.settings.redis_url)
@@ -535,7 +645,10 @@ class KernelManager:
         now = time.time()
         for rid, session in list(self._sessions.items()):
             if now - session.last_active_at > max_idle_seconds:
-                self.destroy(rid)
+                try:
+                    self.destroy(rid)
+                except RuntimeError:
+                    logger.warning("空闲内核 %s 暂时无法停止，保留其资源租约", rid, exc_info=True)
 
     def recover_from_docker(self):
         """从 Docker label dai.record_id 恢复所有未记录的 session，重建 Redis 元数据"""
@@ -612,10 +725,20 @@ class KernelManager:
                         conn_info = session.conn_info
 
                 if conn_info:
+                    extra_labels = {}
+                    for label in ("lab_resource_token", "memory_mb", "cpus", "course_dir"):
+                        extra = subprocess.run(["docker", "inspect", "-f",
+                            '{{index .Config.Labels "dai.' + label + '"}}', cid],
+                            capture_output=True, text=True)
+                        extra_labels[label] = extra.stdout.strip()
                     session = KernelSession(
                         record_id, container_name, conn_info,
                         environment_version_id=env_version_id,
                         image_ref=image_ref,
+                        resource_token=extra_labels["lab_resource_token"] or None,
+                        memory_mb=int(extra_labels["memory_mb"] or self.settings.judge_memory_limit_mb),
+                        cpus=float(extra_labels["cpus"] or self.settings.judge_cpu_limit),
+                        lesson_storage_dir=extra_labels["course_dir"],
                     )
                     self._sessions[record_id] = session
                     # 重建 Redis 元数据

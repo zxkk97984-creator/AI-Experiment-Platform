@@ -95,7 +95,7 @@ stop_pid() {
 }
 
 # ── 1. 根据 pidfile 停止 ──────────────────────────────────────
-for name in frontend api judge envbuilder accounts; do
+for name in frontend api judge envbuilder accounts lab; do
     pidfile="$RUN_DIR/$name.pid"
     if [ ! -f "$pidfile" ]; then
         log "[跳过] $name 无 PID 文件"

@@ -76,6 +76,7 @@ backend/storage/covers/
 # 应用文件日志（API/Worker 运行时生成，管理员日志页直读）
 backend/logs/
 /logs/
+/.runtime/
 
 # 本地启动脚本
 start.bat

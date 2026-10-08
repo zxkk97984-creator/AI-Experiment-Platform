@@ -42,13 +42,13 @@ def _make_work_dir(root: Path, prefix: str):
 
 
 def _settings_path_or_none(value):
-    """把设置项安全转成 Path：仅接受非空 str/os.PathLike，其余返回 None。
+    """把设置项安全转成 Path：仅接受非空 str/Path，其余返回 None。
 
     防再犯：os.fspath(MagicMock) 在 Python 3.12+ 返回 'MagicMock/mock.xxx/<id>'
     这类伪路径，误传 mock settings 会在仓库根下递归建垃圾目录；
     返回 None 让调用方回退到 TemporaryDirectory。
     """
-    if not isinstance(value, (str, os.PathLike)):
+    if not isinstance(value, (str, Path)):
         return None
     text = os.fspath(value)
     return Path(text) if text else None

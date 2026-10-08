@@ -178,6 +178,8 @@ def get_lesson_video_playback_url(
     if lesson.video_source != "upload" or not lesson.video_storage_key:
         raise api_error(404, "VIDEO_NOT_FOUND", "该课时没有本地视频")
 
+    if current_user.role == "student" and lesson.status != "published":
+        raise api_error(403, "LESSON_UNPUBLISHED", "课时尚未发布")
     if not can_access_course_content(lesson.chapter.course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限访问该课程的视频")
 
@@ -214,6 +216,8 @@ def stream_lesson_video(
                               session_version=user.session_version)
 
     # 重新执行课程访问权限检查（退课/移出白名单/课程不可见后立即失效）
+    if user.role == "student" and lesson.status != "published":
+        raise api_error(403, "LESSON_UNPUBLISHED", "课时尚未发布")
     if not can_access_course_content(lesson.chapter.course, user, db):
         raise api_error(403, "FORBIDDEN", "没有权限访问该课程的视频")
 

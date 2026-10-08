@@ -5,6 +5,7 @@
 - unpublish：published → draft 状态流转；draft 409；学生端列表不可见；再 publish 正常（legacy 无 rubric）
 """
 from conftest import auth_header, create_course_db, create_user, login
+from teaching_test_support import grant_course_students
 from app.models import Assignment, CodeGrade, JudgeQuestion, QuestionRubric, Submission
 
 
@@ -25,7 +26,7 @@ def _setup(client, db_session_factory):
     return teacher_token, student_token, course_id, student.id
 
 
-def _create_assignment(client, teacher_token, course_id, title="草稿作业", status="draft"):
+def _create_assignment(client, db_sf, teacher_token, course_id, title="草稿作业", status="draft"):
     """创建作业；status="published" 时走 draft → 加题 → /publish 合法链路"""
     resp = client.post(
         "/api/v1/assignments",
@@ -34,6 +35,7 @@ def _create_assignment(client, teacher_token, course_id, title="草稿作业", s
     )
     assert resp.status_code == 201, resp.text
     assignment_id = resp.json()["id"]
+    grant_course_students(db_sf, course_id, ["student"])
     if status == "published":
         _create_question(client, teacher_token, assignment_id)
         pub = client.post(
@@ -74,7 +76,7 @@ def _teacher_ids(client, teacher_token):
 
 def test_delete_draft_assignment_returns_204_and_removes_from_list(client, db_session_factory):
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id)
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id)
     question_id = _create_question(client, teacher_token, assignment_id)
 
     resp = client.delete(
@@ -93,7 +95,7 @@ def test_delete_draft_assignment_returns_204_and_removes_from_list(client, db_se
 
 def test_delete_assignment_forbidden_for_non_manager(client, db_session_factory):
     teacher_token, student_token, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id)
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id)
 
     # 学生（非教师/管理员/课程负责人）删除 → 403
     resp = client.delete(
@@ -106,7 +108,7 @@ def test_delete_assignment_forbidden_for_non_manager(client, db_session_factory)
 
 def test_delete_published_assignment_conflict(client, db_session_factory):
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="published")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="published")
 
     resp = client.delete(
         f"/api/v1/assignments/{assignment_id}", headers=auth_header(teacher_token)
@@ -120,7 +122,7 @@ def test_delete_draft_with_submissions_conflict(client, db_session_factory):
     """已发布→学生提交→取消发布回草稿→删除被拒（有提交记录防边界），且拒绝时数据零删除"""
     teacher_token, student_token, course_id, student_id = _setup(client, db_session_factory)
     # 评分事实不可变：题必须在发布前建好（发布后不再能新增题）
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="draft")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="draft")
     question_id = _create_question(client, teacher_token, assignment_id)
     publish = client.post(
         f"/api/v1/assignments/{assignment_id}/publish", headers=auth_header(teacher_token)
@@ -178,7 +180,7 @@ def test_delete_draft_cascades_children(client, db_session_factory):
     submissions / code_grades 的级联删除是门禁之外的防御路径（防竞态 IntegrityError）。
     """
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id)
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id)
     question_id = _create_question(client, teacher_token, assignment_id)
 
     # 直插关联数据（测试库无 AI 密钥，不走评分链路）：locked rubric
@@ -222,7 +224,7 @@ def test_delete_missing_assignment_404(client, db_session_factory):
 
 def test_unpublish_published_to_draft(client, db_session_factory):
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="published")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="published")
 
     resp = client.post(
         f"/api/v1/assignments/{assignment_id}/unpublish", headers=auth_header(teacher_token)
@@ -237,7 +239,7 @@ def test_unpublish_published_to_draft(client, db_session_factory):
 
 def test_unpublish_draft_conflict(client, db_session_factory):
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="draft")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="draft")
 
     resp = client.post(
         f"/api/v1/assignments/{assignment_id}/unpublish", headers=auth_header(teacher_token)
@@ -248,7 +250,7 @@ def test_unpublish_draft_conflict(client, db_session_factory):
 
 def test_unpublish_forbidden_for_non_manager(client, db_session_factory):
     teacher_token, student_token, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="published")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="published")
 
     resp = client.post(
         f"/api/v1/assignments/{assignment_id}/unpublish", headers=auth_header(student_token)
@@ -261,8 +263,8 @@ def test_unpublish_forbidden_for_non_manager(client, db_session_factory):
 def test_unpublish_hides_from_student_list(client, db_session_factory):
     """学生端列表只显示 published：取消发布后立即不可见，对照组作业仍可见"""
     teacher_token, student_token, course_id, _ = _setup(client, db_session_factory)
-    target_id = _create_assignment(client, teacher_token, course_id, title="目标作业", status="published")
-    keep_id = _create_assignment(client, teacher_token, course_id, title="保留作业", status="published")
+    target_id = _create_assignment(client, db_session_factory, teacher_token, course_id, title="目标作业", status="published")
+    keep_id = _create_assignment(client, db_session_factory, teacher_token, course_id, title="保留作业", status="published")
 
     def student_ids():
         resp = client.get("/api/v1/assignments", headers=auth_header(student_token))
@@ -279,7 +281,7 @@ def test_unpublish_hides_from_student_list(client, db_session_factory):
 def test_unpublish_then_republish_legacy(client, db_session_factory):
     """取消发布后可重新发布（legacy 无 rubric 题目走现有发布门禁直接通过）"""
     teacher_token, _, course_id, _ = _setup(client, db_session_factory)
-    assignment_id = _create_assignment(client, teacher_token, course_id, status="published")
+    assignment_id = _create_assignment(client, db_session_factory, teacher_token, course_id, status="published")
 
     client.post(f"/api/v1/assignments/{assignment_id}/unpublish", headers=auth_header(teacher_token))
     resp = client.post(

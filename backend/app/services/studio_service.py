@@ -883,6 +883,9 @@ def publish_template(
     settings: Settings,
     template_id: int,
     user: User,
+    *,
+    activate: bool = True,
+    commit: bool = True,
 ) -> NotebookTemplateVersion:
     template = db.scalar(
         select(NotebookTemplate)
@@ -892,6 +895,13 @@ def publish_template(
     if not template:
         raise api_error(404, "TEMPLATE_NOT_FOUND", "Notebook 模板不存在")
     require_manager(template, user)
+    if activate:
+        from app.models import LabAssessment
+        active_lab = db.scalar(select(LabAssessment.id).join(
+            NotebookTemplateVersion, NotebookTemplateVersion.id == LabAssessment.template_version_id
+        ).where(NotebookTemplateVersion.template_id == template.id, LabAssessment.status == "published").limit(1))
+        if active_lab:
+            raise api_error(409, "LAB_ASSESSMENT_PUBLISH_REQUIRED", "该实验已启用自动评测，请通过实验配置试评后发布新版本")
     # The draft already owns an exact environment binding.  It may be a
     # historical version after a profile publication/rollback, so publishing
     # the notebook checks image availability without requiring the version to
@@ -899,7 +909,7 @@ def publish_template(
     # actual preview/runtime failures keep the 503 runnable gate.
     from app.services.environment_service import require_publishable_version
 
-    if template.draft_environment_version_id is not None:
+    if activate and template.draft_environment_version_id is not None:
         require_publishable_version(db, template.draft_environment_version_id)
     latest = db.scalar(
         select(func.max(NotebookTemplateVersion.version_number)).where(
@@ -938,10 +948,12 @@ def publish_template(
             created_by_id=user.id,
         )
         version.assets_dir = asset_plan.prefix
-        template.current_version_id = version.id
-        template.status = "published"
-        db.commit()
-        db.refresh(version)
+        if activate:
+            template.current_version_id = version.id
+            template.status = "published"
+        if commit:
+            db.commit()
+            db.refresh(version)
         return version
     except IntegrityError:
         db.rollback()
@@ -1085,8 +1097,9 @@ def preview_run(template: NotebookTemplate, user: User, cell_id: str, manager,
             raise api_error(503, "ENVIRONMENT_IMAGE_MISSING", "运行环境暂不可用，请稍后重试")
     session_id = preview_session_key(template.id, user.id)
     try:
-        manager.get_or_create_session(session_id, image_ref=image_ref,
-                                      environment_version_id=env_id)
+        from app.services.lab_workspace import ensure_preview_kernel
+        ensure_preview_kernel(manager, template, session_id, db, image_ref=image_ref,
+                              environment_version_id=env_id)
     except Exception as exc:
         raise api_error(500, "KERNEL_ERROR", f"预览 Kernel 创建失败：{exc}")
 

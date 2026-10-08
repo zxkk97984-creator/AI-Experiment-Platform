@@ -168,6 +168,23 @@ services:
       DAI_ENV_BUILDER_HEARTBEAT_TTL_SECONDS: ${DAI_ENV_BUILDER_HEARTBEAT_TTL_SECONDS:-30}
       DAI_ENV_BUILDER_HEARTBEAT_INTERVAL_SECONDS: ${DAI_ENV_BUILDER_HEARTBEAT_INTERVAL_SECONDS:-10}
       DAI_STUDIO_STORAGE_DIR: /app/storage/studio
+      DAI_LAB_ENABLED: ${DAI_LAB_ENABLED:-true}
+      # General API/worker must know the reserved daemon; efficiency is opt-in.
+      DAI_LAB_WORKER_MODE: ${DAI_LAB_WORKER_MODE:-general}
+      DAI_LAB_WORKER_NODE_ID: ${DAI_LAB_WORKER_NODE_ID:-}
+      DAI_LAB_BENCHMARK_NODE_ID: ${DAI_LAB_BENCHMARK_NODE_ID:-}
+      DAI_LAB_STORAGE_DIR: /app/storage/lab
+      DAI_LAB_TRAINING_CONCURRENCY: ${DAI_LAB_TRAINING_CONCURRENCY:-1}
+      DAI_LAB_TOTAL_CPUS: ${DAI_LAB_TOTAL_CPUS:-4}
+      DAI_LAB_TOTAL_MEMORY_MB: ${DAI_LAB_TOTAL_MEMORY_MB:-8192}
+      DAI_LAB_INTERACTIVE_RESERVED_MEMORY_MB: ${DAI_LAB_INTERACTIVE_RESERVED_MEMORY_MB:-2048}
+      DAI_LAB_MAX_KERNELS: ${DAI_LAB_MAX_KERNELS:-20}
+      DAI_LAB_GPU_ENABLED: ${DAI_LAB_GPU_ENABLED:-false}
+      DAI_LAB_GPU_DEVICES: ${DAI_LAB_GPU_DEVICES:-}
+      DAI_LAB_UPLOAD_MAX_BYTES: ${DAI_LAB_UPLOAD_MAX_BYTES:-524288000}
+      DAI_LAB_EXPANDED_MAX_BYTES: ${DAI_LAB_EXPANDED_MAX_BYTES:-2147483648}
+      DAI_LAB_ARTIFACT_QUOTA_BYTES: ${DAI_LAB_ARTIFACT_QUOTA_BYTES:-2147483648}
+      DAI_LAB_MIN_FREE_DISK_MB: ${DAI_LAB_MIN_FREE_DISK_MB:-2048}
       DAI_JUDGE_WORK_DIR: /judge-work
       # 宿主机侧判题工作目录绝对路径——Worker 将此路径传给 Docker daemon 做 bind mount
       # 开发环境无需设置（自动回退到 DAI_JUDGE_WORK_DIR）
@@ -179,6 +196,10 @@ services:
       # ── 课程封面 ──
       DAI_COVER_STORAGE_DIR: /app/storage/covers
       DAI_COVER_MAX_UPLOAD_BYTES: ${DAI_COVER_MAX_UPLOAD_BYTES:-5242880}
+      DAI_MATERIAL_STORAGE_DIR: /app/storage/materials
+      DAI_MATERIAL_MAX_UPLOAD_BYTES: ${DAI_MATERIAL_MAX_UPLOAD_BYTES:-104857600}
+      DAI_MATERIAL_LARGE_MAX_UPLOAD_BYTES: ${DAI_MATERIAL_LARGE_MAX_UPLOAD_BYTES:-524288000}
+      DAI_MATERIAL_URL_TTL_SECONDS: ${DAI_MATERIAL_URL_TTL_SECONDS:-900}
       # ── AI 智能代码评分（TASK-020：审批前默认关闭，未审批环境无法意外启用） ──
       DAI_AI_ENABLED: ${DAI_AI_ENABLED:-false}
       DAI_AI_BASE_URL: ${DAI_AI_BASE_URL:-https://aihub.codingpython.cn}
@@ -206,8 +227,43 @@ services:
       - "${DAI_JUDGE_HOST_WORK_DIR:?DAI_JUDGE_HOST_WORK_DIR 必须设置}:/judge-work"
       - ./backend/alembic/versions:/app/alembic/versions:ro
       - studio_data:/app/storage/studio
+      - lab_data:/app/storage/lab
       - video_data:/app/storage/videos
       - cover_data:/app/storage/covers
+      - material_data:/app/storage/materials
+      - app_logs:/app/logs
+
+  lab-worker:
+    build: *backend-build
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.lab_worker"]
+    logging: *api_logging
+    environment:
+      <<: *api_environment
+      DAI_ENVIRONMENT_EDITOR_V2_ENABLED: "false"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp:size=3g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 4g
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${DAI_JUDGE_HOST_WORK_DIR:?DAI_JUDGE_HOST_WORK_DIR 必须设置}:/judge-work"
+      - studio_data:/app/storage/studio
+      - lab_data:/app/storage/lab
       - app_logs:/app/logs
 
   account-worker:
@@ -433,12 +489,16 @@ services:
 volumes:
   mysql_data:
   studio_data:
+  # Immutable lab datasets and model artifacts; include in backups.
+  lab_data:
   # Redis AOF 持久卷——重启/重建后认证状态不丢失，备份任务必须包含此卷
   redis_data:
   # 教师上传视频持久卷——容器重建后视频仍存在，备份任务必须包含此卷
   video_data:
   # 课程封面持久卷——必须纳入生产备份
   cover_data:
+  # Private course materials: include this volume in backup/restore verification.
+  material_data:
   # 应用文件日志（api/worker 共享，管理员日志页读取）
   app_logs:
 

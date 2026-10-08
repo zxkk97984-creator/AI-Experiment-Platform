@@ -13,6 +13,7 @@ const props = defineProps({
   executionCount: { type: Number, default: null },
   disabled: { type: Boolean, default: false },
   isExecuting: { type: Boolean, default: false },
+  checkResult: { type: Object, default: null },
   /** 编辑只读：CodeMirror/textarea 不可编辑，不 emit update:source。运行仍可执行原源码 */
   readonly: { type: Boolean, default: false },
 })
@@ -246,6 +247,7 @@ watch(() => props.readonly, () => {
     </div>
 
     <!-- 输出区 -->
+    <p v-if="checkResult" class="cell-check-result" :class="checkResult.state" role="status">{{ checkResult.message }}<small> · 练习反馈，正式成绩以完整提交重放为准</small></p>
     <div v-if="getOutputs().length > 0" class="output-area">
       <div v-for="(output, i) in getOutputs()" :key="i" class="output-item">
         <pre
@@ -267,6 +269,10 @@ watch(() => props.readonly, () => {
 </template>
 
 <style scoped>
+.cell-check-result { padding: 10px 14px; margin: 0; color: var(--muted); background: var(--surface-sunken); font-size: 13px; }
+.cell-check-result.passed { color: var(--success); background: var(--success-bg); }
+.cell-check-result.failed { color: var(--danger); background: var(--danger-bg); }
+.cell-check-result small { font-size: 11px; }
 .code-cell {
   background: var(--surface);
   border: 1px solid var(--border);

@@ -6,6 +6,8 @@
 """
 
 import pytest
+from io import BytesIO
+from openpyxl import load_workbook
 
 from app import cli
 from conftest import auth_header, create_user, login
@@ -146,7 +148,13 @@ def test_admin_reset_requires_admin_password_but_not_student_password(client, db
         json={"current_password": RIGHT, "reason": "Student requested reset"},
     )
     assert resp.status_code == 200, resp.text
-    token, _ = login(client, "rst_stu", password="tzcaicode")
+    deliveries = client.get(f'{API}/admin/credential-deliveries', headers=auth_header(admin_tok), params={'user_id': uid}).json()['items']
+    exported = client.post(f"{API}/admin/credential-deliveries/{deliveries[0]['id']}/export", headers=auth_header(admin_tok), json={'current_password': RIGHT})
+    assert exported.status_code == 200
+    book = load_workbook(BytesIO(exported.content), read_only=True)
+    temporary_password = list(book.active.iter_rows(min_row=2, values_only=True))[0][3]
+    book.close()
+    token, _ = login(client, "rst_stu", password=temporary_password)
     assert client.get(f"{API}/auth/me", headers=auth_header(token)).json()["must_change_password"] is True
 
 

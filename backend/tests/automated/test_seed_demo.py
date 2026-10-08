@@ -82,6 +82,42 @@ def _counts(db_session_factory):
         }
 
 
+def _semantic_outcomes(db_session_factory):
+    """Compare demo facts by names/order, independent of retained SQL IDs."""
+    import json
+    from app.models import (Assignment, CodeGrade, Exam, ExamAnswer, ExamQuestion,
+                            ExamSubmission, JudgeQuestion, Submission, User)
+    def rows(db, query):
+        return sorted(json.dumps(list(row), ensure_ascii=False, sort_keys=True, default=str)
+                      for row in db.execute(query))
+    grade_values = [CodeGrade.status, CodeGrade.functional_score, CodeGrade.algorithm_score,
+                    CodeGrade.robustness_score, CodeGrade.quality_score, CodeGrade.final_score_100,
+                    CodeGrade.scaled_score, CodeGrade.needs_teacher_review, CodeGrade.finished_at]
+    with db_session_factory() as db:
+        return {
+            'exam_submissions': rows(db, select(Exam.title, User.username, ExamSubmission.status,
+                ExamSubmission.score, ExamSubmission.submission_reason, ExamSubmission.started_at,
+                ExamSubmission.submitted_at).join(ExamSubmission, ExamSubmission.exam_id == Exam.id)
+                .join(User, User.id == ExamSubmission.student_id)),
+            'exam_answers': rows(db, select(Exam.title, User.username, ExamQuestion.order_index,
+                ExamQuestion.question_type, ExamAnswer.selected_options, ExamAnswer.text_answers,
+                ExamAnswer.code_answer, ExamAnswer.score, ExamAnswer.grading_status)
+                .select_from(ExamAnswer).join(ExamSubmission, ExamSubmission.id == ExamAnswer.submission_id)
+                .join(Exam, Exam.id == ExamSubmission.exam_id).join(User, User.id == ExamSubmission.student_id)
+                .join(ExamQuestion, ExamQuestion.id == ExamAnswer.question_id)),
+            'assignment_ai': rows(db, select(Assignment.title, JudgeQuestion.title, User.username,
+                Submission.attempt_count, *grade_values).select_from(CodeGrade)
+                .join(Submission, Submission.id == CodeGrade.submission_id)
+                .join(User, User.id == Submission.student_id).join(JudgeQuestion, JudgeQuestion.id == Submission.question_id)
+                .join(Assignment, Assignment.id == JudgeQuestion.assignment_id)),
+            'exam_ai': rows(db, select(Exam.title, ExamQuestion.order_index, User.username, *grade_values)
+                .select_from(CodeGrade).join(ExamAnswer, ExamAnswer.id == CodeGrade.exam_answer_id)
+                .join(ExamQuestion, ExamQuestion.id == ExamAnswer.question_id)
+                .join(ExamSubmission, ExamSubmission.id == ExamAnswer.submission_id)
+                .join(Exam, Exam.id == ExamSubmission.exam_id).join(User, User.id == ExamSubmission.student_id)),
+        }
+
+
 def test_seed_demo_runs_and_is_idempotent(db_session_factory):
     _seed_basic_env(db_session_factory)
     first = _run_seed(db_session_factory)
@@ -281,6 +317,7 @@ def test_seed_demo_reset_then_reseed_matches(db_session_factory):
     _seed_basic_env(db_session_factory)
     first = _run_seed(db_session_factory)
     c_first = _counts(db_session_factory)
+    outcomes_first = _semantic_outcomes(db_session_factory)
 
     # 模拟 API/教师操作产生的运行态与审计数据：通知、已读、偏好、改分
     from app.models import CodeGrade, GradeOverride, Notification, NotificationRead, User, UserPreference
@@ -330,6 +367,7 @@ def test_seed_demo_reset_then_reseed_matches(db_session_factory):
     second = _run_seed(db_session_factory)
     c_second = _counts(db_session_factory)
     assert c_first == c_second, f"reset 后重播计数不一致: {c_first} vs {c_second}"
+    assert outcomes_first == _semantic_outcomes(db_session_factory), '重播后演示答案、成绩或复核状态变化'
 
 
 def test_reset_demo_rejects_unknown_mark_table(db_session_factory):

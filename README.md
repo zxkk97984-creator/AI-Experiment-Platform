@@ -4,6 +4,8 @@
 
 当前仓库已标记为 `V0.1`。核心代码、数据库迁移、自动化测试和生产 Compose 已具备；真实部署机上的 Docker daemon、Registry、镜像推送/回拉和生产数据恢复演练仍需按部署环境完成，不能用受限开发沙箱替代。发布证据边界见 [`docs/production-evidence-checklist.md`](docs/production-evidence-checklist.md)。
 
+本轮新增单校教学功能：管理员分配授课实例、共享课程资料与章节活动、独立班级任务、逐 Cell 检查与同班排行榜、两级课程成绩簿，以及独立16位随机临时密码和限时凭据交付。旧课程绑定需管理员核对，闭学期和归档实例只读，历史成绩不自动重算。操作、迁移与试点步骤见 [`docs/school-teaching-upgrade.md`](docs/school-teaching-upgrade.md)，验证边界见 [`docs/school-release-verification.md`](docs/school-release-verification.md)。
+
 ## 项目定位
 
 平台解决教学过程中“课程内容、在线实验、自动判题、考试评分和教师复核”分散的问题：
@@ -161,6 +163,8 @@ npm run build
 判题时，再按下文构建 Judge/Kernel 和 basic 环境镜像。
 
 账号、Excel 导入、批量重置、独立账号 Worker 和迁移说明见 [账号与名单管理](docs/account-management.md)。
+
+实验数据、后台训练、模型评测与 AI 评分的使用和部署见 [实验教学与自动评测](docs/lab-learning.md)。
 
 ## 本地开发
 

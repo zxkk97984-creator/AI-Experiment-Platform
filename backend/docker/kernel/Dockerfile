@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir \
     "matplotlib==3.9.2"
 
 # kernel runner（容器内连接 ipykernel 的可信脚本）
-COPY kernel_runner.py /.dai/kernel_runner.py
+COPY kernel_runner.py /opt/dai/kernel_runner.py
+RUN mkdir -p /.dai && ln -s /opt/dai/kernel_runner.py /.dai/kernel_runner.py
 
 # 创建非 root 用户用于执行
 RUN useradd --create-home --shell /bin/bash student

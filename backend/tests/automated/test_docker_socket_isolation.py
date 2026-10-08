@@ -10,8 +10,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPOSE = REPO_ROOT / "docker-compose.prod.yml"
 
-SOCKET_HOLDERS = {"api", "worker", "environment-builder"}
-NON_HOLDERS = {"frontend", "mysql", "redis", "migrate", "ai-worker"}
+SOCKET_HOLDERS = {"api", "worker", "environment-builder", "lab-worker"}
+NON_HOLDERS = {"frontend", "mysql", "redis", "migrate", "ai-worker", "account-worker"}
 
 
 def _service_blocks() -> dict[str, str]:

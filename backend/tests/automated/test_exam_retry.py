@@ -8,7 +8,7 @@ from app.models import (
     QuestionRubric,
 )
 from app.services.exam_service import retry_exam_submission
-from conftest import auth_header, create_user, login
+from conftest import grant_teaching_fixture, auth_header, create_user, login
 
 
 def _seed_review_required_submission(db_session_factory, *, q1_mode="legacy", q2_mode="legacy",
@@ -50,6 +50,7 @@ def _seed_review_required_submission(db_session_factory, *, q1_mode="legacy", q2
                                  model_name="m", locked_at=datetime.now(timezone.utc))
             db.add(rub); db.flush()
             rubric_id = rub.id
+        grant_teaching_fixture(db, course, [student.id])
         db.commit()
         return {"submission_id": sub.id, "exam_id": exam.id, "course_id": course.id,
                 "ans1_id": ans1.id, "ans2_id": ans2.id, "q1_id": q1.id, "q2_id": q2.id,
@@ -351,6 +352,10 @@ class TestRetryApi:
         with db_session_factory() as db:
             course = db.get(Course, ctx["course_id"])
             course.teacher_id = teacher.id
+            # Content ownership does not transfer teaching authority. The test
+            # administrator assigns the actual existing offering explicitly.
+            from app.models.teaching import CourseOffering
+            db.query(CourseOffering).filter_by(course_id=course.id).one().teacher_id = teacher.id
             q2 = db.get(ExamQuestion, ctx["q2_id"])
             q2.hidden_tests = "assert True"
             db.commit()
@@ -373,6 +378,8 @@ class TestRetryApi:
         with db_session_factory() as db:
             course = db.get(Course, ctx["course_id"])
             course.teacher_id = teacher.id
+            from app.models.teaching import CourseOffering
+            db.query(CourseOffering).filter_by(course_id=course.id).one().teacher_id = teacher.id
             for qid, aid, opts in ((ctx["q1_id"], ctx["ans1_id"], ["A"]),
                                    (ctx["q2_id"], ctx["ans2_id"], ["B"])):
                 q = db.get(ExamQuestion, qid)

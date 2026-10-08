@@ -399,11 +399,13 @@ class LessonProgress(TimestampMixin, Base):
     """
     __tablename__ = "lesson_progress"
     __table_args__ = (
-        UniqueConstraint("lesson_id", "student_id", name="uq_lesson_progress_lesson_student"),
+        UniqueConstraint("scope_key", "lesson_id", "student_id", name="uq_lesson_progress_lesson_student"),
         Index("ix_lesson_progress_student_status", "student_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    offering_id: Mapped[int | None] = mapped_column(ForeignKey("course_offerings.id"), nullable=True, index=True)
+    scope_key: Mapped[str] = mapped_column(String(80), nullable=False, default="legacy", server_default="legacy")
     lesson_id: Mapped[int] = mapped_column(
         ForeignKey("lessons.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -447,6 +449,8 @@ class Assignment(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    offering_id: Mapped[int | None] = mapped_column(ForeignKey("course_offerings.id"), nullable=True, index=True)
+    source_task_id: Mapped[int | None] = mapped_column(ForeignKey("assignments.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
@@ -621,6 +625,8 @@ class Exam(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    offering_id: Mapped[int | None] = mapped_column(ForeignKey("course_offerings.id"), nullable=True, index=True)
+    source_task_id: Mapped[int | None] = mapped_column(ForeignKey("exams.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
@@ -1017,8 +1023,8 @@ class ExperimentRecord(TimestampMixin, Base):
     """统一的实验/Notebook 学生记录。lesson_id 和 module_id 二选一。"""
     __tablename__ = "experiment_records"
     __table_args__ = (
-        UniqueConstraint("lesson_id", "student_id", name="uq_record_lesson_student"),
-        UniqueConstraint("module_id", "student_id", name="uq_record_module_student"),
+        UniqueConstraint("scope_key", "lesson_id", "student_id", name="uq_record_lesson_student"),
+        UniqueConstraint("scope_key", "module_id", "student_id", name="uq_record_module_student"),
         CheckConstraint(
             "(lesson_id IS NULL) != (module_id IS NULL)",
             name="ck_record_entry_type",
@@ -1026,6 +1032,8 @@ class ExperimentRecord(TimestampMixin, Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    offering_id: Mapped[int | None] = mapped_column(ForeignKey("course_offerings.id"), nullable=True, index=True)
+    scope_key: Mapped[str] = mapped_column(String(80), nullable=False, default="legacy", server_default="legacy")
     lesson_id: Mapped[int | None] = mapped_column(ForeignKey("lessons.id"), nullable=True, index=True)
     module_id: Mapped[int | None] = mapped_column(ForeignKey("experiment_modules.id"), nullable=True, index=True)
     template_version_id: Mapped[int] = mapped_column(ForeignKey("notebook_template_versions.id"))
@@ -1186,6 +1194,7 @@ class Announcement(TimestampMixin, Base):
     course_id: Mapped[int | None] = mapped_column(
         ForeignKey("courses.id"), nullable=True, index=True
     )
+    offering_id: Mapped[int | None] = mapped_column(ForeignKey("course_offerings.id"), nullable=True, index=True)
     author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     published_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -1658,3 +1667,15 @@ class AuditEvent(Base):
     reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     changes: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+# Additive lab domain, imported after legacy model definitions to avoid cycles.
+from .lab import (LabAssessment, LabRecord, LabRun, LabSubmission, LabGradeRevision,
+                  LabRegradeBatch, LabResourceLease)  # noqa: E402,F401
+from .lab_data import LabDatasetVersion, LabArtifact, LabFile  # noqa: E402,F401
+
+from .teaching import CourseOffering, OfferingEnrollment, OfferingExperiment  # noqa: E402,F401
+
+from .credential_delivery import CredentialDelivery  # noqa: E402,F401
+from .course_material import CourseMaterial, ChapterActivityLink  # noqa: E402,F401
+
+from .gradebook import Gradebook, GradebookCategory, GradebookColumn, GradebookEntry, GradebookAdjustment, GradebookSnapshot  # noqa: E402,F401

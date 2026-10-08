@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import CodeCell from './CodeCell.vue'
 import MarkdownCell from './MarkdownCell.vue'
+import LabAssessmentPanel from '../labs/LabAssessmentPanel.vue'
 import AppIcon from '../ui/AppIcon.vue'
 import ConfirmDialog from '../ui/ConfirmDialog.vue'
 import EnvironmentProfilePicker from '../common/EnvironmentProfilePicker.vue'
@@ -22,6 +23,17 @@ const app = useAppStore()
 const loading = ref(true)
 const history = ref([])
 const showHistory = ref(false)
+const showLabPanel = ref(false)
+const labPanelOpened = ref(false)
+watch(showLabPanel, (show) => { if (show) labPanelOpened.value = true })
+const labDirty = ref(false)
+const labConfigured = ref(false)
+const focusLabPublishing = ref(0)
+const hasUnsavedChanges = computed(() => store.dirty || labDirty.value)
+const templateSignature = computed(() => JSON.stringify({
+  cells: store.sortedCells.map(({ id, type, source, order, student_editable, source_hidden }) => ({ id, type, source, order, student_editable, source_hidden })),
+  environment: store.environmentVersionId, policy: store.importPolicyMode, imports: store.allowedImports,
+}))
 const editingMarkdownCell = ref(null)
 const markdownEditSource = ref('')
 
@@ -116,7 +128,13 @@ function applyEnvSettings() {
 }
 
 // 发布前确认（计划 11.2：显示本次将发布的环境版本与包摘要）
+function showLabPublishing() {
+  showLabPanel.value = true
+  focusLabPublishing.value += 1
+}
+
 function confirmPublish() {
+  if (labConfigured.value) { showLabPublishing(); return }
   showPublishDialog.value = true
 }
 
@@ -125,6 +143,11 @@ async function doPublish() {
   try {
     const version = await store.publish()
     if (version) showPublishDialog.value = false
+    if (store.error?.code === 'LAB_ASSESSMENT_PUBLISH_REQUIRED') {
+      showPublishDialog.value = false
+      labConfigured.value = true
+      showLabPublishing()
+    }
   } finally {
     publishBusy.value = false
   }
@@ -137,7 +160,7 @@ let leaveResolver = null
 const visibleCells = computed(() => store.studentPreview ? store.sortedCells.filter(c => !c.source_hidden) : store.sortedCells)
 
 onBeforeRouteLeave((_to, _from) => {
-  if (confirmedLeave || !(store.dirty && !store.conflict)) {
+  if (confirmedLeave || !((hasUnsavedChanges.value) && !store.conflict)) {
     store.destroy()
     return true
   }
@@ -181,7 +204,7 @@ function onCancelLeave() {
 // 注意：router.back() 走原生历史导航会触发 beforeunload ——
 // 已确认离开（confirmedLeave）后必须放行，避免自定义弹窗确认后再次弹浏览器对话框
 function onBeforeUnload(e) {
-  if (!confirmedLeave && store.dirty && !store.conflict) e.preventDefault()
+  if (!confirmedLeave && hasUnsavedChanges.value && !store.conflict) e.preventDefault()
 }
 onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
 onBeforeUnmount(() => window.removeEventListener('beforeunload', onBeforeUnload))
@@ -191,7 +214,7 @@ function goBack() {
     router.push(props.backTo)
     return
   }
-  if (store.dirty && !store.conflict) {
+  if (hasUnsavedChanges.value && !store.conflict) {
     pendingBack = true
     showLeaveDialog.value = true
     return
@@ -459,7 +482,10 @@ async function init() {
 }
 init()
 
-async function handleSave() { await store.saveDraft() }
+async function handleSave() {
+  if (editingMarkdownCell.value) handleMarkdownEdit(editingMarkdownCell.value)
+  return await store.saveDraft()
+}
 
 function onFileChange(e) {
   const f = e.target.files[0]
@@ -481,12 +507,18 @@ async function loadHistory() {
   showHistory.value = true
 }
 
+function replaceWithStarter(cells) {
+  store.cells = cells.map((cell, index) => ({ ...cell, order: index }))
+  store.dirty = true
+  store.saved = false
+}
+
 function handleRun(cellId) { store.previewRun(cellId) }
 function handleUpdateSource(cellId, source) { store.updateCellSource(cellId, source) }
 function handleMarkdownEdit(cellId) {
   if (editingMarkdownCell.value === cellId) {
     const cell = store.cells.find(c => c.id === cellId)
-    if (cell) cell.source = markdownEditSource.value
+    if (cell) store.updateCellSource(cell.id, markdownEditSource.value)
     editingMarkdownCell.value = null
   } else {
     const cell = store.cells.find(c => c.id === cellId)
@@ -509,18 +541,21 @@ function handleMarkdownEdit(cellId) {
         <span class="revision-badge">rev {{ store.draftRevision }}</span>
       </div>
       <div class="toolbar-right">
+        <button v-if="store.lessonId || store.moduleId" class="tb-btn" :class="{ active: showLabPanel }" :aria-expanded="showLabPanel" @click="showLabPanel = !showLabPanel">实验评测{{ labDirty ? ' · 未保存' : '' }}</button>
         <button class="tb-btn" :class="{ active: showEnvPanel }" @click="showEnvPanel ? (showEnvPanel = false) : openEnvPanel()" title="运行环境与导入规则">
           环境{{ selectedEnv ? `：${selectedEnv.display_name} v${selectedEnv.version_number}` : '' }}
         </button>
         <span class="save-state" :class="{ dirty: store.dirty, conflict: store.conflict }">{{ store.conflict ? '冲突' : store.dirty ? '未保存' : store.saving ? '保存中…' : '已保存' }}</span>
         <button class="tb-btn" @click="handleSave" :disabled="store.saving || store.conflict">保存</button>
-        <button class="tb-btn tb-btn-accent" @click="confirmPublish" :disabled="store.saving">发布</button>
+        <button class="tb-btn tb-btn-accent" @click="confirmPublish" :disabled="store.saving">{{ labConfigured ? '实验发布' : '发布' }}</button>
         <label class="tb-btn">导入<input type="file" accept=".ipynb,.zip" class="hidden-input" @change="onFileChange" /></label>
         <button class="tb-btn" @click="store.exportDraft()">导出</button>
         <button class="tb-btn" @click="loadHistory">历史</button>
         <button class="tb-btn" :class="{ active: store.studentPreview }" @click="store.studentPreview = !store.studentPreview">预览</button>
       </div>
     </div>
+
+    <LabAssessmentPanel v-if="labPanelOpened && (store.lessonId || store.moduleId)" v-show="showLabPanel" :kind="store.lessonId ? 'lesson' : 'module'" :entry-id="store.lessonId || store.moduleId" :environment-id="store.environmentVersionId" :cells="store.sortedCells" :template-dirty="store.dirty" :template-signature="templateSignature" :focus-publishing="focusLabPublishing" :save-template="handleSave" @dirty="labDirty = $event" @configured="labConfigured = $event" @environment="store.setEnvironment($event, store.importPolicyMode, [...store.allowedImports])" @import-starter="replaceWithStarter" />
 
     <!-- ── 环境设置面板（Phase 4：教师选择，纳入 dirty 随草稿保存） ── -->
     <div v-if="showEnvPanel" class="env-panel">
@@ -577,7 +612,7 @@ function handleMarkdownEdit(cellId) {
         </button>
         <span class="cell-type-badge" :class="cell.type">{{ cell.type === 'code' ? 'Python' : 'MD' }}</span>
         <div class="cell-actions">
-          <button v-if="cell.type === 'code'" class="cell-action-btn" :class="{ on: cell.student_editable !== false }" @click="store.setCellEditable(cell.id, cell.student_editable === false)">编辑</button>
+          <button class="cell-action-btn" :class="{ on: cell.student_editable === true }" :aria-pressed="cell.student_editable === true" @click="store.setCellEditable(cell.id, cell.student_editable !== true)">{{ cell.type === 'markdown' ? '学生填写' : '编辑' }}</button>
           <button v-if="cell.type === 'code'" class="cell-action-btn" :class="{ on: cell.source_hidden }" @click="store.setCellHidden(cell.id, !cell.source_hidden)">隐藏</button>
           <button class="cell-action-btn" @click="store.addCell('markdown', cell.id)">+讲解</button>
           <button class="cell-action-btn" @click="store.addCell('code', cell.id)">+代码</button>
@@ -589,7 +624,7 @@ function handleMarkdownEdit(cellId) {
       </div>
       <template v-if="cell.type === 'markdown'">
         <div v-if="editingMarkdownCell === cell.id && !store.studentPreview" class="md-editor-wrap">
-          <textarea v-model="markdownEditSource" class="md-textarea" placeholder="Markdown 内容…" rows="6"></textarea>
+          <textarea v-model="markdownEditSource" @input="store.updateCellSource(cell.id, $event.target.value)" class="md-textarea" placeholder="Markdown 内容…" rows="6"></textarea>
           <div class="md-editor-bar"><button class="tb-btn tb-btn-sm" @click="handleMarkdownEdit(cell.id)">完成</button></div>
         </div>
         <div v-else class="md-show-wrap" @dblclick="!store.studentPreview && handleMarkdownEdit(cell.id)">

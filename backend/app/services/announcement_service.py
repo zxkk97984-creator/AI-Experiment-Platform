@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import case, false as sa_false, func, or_, select
+from sqlalchemy import and_, case, false as sa_false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Announcement, AnnouncementRead, Course, CourseEnrollment, User
@@ -10,27 +10,19 @@ from app.schemas.announcements import AnnouncementRead as AnnouncementReadSchema
 
 
 def visible_conditions(user: User):
-    """当前用户可见的公告范围条件（不含归档/过期过滤）
-
-    可见性矩阵（显式角色分支，异常 enrollment 不会扩大教师可见范围）：
-    - admin：全部公告
-    - teacher：全局 + 自己任课的课程
-    - student：全局 + 已选课的课程
-    - 其他角色：不匹配任何公告
-    """
-    global_visible = Announcement.scope == "global"
-    if user.role == "admin":
-        return or_(global_visible, Announcement.scope == "course")
-    if user.role == "teacher":
-        owned_course_ids = select(Course.id).where(Course.teacher_id == user.id)
-        return or_(global_visible, Announcement.course_id.in_(owned_course_ids))
-    if user.role == "student":
-        enrolled_course_ids = select(CourseEnrollment.course_id).where(
-            CourseEnrollment.student_id == user.id,
-            CourseEnrollment.status == "enrolled",
-        )
-        return or_(global_visible, Announcement.course_id.in_(enrolled_course_ids))
-    return sa_false()
+    from app.models.teaching import CourseOffering, OfferingEnrollment
+    global_visible = Announcement.scope == 'global'
+    if user.role == 'admin':
+        return or_(global_visible, Announcement.scope.in_(['course', 'offering']))
+    if user.role == 'teacher':
+        instances = select(CourseOffering.id).where(CourseOffering.teacher_id == user.id, CourseOffering.status.in_(['active', 'archived']))
+        content = select(Course.id).where(or_(Course.teacher_id == user.id, Course.id.in_(select(CourseOffering.course_id).where(CourseOffering.id.in_(instances)))))
+    elif user.role == 'student':
+        instances = select(CourseOffering.id).join(OfferingEnrollment).where(OfferingEnrollment.student_id == user.id, OfferingEnrollment.status == 'active', CourseOffering.status == 'active')
+        content = select(CourseOffering.course_id).where(CourseOffering.id.in_(instances))
+    else:
+        return sa_false()
+    return or_(global_visible, and_(Announcement.scope == 'course', Announcement.course_id.in_(content)), and_(Announcement.scope == 'offering', Announcement.offering_id.in_(instances)))
 
 
 def list_visible_announcements(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -11,6 +11,7 @@ from app.models import (
 )
 from app.schemas.search import SearchResultItem, SearchResponse
 from app.services.course_access_service import student_visible_course_predicate
+from app.services.offering_service import teacher_course_condition
 from app.services.audience_service import assignment_visible_condition, exam_visible_condition
 
 SEARCH_LIMIT = 6
@@ -34,7 +35,7 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
     # ── 课程 ──
     course_stmt = select(Course).order_by(Course.title).limit(SEARCH_LIMIT)
     if user.role == "teacher":
-        course_stmt = select(Course).where(Course.teacher_id == user.id).order_by(Course.title).limit(SEARCH_LIMIT)
+        course_stmt = select(Course).where(teacher_course_condition(user.id)).order_by(Course.title).limit(SEARCH_LIMIT)
     elif user.role == "student":
         course_stmt = (
             select(Course)
@@ -66,7 +67,7 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
             .limit(SEARCH_LIMIT)
         )
         if user.role == "teacher":
-            assignment_stmt = assignment_stmt.where(Course.teacher_id == user.id)
+            assignment_stmt = assignment_stmt.where(teacher_course_condition(user.id))
         for assignment, course_title in db.execute(assignment_stmt).all():
             response.assignments.append(SearchResultItem(
                 id=assignment.id, title=assignment.title, subtitle=course_title,
@@ -80,7 +81,7 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
             .limit(SEARCH_LIMIT)
         )
         if user.role == "teacher":
-            exam_stmt = exam_stmt.where(Course.teacher_id == user.id)
+            exam_stmt = exam_stmt.where(teacher_course_condition(user.id))
         for exam, course_title in db.execute(exam_stmt).all():
             response.exams.append(SearchResultItem(
                 id=exam.id, title=exam.title, subtitle=course_title,
@@ -140,7 +141,7 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
             .limit(SEARCH_LIMIT)
         )
         if user.role == "teacher":
-            student_stmt = student_stmt.where(Course.teacher_id == user.id)
+            student_stmt = student_stmt.where(teacher_course_condition(user.id))
         for student, course_title in db.execute(student_stmt).all():
             response.students.append(SearchResultItem(
                 id=student.id, title=student.real_name or student.username,
@@ -153,14 +154,14 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
     if user.role in ("teacher", "admin"):
         course_ids = []
         if user.role == "teacher":
-            course_ids = list(db.scalars(select(Course.id).where(Course.teacher_id == user.id)).all())
+            course_ids = list(db.scalars(select(Course.id).where(teacher_course_condition(user.id))).all())
         exp_stmt = (
             select(ExperimentSubmission, User.real_name, User.student_no, Course.id, Course.title)
             .join(ExperimentRecord, ExperimentRecord.id == ExperimentSubmission.record_id)
             .outerjoin(Lesson, Lesson.id == ExperimentRecord.lesson_id)
             .outerjoin(ExperimentModule, ExperimentModule.id == ExperimentRecord.module_id)
             .outerjoin(Chapter, Chapter.id == Lesson.chapter_id)
-            .outerjoin(Course, Course.id == Chapter.course_id)
+            .outerjoin(Course, Course.id == func.coalesce(Chapter.course_id, select(CourseOffering.course_id).where(CourseOffering.id == ExperimentRecord.offering_id).correlate(ExperimentRecord).scalar_subquery()))
             .join(User, User.id == ExperimentRecord.student_id)
             .where(
                 or_(User.real_name.ilike(like), User.student_no.ilike(like))
@@ -221,3 +222,5 @@ def search_all(db: Session, user: User, q: str) -> SearchResponse:
             ))
 
     return response
+
+from app.models.teaching import CourseOffering

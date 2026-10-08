@@ -87,6 +87,7 @@ defineExpose({ fetchOptions })
     <label v-if="label" class="env-picker-label">{{ label }}</label>
     <DsSelect
       class="env-picker-select"
+      :aria-label="label || placeholder"
       :value="modelValue ?? ''"
       :disabled="loading || isEmpty || disabled"
       @change="onSelect"

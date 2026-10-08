@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
+import CredentialExportPanel from '../../components/admin/CredentialExportPanel.vue'
 import { accountAPI, batchKinds, batchStatuses, downloadBlob, errorMessage } from '../../api/accountManagement.js'
 import { useAuthStore } from '../../stores/auth.js'
 const route = useRoute()
@@ -61,6 +62,7 @@ function explanation(row) {
       <header><h1>{{ batchKinds[batch.kind] }}</h1><p role="status">{{ batchStatuses[batch.status] }} <span v-if="batch.status === 'preparing'"> · 已准备 {{ batch.prepared }} 份凭据，尚未代表账号已创建</span></p></header>
       <div class="account-tags"><span v-for="[key, value] in summary" :key="key">{{ names[key] }}：{{ value }}</span></div>
       <p v-if="batch.error_code" class="account-error">{{ batchErrors[batch.error_code] || '任务未完成，请核对结果并联系系统维护人员' }}。</p>
+      <CredentialExportPanel v-if="['succeeded', 'partially_succeeded'].includes(batch.status) && batch.kind !== 'classes'" :batch-id="batch.id" :deliveries="batch.credentials || []" />
       <section v-if="batch.status === 'preview' && batch.actor_id === auth.user?.id" class="account-panel">
         <h2>确认操作范围</h2>
         <p class="account-notice">{{ batch.kind === 'password_reset' ? '执行后会撤销目标学生的旧登录，学生需使用临时密码重新设置个人密码。' : '有错误行时整批不执行。已有学生密码不变，名单只追加。' }}</p>

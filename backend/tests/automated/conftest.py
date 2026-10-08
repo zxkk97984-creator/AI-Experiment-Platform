@@ -131,6 +131,7 @@ def test_settings(tmp_path):
         database_url=db_url,
         redis_url=os.environ.get("DAI_REDIS_URL", "redis://localhost:6379/15"),
         secret_key="test-secret-key",
+        account_security_keys="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         access_token_expire_minutes=30,
         refresh_token_expire_days=7,
         jupyter_base_url="http://localhost:8888",
@@ -391,6 +392,49 @@ def auth_header(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+def grant_teaching_fixture(db, course, student_ids=(), *, bind_tasks=True):
+    """Explicit administrator grant in setup; never installed as an auto hook.
+
+    Older domain fixtures need a real teaching context after ownership and data
+    authority were separated. Security tests still construct unassigned data.
+    """
+    from datetime import date, timedelta
+    from sqlalchemy import select
+    from app.models import (AcademicTerm, Assignment, Chapter, CourseEnrollment, CourseTeachingClass, Exam,
+        ExperimentRecord, Lesson, TeachingClass)
+    from app.models.teaching import CourseOffering
+    from app.services.offering_service import enroll_student
+    db.flush()
+    offering = db.scalar(select(CourseOffering).where(CourseOffering.course_id == course.id,
+        CourseOffering.teacher_id == course.teacher_id, CourseOffering.status == 'active'))
+    if not offering:
+        klass = db.scalar(select(TeachingClass).join(CourseTeachingClass).where(CourseTeachingClass.course_id == course.id).order_by(TeachingClass.id))
+        if not klass:
+            term = db.get(AcademicTerm, course.academic_term_id) if course.academic_term_id else None
+            if not term:
+                term = AcademicTerm(code=f'fixture-{course.id}', name='测试学期', start_date=date.today(), end_date=date.today() + timedelta(days=120), status='active')
+                db.add(term); db.flush()
+            klass = TeachingClass(academic_term_id=term.id, code=f'fixture-{course.id}', name='测试教学班', status='active')
+            db.add(klass); db.flush()
+            db.add(CourseTeachingClass(course_id=course.id, teaching_class_id=klass.id))
+        offering = CourseOffering(course_id=course.id, academic_term_id=klass.academic_term_id,
+            teaching_class_id=klass.id, teacher_id=course.teacher_id, status='active')
+        db.add(offering); db.flush()
+    for student_id in student_ids:
+        projection = db.scalar(select(CourseEnrollment).where(
+            CourseEnrollment.course_id == course.id, CourseEnrollment.student_id == student_id))
+        enroll_student(db, offering, student_id,
+                       origin='class' if projection and projection.origin == 'class' else 'manual')
+    if bind_tasks:
+        for model in (Assignment, Exam):
+            for task in db.scalars(select(model).where(model.course_id == course.id, model.offering_id.is_(None))):
+                task.offering_id = offering.id
+        for record in db.scalars(select(ExperimentRecord).join(Lesson).join(Chapter).where(Chapter.course_id == course.id, ExperimentRecord.offering_id.is_(None))):
+            record.offering_id, record.scope_key = offering.id, f'offering:{offering.id}'
+    db.flush()
+    return offering
+
+
 # ═══════════════════════════════════════════════════════════
 # 共享领域工厂（A/B/C 分类法）
 #
@@ -452,7 +496,7 @@ def make_assignment(db_session_factory, *, course_id=None,
     if course_id is None:
         course_id = make_course(db_session_factory, teacher_username=teacher_username)
     get_or_create_user(db_session_factory, teacher_username, "teacher")
-    return create_assignment_db(
+    ident = create_assignment_db(
         db_session_factory,
         course_id=course_id,
         teacher_username=teacher_username,
@@ -460,6 +504,13 @@ def make_assignment(db_session_factory, *, course_id=None,
         status=status,
         **kwargs,
     )
+
+    from app.models import Assignment, Course
+    with db_session_factory() as db:
+        task = db.get(Assignment, ident)
+        grant_teaching_fixture(db, db.get(Course, task.course_id))
+        db.commit()
+    return ident
 
 
 def make_judge_question(db_session_factory, *, assignment_id=None,
@@ -499,7 +550,9 @@ def make_submission(db_session_factory, *, question_id=None,
             code=code,
             **kwargs,
         )
-        db.add(submission)
+        db.add(submission); db.flush()
+        from app.models import Course, JudgeQuestion
+        grant_teaching_fixture(db, db.get(Course, db.get(JudgeQuestion, question_id).assignment.course_id), [student.id])
         db.commit()
         db.refresh(submission)
         return submission.id
@@ -562,7 +615,9 @@ def make_exam(db_session_factory, *, course_id=None, title="测试考试",
         course_id = make_course(db_session_factory)
     with db_session_factory() as db:
         exam = Exam(course_id=course_id, title=title, status=status, **kwargs)
-        db.add(exam)
+        db.add(exam); db.flush()
+        from app.models import Course
+        grant_teaching_fixture(db, db.get(Course, course_id))
         db.commit()
         db.refresh(exam)
         return exam.id

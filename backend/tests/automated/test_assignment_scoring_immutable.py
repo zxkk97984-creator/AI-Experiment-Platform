@@ -7,6 +7,7 @@
 
 from conftest import auth_header, create_course_db, create_user, login
 
+from teaching_test_support import grant_course_students
 API = "/api/v1"
 
 
@@ -28,6 +29,7 @@ def _setup(client, db_session_factory, *, with_submission=False, tag=""):
         json={"course_id": cid, "title": "评分事实作业", "status": "draft"},
     ).json()
     aid = assignment["id"]
+    grant_course_students(db_session_factory, cid, [s_name])
     question = client.post(
         f"{API}/assignments/{aid}/questions",
         headers=auth_header(t_tok),

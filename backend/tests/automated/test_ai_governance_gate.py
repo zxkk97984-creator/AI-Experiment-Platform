@@ -11,7 +11,7 @@ make_submission / make_rubric 建真实父行。
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import auth_header, create_user, login, make_rubric, make_submission
+from conftest import auth_header, create_user, grant_teaching_fixture, login, make_rubric, make_submission
 from sqlalchemy import select
 
 from app.config import Settings
@@ -121,6 +121,7 @@ def test_legacy_grading_still_works_when_ai_disabled(client, db_session_factory,
             status="enrolled",
             origin="manual",
         ))
+        grant_teaching_fixture(db, course, student_ids=[student.id], bind_tasks=True)
         db.commit()
         course_id, assignment_id = course.id, assignment.id
 

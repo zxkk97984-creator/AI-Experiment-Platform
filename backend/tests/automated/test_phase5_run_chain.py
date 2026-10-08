@@ -40,7 +40,8 @@ from app.models import (
 )
 from app.services.environment_seed import seed_environment_catalog
 from app.worker.judge_worker import _run_docker_pytest, process_submission
-from conftest import auth_header, create_user, login
+from conftest import auth_header, create_user, grant_teaching_fixture, login
+from teaching_test_support import grant_experiment
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -462,6 +463,7 @@ def test_create_submission_snapshots_question_override_environment(client, db_se
         db.add(CourseEnrollment(
             course_id=course.id, student_id=student.id, status="enrolled",
         ))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     r = client.post("/api/v1/judge/submissions",
@@ -509,6 +511,7 @@ def test_sample_run_import_not_allowed_returns_diagnostic(client, db_session_fac
         course = db.scalar(select(Course).where(Course.title == "C2"))
         student = db.scalar(select(User).where(User.username == "stu_s"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     docker_called = []
@@ -557,6 +560,7 @@ def test_sample_run_uses_environment_digest(client, db_session_factory, test_set
         course = db.scalar(select(Course).where(Course.title == "C3"))
         student = db.scalar(select(User).where(User.username == "stu_s2"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     captured = {}
@@ -877,6 +881,7 @@ def test_execute_cell_import_not_allowed_422(client, db_session_factory, test_se
         if student is None:
             student = _make_student(db, username="s6")
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
 
     create_user(db_session_factory, "stu_exec", "student")
@@ -885,7 +890,10 @@ def test_execute_cell_import_not_allowed_422(client, db_session_factory, test_se
         course = db.scalar(select(Course).where(Course.title == "C4"))
         student = db.scalar(select(User).where(User.username == "stu_exec"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
+
+    grant_experiment(db_session_factory, 'lesson', lesson_id, ['stu_exec'])
 
     r = client.post(f"/api/v1/experiments/records/ensure-for-lesson/{lesson_id}",
                     headers=auth_header(s_tok))
@@ -911,7 +919,10 @@ def test_execute_cell_import_not_installed_500(client, db_session_factory, test_
         course = db.scalar(select(Course).where(Course.title == "C4"))
         student = db.scalar(select(User).where(User.username == "stu_exec2"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
+
+    grant_experiment(db_session_factory, 'lesson', lesson_id, ['stu_exec2'])
 
     r = client.post(f"/api/v1/experiments/records/ensure-for-lesson/{lesson_id}",
                     headers=auth_header(s_tok))
@@ -936,7 +947,10 @@ def test_execute_cell_runs_with_env_digest_and_no_diagnostic(client, db_session_
         course = db.scalar(select(Course).where(Course.title == "C4"))
         student = db.scalar(select(User).where(User.username == "stu_exec3"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
+
+    grant_experiment(db_session_factory, 'lesson', lesson_id, ['stu_exec3'])
 
     r = client.post(f"/api/v1/experiments/records/ensure-for-lesson/{lesson_id}",
                     headers=auth_header(s_tok))
@@ -998,6 +1012,7 @@ def test_assignment_read_response_has_environment_summary(client, db_session_fac
         course = db.scalar(select(Course).where(Course.title == "C5"))
         student = db.scalar(select(User).where(User.username == "stu_r"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
     r = client.get(f"/api/v1/assignments/{assignment.id}", headers=auth_header(s_tok))
     assert r.status_code == 200, r.text
@@ -1058,6 +1073,7 @@ def test_question_read_response_has_effective_environment_summary(client, db_ses
         course = db.scalar(select(Course).where(Course.title == "C6"))
         student = db.scalar(select(User).where(User.username == "stu_r2"))
         db.add(CourseEnrollment(course_id=course.id, student_id=student.id, status="enrolled"))
+        grant_teaching_fixture(db, course, student_ids=[student.id])
         db.commit()
     r = client.get(f"/api/v1/assignments/{assignment.id}/questions", headers=auth_header(s_tok))
     assert r.status_code == 200, r.text
