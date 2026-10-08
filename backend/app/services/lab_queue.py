@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import OperationalError
 
 from app.models.lab import LabResourceLease, LabRun
@@ -51,9 +52,23 @@ def request_cancel(db, run_id):
         ).values(cancel_requested=True).execution_options(synchronize_session=False))
 
 
-def claim_run(db, settings):
+@dataclass
+class ClaimScanState:
+    """Worker-local keyset progress. A fixed upper bound makes every pass finite."""
+    after: tuple[datetime, int] | None = None
+    high_water: tuple[datetime, int] | None = None
+
+    def reset(self):
+        self.after = self.high_water = None
+
+
+def claim_run(db, settings, scan: ClaimScanState | None = None):
+    progress = replace(scan) if scan is not None else ClaimScanState()
     try:
-        return _claim_run(db, settings)
+        result = _claim_run(db, settings, progress)
+        if scan is not None:
+            scan.after, scan.high_water = progress.after, progress.high_water
+        return result
     except OperationalError as exc:
         # Concurrent first insertion of the global guard can deadlock on
         # InnoDB gap locks. This is a lost claim, not lost durable work.
@@ -64,7 +79,7 @@ def claim_run(db, settings):
         return None
 
 
-def _claim_run(db, settings):
+def _claim_run(db, settings, scan):
     """Claim oldest admissible work and commit its resource reservation atomically."""
     if not settings.lab_enabled:
         return None
@@ -79,8 +94,26 @@ def _claim_run(db, settings):
             LabRun.kind.in_(['baseline', 'evaluate']))
     else:
         query = query.where(func.coalesce(node, '') == '')
-    candidates = list(db.scalars(query.order_by(LabRun.created_at, LabRun.id).limit(100).with_for_update()))
+    if scan.high_water is None:
+        last = db.execute(query.with_only_columns(LabRun.created_at, LabRun.id)
+                          .order_by(LabRun.created_at.desc(), LabRun.id.desc()).limit(1).with_for_update()).first()
+        if last is None:
+            scan.reset()
+            db.commit()
+            return None
+        scan.high_water = tuple(last)
+    key = tuple_(LabRun.created_at, LabRun.id)
+    query = query.where(key <= scan.high_water)
+    if scan.after is not None:
+        query = query.where(key > scan.after)
+    candidates = list(db.scalars(query.order_by(LabRun.created_at, LabRun.id).limit(100)
+                                 .with_for_update().execution_options(populate_existing=True)))
+    if not candidates:
+        scan.reset()
     for run in candidates:
+        scan.after = (run.created_at, run.id)
+        if scan.after >= scan.high_water:
+            scan.reset()
         if not matches_worker(run.kind, run.snapshot, settings):
             if settings.lab_worker_mode == 'general' and is_benchmark(run.kind, run.snapshot) and not run.snapshot.get('benchmark_node_id'):
                 run.status, run.error_code = 'needs_review', 'LAB_BENCHMARK_NODE_REQUIRED'

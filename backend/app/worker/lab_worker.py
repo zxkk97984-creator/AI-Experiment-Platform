@@ -16,7 +16,7 @@ from sqlalchemy import func, select, update
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models.lab import LabRun, LabRegradeBatch
-from app.services.lab_queue import LeaseGuard, LeaseLost, RunCancelled, claim_run, finish_run, recover_runs
+from app.services.lab_queue import ClaimScanState, LeaseGuard, LeaseLost, RunCancelled, claim_run, finish_run, recover_runs
 from app.services.lab_runtime import stop_run_containers
 
 logger = logging.getLogger("dai.lab_worker")
@@ -58,6 +58,7 @@ def main():
         socket_connect_timeout=2, socket_timeout=3)
     subscription = None
     futures = set()
+    scan = ClaimScanState()
     pool = ThreadPoolExecutor(max_workers=settings.lab_training_concurrency + 1,
         thread_name_prefix="lab-job")
     try:
@@ -76,7 +77,7 @@ def main():
                 claimed = None
                 if len(futures) < settings.lab_training_concurrency + 1:
                     with SessionLocal() as db:
-                        claimed = claim_run(db, settings)
+                        claimed = claim_run(db, settings, scan)
                 if claimed:
                     futures.add(pool.submit(_process, SessionLocal, *claimed, settings))
                     continue
