@@ -995,25 +995,34 @@ def run_worker_loop():
         logger.info("AI worker 未启用，退出消费循环")
         return
 
-    redis_client = _redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    redis_client = _redis.Redis.from_url(
+        settings.redis_url, decode_responses=True,
+        socket_connect_timeout=2, socket_timeout=7,
+    )
     import socket
     owner_id = f"worker:{socket.gethostname()}:{os.getpid()}"
 
     logger.info("%s worker 启动，监听队列: %s", worker_role, queues)
 
-    last_recovery = time.monotonic()
-    if worker_role == "judge":
-        with SessionLocal() as db:
-            _recover_stale(db, redis_client, owner_id)
-
+    next_recovery = time.monotonic()
     while True:
+        # Redis is only a wake-up transport. Busy or unavailable queues must
+        # not prevent repairing durable jobs, including on worker startup.
+        if worker_role == "judge" and time.monotonic() >= next_recovery:
+            try:
+                with SessionLocal() as db:
+                    _recover_stale(db, redis_client, owner_id)
+            except Exception:
+                logger.exception("Grading 恢复异常，稍后重试")
+                next_recovery = time.monotonic() + 5
+            else:
+                # A healthy scan and a lease owned by another worker both use
+                # the normal interval. Retry failures without pausing work.
+                next_recovery = time.monotonic() + 120
+
         try:
             result = redis_client.brpop(queues, timeout=5)
             if result is None:
-                if worker_role == "judge" and time.monotonic() - last_recovery > 120:
-                    with SessionLocal() as db:
-                        _recover_stale(db, redis_client, owner_id)
-                    last_recovery = time.monotonic()
                 continue
 
             queue_name, raw_data = result
@@ -1035,26 +1044,26 @@ def run_worker_loop():
             if msg_type != "ai_grade":
                 logger.warning("AI worker 忽略非 AI 消息: queue=%s", queue_name)
                 continue
-            with SessionLocal() as db:
-                try:
+            try:
+                with SessionLocal() as db:
                     process_ai_grade(db, redis_client, settings, job_id)
-                except Exception:
-                    logger.exception("AI 评分异常: id=%s", job_id)
+            except Exception:
+                logger.exception("AI 评分异常: id=%s", job_id)
         elif msg_type == "ai_grade":
             logger.warning("Judge worker 忽略 AI 消息: queue=%s", queue_name)
             continue
         elif queue_name == EXAM_JUDGE_QUEUE or msg_type == "exam":
-            with SessionLocal() as db:
-                try:
+            try:
+                with SessionLocal() as db:
                     process_exam_answer(db, redis_client, settings, job_id)
-                except Exception:
-                    logger.exception("考试判题异常: id=%s", job_id)
+            except Exception:
+                logger.exception("考试判题异常: id=%s", job_id)
         else:
-            with SessionLocal() as db:
-                try:
+            try:
+                with SessionLocal() as db:
                     process_submission(db, redis_client, settings, job_id)
-                except Exception:
-                    logger.exception("判题异常: id=%s", job_id)
+            except Exception:
+                logger.exception("判题异常: id=%s", job_id)
 
 
 if __name__ == "__main__":

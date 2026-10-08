@@ -41,7 +41,10 @@ def _utc_now() -> datetime:
 def _get_redis():
     """获取 Redis 客户端（每次调用创建，避免连接跨 fork 问题）"""
     settings = get_settings()
-    return _redis.Redis.from_url(settings.redis_url, decode_responses=False)
+    return _redis.Redis.from_url(
+        settings.redis_url, decode_responses=False,
+        socket_connect_timeout=2, socket_timeout=3,
+    )
 
 
 def enqueue_job(db: Session, *, job_type: str, object_id: int) -> bool:
