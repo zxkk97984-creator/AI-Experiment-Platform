@@ -67,7 +67,7 @@ async function handleImport(event) {
     await load()
     emit('changed')
   } catch (error) {
-    app.showToast(error.response?.data?.detail?.message || 'CSV 导入失败', 'error')
+    app.showToast(error.response?.status === 413 ? 'CSV 文件最大 2 MiB，请检查文件大小或代理限制' : error.response?.data?.detail?.message || 'CSV 导入失败', 'error')
   } finally {
     importing.value = false
   }
@@ -77,7 +77,7 @@ onMounted(load)
 
 <template>
   <section class="roster-panel">
-    <div class="roster-head"><div><strong>课程学生名单</strong><p>班级成员自动同步，也可手工添加例外学生或 CSV 导入名单。</p></div><div class="roster-head-actions"><span>{{ total }} 人</span><button type="button" class="button button-secondary" :disabled="importing" @click="fileInput.click()">{{ importing ? '导入中…' : '导入 CSV' }}</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="handleImport" /></div></div>
+    <div class="roster-head"><div><strong>课程学生名单</strong><p>班级成员自动同步，也可手工添加例外学生或 CSV 导入名单（最大 2 MiB）。</p></div><div class="roster-head-actions"><span>{{ total }} 人</span><button type="button" class="button button-secondary" :disabled="importing" @click="fileInput.click()">{{ importing ? '导入中…' : '导入 CSV' }}</button><input ref="fileInput" type="file" accept=".csv,text/csv" hidden @change="handleImport" /></div></div>
     <div class="roster-search"><input v-model="query" placeholder="按姓名、学号或账号搜索" @keyup.enter="search" /><button type="button" class="button button-secondary" @click="search">搜索学生</button></div>
     <div v-if="candidates.length" class="candidate-list">
       <button v-for="student in candidates" :key="student.id" type="button" @click="add(student)">

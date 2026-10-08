@@ -45,7 +45,7 @@ async function preview() {
     if (kind.value === 'class_students' && classId.value) data.append('class_id', classId.value)
     const result = await accountAPI.preview(data)
     await router.push(`/admin/batches/${result.data.id}`)
-  } catch (e) { error.value = errorMessage(e) }
+  } catch (e) { error.value = e.response?.status === 413 ? '名单文件最大 5 MiB，请检查文件大小或代理限制' : errorMessage(e) }
   finally { busy.value = false }
 }
 async function previewReset() {

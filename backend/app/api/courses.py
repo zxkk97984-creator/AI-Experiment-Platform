@@ -624,7 +624,7 @@ async def import_course_students(
 
     content = await file.read(2 * 1024 * 1024 + 1)
     if len(content) > 2 * 1024 * 1024:
-        raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
+        raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MiB")
     rows, error = _parse_student_csv(content)
     if error:
         raise api_error(422, "CSV_INVALID", error)
