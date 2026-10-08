@@ -21,6 +21,7 @@ from app.models.teaching import CourseOffering, OfferingEnrollment, OfferingExpe
 from app.services.account_service import audit, lock_policy
 from app.services.offering_service import require_offering
 from app.services.time_utils import utc_now
+from app.services.gradebook_sources import preload_sources
 
 HUNDRED = Decimal(100)
 
@@ -234,7 +235,10 @@ def select_score(rows, selection):
     return max(rows, key=lambda row: (decimal(row.score), row.id)) if selection == 'highest' else max(rows, key=lambda row: row.id)
 
 
-def source_score(db, column, offering_id, student_id, *, lock=False, missing_confirmed=False, target=None):
+def source_score(db, column, offering_id, student_id, *, lock=False, missing_confirmed=False, target=None, source_rows=None):
+    def fetch(bucket, key, query):
+        return source_rows[bucket].get(key, []) if source_rows is not None else query_rows(db, query, lock)
+
     try:
         target = target or source_target(db, column.source_kind, column.source_id, offering_id, lock=lock)
     except HTTPException as exc:
@@ -242,13 +246,13 @@ def source_score(db, column, offering_id, student_id, *, lock=False, missing_con
             return pending('原成绩来源不可用，请重新确认分项；官方历史版本保留')
         raise
     if column.source_kind == 'assignment':
-        questions = query_rows(db, select(JudgeQuestion).where(JudgeQuestion.assignment_id == target.id).order_by(JudgeQuestion.id), lock)
+        questions = fetch('questions', target.id, select(JudgeQuestion).where(JudgeQuestion.assignment_id == target.id).order_by(JudgeQuestion.id))
         if not questions: return pending('作业尚无有效题目')
         earned, full, evidence = Decimal(0), Decimal(0), []
         for question in questions:
             maximum = decimal(getattr(question, 'max_score', 100))
             if maximum <= 0: return pending('题目满分必须大于0')
-            rows = query_rows(db, select(Submission).where(Submission.question_id == question.id, Submission.student_id == student_id), lock)
+            rows = fetch('submissions', (question.id, student_id), select(Submission).where(Submission.question_id == question.id, Submission.student_id == student_id).order_by(Submission.id))
             if not rows:
                 if not missing_confirmed: return pending('存在未提交题目，需要教师确认缺交', 'missing_pending')
                 full += maximum
@@ -257,7 +261,7 @@ def source_score(db, column, offering_id, student_id, *, lock=False, missing_con
             if any(r.grading_status != 'completed' or r.score is None for r in rows): return pending('作业提交仍在评分或需要处理')
             valid, grades = [], {}
             for row in rows:
-                grade_rows = query_rows(db, select(CodeGrade).where(CodeGrade.submission_id == row.id), lock)
+                grade_rows = fetch('code_grades', row.id, select(CodeGrade).where(CodeGrade.submission_id == row.id).order_by(CodeGrade.id))
                 grade = grade_rows[0] if grade_rows else None
                 if grade and grade.mode == 'active' and (grade.status != 'completed' or grade.needs_teacher_review):
                     return pending('作业AI评分尚未公开完成')
@@ -276,49 +280,51 @@ def source_score(db, column, offering_id, student_id, *, lock=False, missing_con
                              'task_updated_at': str(target.updated_at), 'questions': evidence})
     if column.source_kind == 'exam':
         if not (target.show_score_after_grading or target.review_released_at): return pending('考试成绩尚未公开')
-        rows = query_rows(db, select(ExamSubmission).where(ExamSubmission.exam_id == target.id,
-                                                         ExamSubmission.student_id == student_id), lock)
+        rows = fetch('exams', (target.id, student_id), select(ExamSubmission).where(ExamSubmission.exam_id == target.id,
+                                                         ExamSubmission.student_id == student_id).order_by(ExamSubmission.id))
         if not rows:
             return source_result(0, {'kind': 'exam', 'id': target.id, 'confirmed_missing': True}) if missing_confirmed else pending('考试未参加，需要教师确认缺交', 'missing_pending')
         submission = rows[0]
         if submission.status != 'graded' or submission.score is None: return pending('考试尚未评分完成')
-        full = sum((decimal(q.points) for q in query_rows(db, select(ExamQuestion).where(ExamQuestion.exam_id == target.id), lock)), Decimal(0))
+        full = sum((decimal(q.points) for q in fetch('exam_questions', target.id, select(ExamQuestion).where(ExamQuestion.exam_id == target.id).order_by(ExamQuestion.id))), Decimal(0))
         if full <= 0: return pending('考试满分必须大于0')
         return source_result(decimal(submission.score) / full * HUNDRED, {'kind': 'exam', 'id': target.id,
                              'submission_id': submission.id, 'score': str(submission.score), 'max_score': str(full),
                              'updated_at': str(submission.updated_at), 'graded_at': str(submission.graded_at)})
     query = select(ExperimentRecord).where(ExperimentRecord.offering_id == offering_id, ExperimentRecord.student_id == student_id)
     query = query.where(ExperimentRecord.lesson_id == target.entry_id) if target.entry_kind == 'lesson' else query.where(ExperimentRecord.module_id == target.entry_id)
-    records = query_rows(db, query, lock)
+    records = fetch('records', (target.entry_kind, target.entry_id, student_id), query.order_by(ExperimentRecord.id))
     if len(records) != 1:
         if not records and missing_confirmed: return source_result(0, {'kind': 'experiment', 'id': target.id, 'confirmed_missing': True})
         return pending('实验尚未提交或归属不唯一，需要教师确认', 'missing_pending')
     record = records[0]
-    bindings = query_rows(db, select(LabRecord).where(LabRecord.record_id == record.id), lock)
+    bindings = fetch('bindings', record.id, select(LabRecord).where(LabRecord.record_id == record.id))
     binding = bindings[0] if bindings else None
     if binding:
         # A previous selected score is not a final course result while a newer
         # formal submission is still grading or awaiting infrastructure review.
-        states = query_rows(db, select(LabSubmission).join(ExperimentSubmission,
+        states = fetch('states', record.id, select(LabSubmission).join(ExperimentSubmission,
             ExperimentSubmission.id == LabSubmission.submission_id)
-            .where(ExperimentSubmission.record_id == record.id).order_by(LabSubmission.submission_id), lock)
+            .where(ExperimentSubmission.record_id == record.id).order_by(LabSubmission.submission_id))
         grade_ids = [state.published_grade_id for state in states if state.published_grade_id]
-        grades = {grade.id: grade for grade in query_rows(db, select(LabGradeRevision)
-            .where(LabGradeRevision.id.in_(grade_ids)).order_by(LabGradeRevision.id), lock)} if grade_ids else {}
+        grade_rows = ([grade for ident in sorted(set(grade_ids)) for grade in source_rows['lab_grades'].get(ident, [])]
+                      if source_rows is not None else query_rows(db, select(LabGradeRevision)
+                          .where(LabGradeRevision.id.in_(grade_ids)).order_by(LabGradeRevision.id), lock)) if grade_ids else []
+        grades = {grade.id: grade for grade in grade_rows}
         for state in states:
             published = grades.get(state.published_grade_id)
             if (state.review_requested or not published or not published.published_at
                     or published.submission_id != state.submission_id):
-                runs = query_rows(db, select(LabRun).where(LabRun.id == state.current_run_id), lock) if state.current_run_id else []
+                runs = fetch('runs', state.current_run_id, select(LabRun).where(LabRun.id == state.current_run_id)) if state.current_run_id else []
                 run = runs[0] if runs else None
                 if run and run.status in ('queued', 'running', 'recovering'):
                     return pending('实验新提交仍在评分，完成后再确认总评')
                 return pending('正式实验成绩尚未公开完成或基础设施失败，请完成复核或明确调分')
         if not binding.selected_submission_id:
-            if missing_confirmed and not query_rows(db, select(ExperimentSubmission).where(ExperimentSubmission.record_id == record.id).limit(1), lock):
+            if missing_confirmed and not fetch('experiment_submissions', record.id, select(ExperimentSubmission).where(ExperimentSubmission.record_id == record.id).limit(1)):
                 return source_result(0, {'kind': 'experiment', 'id': target.id, 'record_id': record.id, 'confirmed_missing': True})
             return pending('实验尚无平台选定成绩')
-        selected = query_rows(db, select(ExperimentSubmission).where(ExperimentSubmission.id == binding.selected_submission_id), lock)
+        selected = fetch('selected', binding.selected_submission_id, select(ExperimentSubmission).where(ExperimentSubmission.id == binding.selected_submission_id))
         if not selected or selected[0].record_id != record.id: return pending('实验选定记录无效')
         state = next((state for state in states if state.submission_id == selected[0].id), None)
         grade = grades.get(state.published_grade_id) if state else None
@@ -328,7 +334,7 @@ def source_score(db, column, offering_id, student_id, *, lock=False, missing_con
                              'submission_id': selected[0].id, 'grade_revision_id': grade.id,
                              'assessment_id': grade.assessment_id, 'selection': 'platform_selected',
                              'published_at': str(grade.published_at), 'score': str(grade.total)})
-    submissions = query_rows(db, select(ExperimentSubmission).where(ExperimentSubmission.record_id == record.id), lock)
+    submissions = fetch('experiment_submissions', record.id, select(ExperimentSubmission).where(ExperimentSubmission.record_id == record.id).order_by(ExperimentSubmission.id))
     if not submissions:
         return source_result(0, {'kind': 'experiment', 'id': target.id, 'confirmed_missing': True}) if missing_confirmed else pending('实验未提交，需要教师确认缺交', 'missing_pending')
     if any(s.score is None or s.reviewed_at is None for s in submissions): return pending('实验尚未完成教师评分')
@@ -351,6 +357,7 @@ def calculate(db, book, *, lock=False):
     adjustments = {a.student_id: a for a in query_rows(db, select(GradebookAdjustment).where(GradebookAdjustment.gradebook_id == book.id), lock)}
     rows, blockers = [], []
     students = roster(db, book.offering_id, lock=lock)
+    source_rows = preload_sources(db, columns, targets, book.offering_id, [s.id for s in students], lock=lock)
     for student in students:
         cells, results, total, valid = {}, [], Decimal(0), True
         for group in groups:
@@ -360,14 +367,14 @@ def calculate(db, book, *, lock=False):
                 if col.source_kind != 'manual' and targets.get(col.id) is None:
                     item = pending('原成绩来源不可用，请重新确认分项；官方历史版本保留')
                 elif entry and entry.state == 'missing' and col.source_kind != 'manual':
-                    item = source_score(db, col, book.offering_id, student.id, lock=lock, missing_confirmed=True, target=targets[col.id])
+                    item = source_score(db, col, book.offering_id, student.id, lock=lock, missing_confirmed=True, target=targets[col.id], source_rows=source_rows)
                     if item['source']: item['source']['missing_confirmation_reason'] = entry.reason
                 elif entry and entry.state not in ('auto', 'pending'):
                     item = {'state': entry.state, 'score': score_text(entry.score) if entry.state == 'scored' else '0.00' if entry.state == 'missing' else None,
                             'message': entry.reason or '', 'source': {'kind': 'manual', 'entry_id': entry.id, 'updated_at': str(entry.updated_at), 'reason': entry.reason}}
                 elif entry and entry.state == 'pending': item = pending('教师标记为待评分')
                 elif col.source_kind == 'manual': item = pending('人工成绩待录入')
-                else: item = source_score(db, col, book.offering_id, student.id, lock=lock, target=targets[col.id])
+                else: item = source_score(db, col, book.offering_id, student.id, lock=lock, target=targets[col.id], source_rows=source_rows)
                 cells[col.key] = item
             if group.weight == 0:
                 results.append({'key': group.key, 'score': None, 'weighted_points': '0.00', 'effective_weights': {}})
