@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppLayout from '../components/layout/AppLayout.vue'
 import { useAuthStore } from '../stores/auth.js'
@@ -27,6 +27,9 @@ const adjustmentStudent = ref('')
 const adjustmentScore = ref('')
 const adjustmentReason = ref('')
 let requestVersion = 0
+let pageActive = true
+let snapshotRequestVersion = 0
+let requestedSnapshotId = null
 const chosenOffering = computed(() => offerings.value.find(item => String(item.id) === String(offeringId.value)))
 const readOnly = computed(() => isStudent.value || chosenOffering.value?.read_only || data.value?.read_only)
 const currentSnapshot = computed(() => viewing.value || data.value?.snapshot)
@@ -39,33 +42,64 @@ const sourceKinds = { manual: '人工录入', assignment: '作业', exam: '考�
 const states = { scored: '已评分', pending: '待评分', missing: '确认缺交', missing_pending: '缺交待确认', exempt: '免修', auto: '来源成绩' }
 const createKey = (prefix) => `${prefix}-${crypto.randomUUID()}`
 
+function isCurrentBook(version, selectedOffering) {
+  return pageActive && version === requestVersion && selectedOffering === offeringId.value
+}
+function returnToDraft() {
+  snapshotRequestVersion++
+  requestedSnapshotId = null
+  viewing.value = null
+  selectedStudent.value = null
+  error.value = ''
+}
 async function load() {
-  if (!offeringId.value) return
+  if (!pageActive) return
   const current = ++requestVersion
-  loading.value = true; error.value = ''; viewing.value = null; selectedStudent.value = null
+  const selectedOffering = offeringId.value
+  returnToDraft()
+  data.value = null; history.value = []; config.value = []
+  busy.value = false; message.value = ''; loading.value = Boolean(selectedOffering)
+  if (!selectedOffering) return
   try {
-    const [result, snapshots] = await Promise.all([gradebookAPI.read(offeringId.value), gradebookAPI.snapshots(offeringId.value)])
-    if (current !== requestVersion) return
+    const [result, snapshots] = await Promise.all([gradebookAPI.read(selectedOffering), gradebookAPI.snapshots(selectedOffering)])
+    if (!isCurrentBook(current, selectedOffering)) return
     data.value = result.data
     config.value = JSON.parse(JSON.stringify(result.data.config || []))
     history.value = snapshots.data.items || []
-  } catch (e) { if (current === requestVersion) { error.value = errorMessage(e); data.value = null } }
-  finally { if (current === requestVersion) loading.value = false }
+  } catch (e) { if (isCurrentBook(current, selectedOffering)) error.value = errorMessage(e) }
+  finally { if (isCurrentBook(current, selectedOffering)) loading.value = false }
 }
 onMounted(async () => {
   try {
-    offerings.value = (await gradebookAPI.offerings()).data.items || []
+    const result = await gradebookAPI.offerings()
+    if (!pageActive) return
+    offerings.value = result.data.items || []
     const requested = route.params.offeringId || route.query.offering_id
     offeringId.value = String(offerings.value.find(item => String(item.id) === String(requested))?.id || offerings.value[0]?.id || '')
     await load()
-  } catch (e) { error.value = errorMessage(e) }
+  } catch (e) { if (pageActive) error.value = errorMessage(e) }
+})
+onUnmounted(() => {
+  pageActive = false
+  requestVersion++
+  snapshotRequestVersion++
 })
 async function mutate(action, success, allowReadOnly = false) {
   if (busy.value || (readOnly.value && !allowReadOnly)) return false
+  const selectedOffering = offeringId.value
+  let current = requestVersion
+  const isCurrent = () => isCurrentBook(current, selectedOffering)
   busy.value = true; error.value = ''; message.value = ''
-  try { await action(); await load(); message.value = success; return true }
-  catch (e) { error.value = errorMessage(e); return false }
-  finally { busy.value = false }
+  try {
+    await action()
+    if (!isCurrent()) return false
+    current = requestVersion + 1 // load below owns the next book request.
+    await load()
+    if (!isCurrent()) return false
+    message.value = success
+    return true
+  } catch (e) { if (isCurrent()) error.value = errorMessage(e); return false }
+  finally { if (isCurrent()) busy.value = false }
 }
 function addCategory() {
   const key = createKey('category')
@@ -94,20 +128,41 @@ function adjust(clear = false) {
     student_id: Number(adjustmentStudent.value), score: clear ? null : adjustmentScore.value, reason: adjustmentReason.value }), '总分调整已保存到草稿，发布后学生可见。')
 }
 async function publish(archive = false) {
+  const selectedOffering = offeringId.value
+  const submittedReason = reason.value
   const saved = await mutate(() => gradebookAPI[archive ? 'archive' : 'publish'](offeringId.value,
     { expected_revision: data.value.revision, expected_preview_hash: archive ? undefined : data.value.draft?.preview_hash,
       reason: reason.value }), archive ? '当前官方成绩已生成独立归档。' : '成绩已发布，学生现在可查看本人版本。', archive)
-  if (saved) reason.value = ''
+  if (saved && pageActive && offeringId.value === selectedOffering && reason.value === submittedReason) reason.value = ''
 }
 async function viewSnapshot(id) {
+  const selectedOffering = offeringId.value
+  const bookRequest = requestVersion
+  const request = ++snapshotRequestVersion
+  requestedSnapshotId = id
+  const isCurrent = () => isCurrentBook(bookRequest, selectedOffering)
+    && request === snapshotRequestVersion && requestedSnapshotId === id
   error.value = ''
-  try { viewing.value = (await gradebookAPI.snapshot(id)).data; selectedStudent.value = null }
-  catch (e) { error.value = errorMessage(e) }
+  try {
+    const result = await gradebookAPI.snapshot(id)
+    if (!isCurrent()) return
+    viewing.value = result.data; selectedStudent.value = null
+  } catch (e) { if (isCurrent()) error.value = errorMessage(e) }
 }
 async function exportGrades(format) {
+  const snapshot = currentSnapshot.value
+  if (!snapshot || !offeringId.value || loading.value) return
+  const { id, revision } = snapshot
+  const selectedOffering = offeringId.value
+  const bookRequest = requestVersion
+  const snapshotRequest = snapshotRequestVersion
+  const isCurrent = () => isCurrentBook(bookRequest, selectedOffering)
+    && snapshotRequest === snapshotRequestVersion && currentSnapshot.value?.id === id
   error.value = ''
-  try { const result = await gradebookAPI.export(currentSnapshot.value.id, format); downloadBlob(result.data, `课程成绩-版本${currentSnapshot.value.revision}.${format}`) }
-  catch (e) { error.value = errorMessage(e) }
+  try {
+    const result = await gradebookAPI.export(id, format)
+    if (isCurrent()) downloadBlob(result.data, `课程成绩-版本${revision}.${format}`)
+  } catch (e) { if (isCurrent()) error.value = errorMessage(e) }
 }
 function columnWeight(category) { return category.columns.reduce((sum, col) => sum + Number(col.weight || 0), 0) }
 function cellLabel(cell) { return cell?.score ?? states[cell?.state] ?? '—' }
@@ -146,7 +201,7 @@ function cellLabel(cell) { return cell?.score ?? states[cell?.state] ?? '—' }
         </form>
       </details>
       <section v-if="rows.length || (!isStudent && data.draft)" class="account-panel">
-        <div class="account-actions"><h2>{{ viewing ? `历史版本 ${viewing.revision}` : isStudent ? '我的已发布成绩' : '当前成绩草稿' }}</h2><button v-if="viewing && !isStudent" class="btn-ghost" @click="viewing = null">返回当前草稿</button><span v-if="!isStudent">{{ rows.length }} 名学生</span></div>
+        <div class="account-actions"><h2>{{ viewing ? `历史版本 ${viewing.revision}` : isStudent ? '我的已发布成绩' : '当前成绩草稿' }}</h2><button v-if="viewing && !isStudent" class="btn-ghost" @click="returnToDraft">返回当前草稿</button><span v-if="!isStudent">{{ rows.length }} 名学生</span></div>
         <div v-if="isStudent && rows[0]" class="student-total"><div><span>最终成绩</span><strong>{{ rows[0].final_score ?? '待完成' }}</strong></div><div><span>计算总分</span><strong>{{ rows[0].calculated_score ?? '待完成' }}</strong></div></div>
         <p v-if="!isStudent && blockers.length && !viewing" class="account-notice">{{ blockers.length }} 项尚待处理：待评分、缺交未确认或整个一级栏目免修时，不能发布。确认缺交会将未提交部分记 0 分；免修只在同一一级栏目内重新分配比例。</p>
         <p class="grade-scroll-hint account-muted">分项较多时，可在表格内横向滑动查看。</p>
