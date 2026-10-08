@@ -26,13 +26,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
       - name: Secret 扫描（高信号模式：密钥/私钥形态，误报需显式说明）
-        run: |
-          if grep -rnE "(sk-[A-Za-z0-9]{20,}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----)" \
-              --include="*.py" --include="*.yml" --include="*.yaml" --include="*.js" --include="*.vue" \
-              backend frontend scripts docs .github 2>/dev/null; then
-            echo "::error::检测到疑似密钥泄漏"; exit 1
-          fi
-          echo "secret scan clean"
+        working-directory: .
+        run: python scripts/check_secrets.py
       - name: Python SCA（接受记录门禁，见 docs/security/sca-acceptances.md）
         run: |
           pip install pip-audit
