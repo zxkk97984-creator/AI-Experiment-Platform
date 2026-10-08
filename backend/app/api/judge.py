@@ -136,17 +136,15 @@ def list_submissions(
         query = query.where(Submission.student_id == current_user.id)
         count_query = count_query.where(Submission.student_id == current_user.id)
     elif current_user.role == "teacher":
-        # 教师只看自己课程的提交
+        # Both page rows and count use the teaching-instance authority boundary.
+        from app.services.offering_service import teacher_task_condition
+        scope = teacher_task_condition(Assignment, current_user.id)
         query = query.join(JudgeQuestion, Submission.question_id == JudgeQuestion.id).join(
             Assignment, JudgeQuestion.assignment_id == Assignment.id
-        ).join(Course, Assignment.course_id == Course.id).where(
-            Course.teacher_id == current_user.id
-        )
+        ).where(scope)
         count_query = count_query.join(JudgeQuestion, Submission.question_id == JudgeQuestion.id).join(
             Assignment, JudgeQuestion.assignment_id == Assignment.id
-        ).join(Course, Assignment.course_id == Course.id).where(
-            Course.teacher_id == current_user.id
-        )
+        ).where(scope)
     total = db.scalar(count_query) or 0
     submissions = db.scalars(query.order_by(Submission.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return PaginatedResponse(items=[SubmissionRead.model_validate(item) for item in submissions], page=page, page_size=page_size, total=total)
