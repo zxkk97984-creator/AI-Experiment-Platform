@@ -1,8 +1,8 @@
 <script setup>
 // 学生提交结果（V2）：页头 + 提交面板 + 轮询状态 + AI 评分 + 终端输出。
-// 业务与轮询逻辑不变，输出区使用 V2 深色 code/term 视觉。
+// 串行轮询，永久错误停止，短暂故障有限退避。
 
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import StudentAIGradingResult from '../../components/ai/StudentAIGradingResult.vue'
@@ -22,22 +22,80 @@ function isResultComplete(result) {
   return result.status === 'graded' && Boolean(result.grading_breakdown)
 }
 
+const error = ref('')
+let active = true
+let generation = 0
+let inFlight = false
+let refreshPending = false
+let failures = 0
+
+function stopTimer() {
+  if (timer !== null) clearTimeout(timer)
+  timer = null
+}
+function visible() { return document.visibilityState !== 'hidden' }
+
 async function fetchResult() {
+  if (!active || !polling.value || !visible() || inFlight) return
+  stopTimer()
+  inFlight = true
+  const current = generation
+  let delay = 1500
   try {
     const res = await judgeAPI.getResult(route.params.id)
+    if (!active || current !== generation) return
     submission.value = res.data
-    if (isResultComplete(res.data)) {
-      polling.value = false
+    failures = 0
+    error.value = ''
+    polling.value = !isResultComplete(res.data)
+  } catch (e) {
+    if (!active || current !== generation) return
+    const status = e.response?.status
+    const permanent = status >= 400 && status < 500 && ![408, 429].includes(status)
+    failures++
+    polling.value = !permanent && failures < 5
+    if (permanent) submission.value = null
+    error.value = status === 404 ? '提交不存在或已不可访问'
+      : status === 403 ? '无权查看该提交'
+        : permanent ? '无法读取提交，请检查登录状态或链接'
+          : polling.value ? '结果服务暂不可用，正在重试…' : '暂时无法读取提交结果，请稍后重试'
+    delay = Math.min(1500 * 2 ** (failures - 1), 24000)
+  } finally {
+    inFlight = false
+    if (active && refreshPending) {
+      refreshPending = false
+      fetchResult()
+    } else if (active && current === generation && polling.value && visible()) {
+      timer = setTimeout(fetchResult, delay)
     }
-  } catch { /* ignore */ }
+  }
 }
 
+function retry() {
+  generation++
+  stopTimer()
+  submission.value = null
+  error.value = ''
+  failures = 0
+  polling.value = true
+  if (inFlight) refreshPending = true
+  else fetchResult()
+}
+function visibilityChanged() {
+  if (visible()) fetchResult()
+  else stopTimer()
+}
+watch(() => route.params.id, retry)
 onMounted(() => {
+  document.addEventListener('visibilitychange', visibilityChanged)
   fetchResult()
-  timer = setInterval(() => { if (polling.value) fetchResult() }, 1500)
 })
-
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  active = false
+  generation++
+  stopTimer()
+  document.removeEventListener('visibilitychange', visibilityChanged)
+})
 </script>
 
 <template>
@@ -50,12 +108,15 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         </div>
       </section>
 
-      <div v-if="!submission" class="empty">
+      <div v-if="error" class="panel error-panel" role="alert">
+        <p>{{ error }}</p><button class="btn-ghost" @click="retry">重试</button>
+      </div>
+      <div v-if="!submission && !error" class="empty">
         <div class="empty-mark"><span class="skeleton" style="width: 20px; height: 20px;"></span></div>
         <h3>正在读取提交结果</h3>
       </div>
 
-      <template v-else>
+      <template v-if="submission">
         <section class="panel submission-panel">
           <div class="panel-head">
             <div class="ph-label"><p class="eyebrow">Submission</p><h3>提交 #{{ submission.id }}</h3></div>
