@@ -38,9 +38,9 @@ AI 生产开关默认关闭。开启前必须完成 [`docs/ai-data-governance.md
 
 | 层 | 当前实现 |
 | --- | --- |
-| 前端 | Vue 3.5.39、Vite 6.4.3、Pinia 2.3.1、Vue Router 4.6.4、CodeMirror 6、Marked |
+| 前端 | Vue 3.5.43、Vite 6.4.3、Pinia 2.3.1、Vue Router 4.6.4、CodeMirror 6、Marked |
 | 前端测试 | Vitest 4.1.10、Vue Test Utils、Playwright 1.62.0、ESLint 10.8.1 |
-| 后端 | Python 3.12、FastAPI 0.115.6、Uvicorn 0.32.1、SQLAlchemy 2.0.36、Pydantic Settings 2.7.0 |
+| 后端 | Python 3.12、FastAPI 0.142.4、Uvicorn 0.32.1、SQLAlchemy 2.0.36、Pydantic Settings 2.7.0 |
 | 数据库迁移 | Alembic 1.14.0；生产/CI 使用 MySQL 8.0，本地 Compose 使用 MySQL 8.4 |
 | 缓存/队列 | Redis 7（本地镜像 7.4-alpine，生产/CI 镜像 7-alpine） |
 | 判题与交互实验 | Docker、pytest、ipykernel、jupyter-client |
@@ -49,7 +49,7 @@ AI 生产开关默认关闭。开启前必须完成 [`docs/ai-data-governance.md
 
 ## 系统架构
 
-本地开发时，MySQL 和 Redis 运行在 Docker，FastAPI、确定性 Judge Worker、Environment Builder Worker 和 Vite 在宿主机运行。生产时使用 `docker-compose.prod.yml` 将迁移、API、确定性 Worker 和 Nginx 前端容器化；AI Worker 仅在审批后显式启用 `ai` profile。
+本地开发时，MySQL 和 Redis 运行在 Docker，FastAPI、确定性 Judge Worker、Environment Builder Worker、Account Worker、按 `DAI_LAB_ENABLED` 启用的 Lab Worker 和 Vite 在宿主机运行。生产时使用 `docker-compose.prod.yml` 将迁移、API、Judge、环境构建、账号、实验 Worker 和 Nginx 前端容器化；AI Worker 仅在审批后显式启用 `ai` profile。
 
 ```text
 浏览器
@@ -60,6 +60,8 @@ AI 生产开关默认关闭。开启前必须完成 [`docs/ai-data-governance.md
                              ├─ MySQL
                              ├─ Redis
                              ├─ Judge Worker → Docker 判题容器
+                             ├─ Account Worker → 名单导入 / 批量账号任务
+                             ├─ Lab Worker → 训练 / 推理 / 评分与租约恢复
                              ├─ Kernel Manager → Docker Kernel 容器
                              ├─ Environment Builder → Docker / Registry
                              └─ AI-compatible API（显式启用时）
@@ -78,7 +80,7 @@ AI 生产开关默认关闭。开启前必须完成 [`docs/ai-data-governance.md
 │   │   ├── schemas/          # Pydantic 请求/响应模型
 │   │   ├── services/         # 业务、判题、AI、环境、存储和 Studio 服务
 │   │   ├── seed_demo/        # 幂等 Demo 数据播种与校验
-│   │   └── worker/           # Judge Worker、Environment Builder Worker
+│   │   └── worker/           # Judge / AI、环境构建、账号、实验 Worker
 │   ├── alembic/versions/     # 数据库迁移
 │   ├── docker/judge/         # 判题镜像
 │   ├── docker/kernel/        # Notebook Kernel 镜像
@@ -257,7 +259,7 @@ docker build -t dai-kernel-python:latest backend/docker/kernel
 DAI_DEV_NO_BROWSER=1 ./scripts/dev-up.sh
 ```
 
-脚本会按顺序执行 MySQL/Redis 健康检查、统一 disposable 两阶段数据库 bootstrap、判题镜像构建、API、确定性 Judge Worker、Environment Builder Worker 和 Vite 启动，并检查 API ready 与前端 HTTP 状态。脚本会对子进程固定 `DAI_ENVIRONMENT=development` 与 `DAI_MIGRATION_MODE=disposable`，因此即使 `backend/.env` 是生产模板也不会把本地入口切换成生产迁移；生产真实 digest 只在生产 Compose/手动入口提供。AI Worker 不会随默认开发栈启动。
+脚本会按顺序执行 MySQL/Redis 健康检查、统一 disposable 两阶段数据库 bootstrap、判题镜像构建、API、确定性 Judge Worker、Environment Builder Worker、Account Worker、按 `DAI_LAB_ENABLED` 启用的 Lab Worker 和 Vite 启动，并检查 API ready 与前端 HTTP 状态。脚本会对子进程固定 `DAI_ENVIRONMENT=development` 与 `DAI_MIGRATION_MODE=disposable`，因此即使 `backend/.env` 是生产模板也不会把本地入口切换成生产迁移；生产真实 digest 只在生产 Compose/手动入口提供。AI Worker 不会随默认开发栈启动。
 
 常用变量：
 
@@ -294,7 +296,15 @@ DAI_WORKER_ROLE=ai DAI_AI_ENABLED=true .venv/bin/python -m app.worker.judge_work
 cd backend
 .venv/bin/python -m app.worker.environment_builder_worker
 
-# 终端 4：前端
+# 终端 4：账号后台任务
+cd backend
+.venv/bin/python -m app.worker.account_worker
+
+# 终端 5：实验 Worker（已设置 DAI_LAB_ENABLED=true 时）
+cd backend
+.venv/bin/python -m app.worker.lab_worker
+
+# 终端 6：前端
 cd frontend
 npm ci
 npm run dev
@@ -315,7 +325,15 @@ cd backend
 cd backend
 .venv\Scripts\python.exe -m app.worker.environment_builder_worker
 
-# 终端 4：前端
+# 终端 4：账号后台任务
+cd backend
+.venv\Scripts\python.exe -m app.worker.account_worker
+
+# 终端 5：实验 Worker（已设置 DAI_LAB_ENABLED=true 时）
+cd backend
+.venv\Scripts\python.exe -m app.worker.lab_worker
+
+# 终端 6：前端
 cd frontend
 npm ci
 npm run dev
@@ -519,6 +537,14 @@ docker compose -f docker-compose.prod.yml logs --tail=200 environment-builder
 - 当前为单机日志视图；将来 API 多副本部署时需引入集中式日志（Loki/ELK）后再扩展；
 - 尚无主动告警：错误率突增或 `review_required` 积压超阈值时的通知（邮件/webhook）属于后续增强。
 
+## 教学关闭与队列升级规则
+
+- 学期关闭、班级归档、授课实例由 `active` 转为不可写状态，共用事务内检查；任何 `started` 考试（包括已超时但未收卷记录）都会返回 `409 EXAMS_IN_PROGRESS`。先完成收卷，再关闭；DELETE 与 PATCH 同样执行此规则。
+- 关闭后学生可读既有内容，不能新增作业提交、开考或保存答案；已受理评分、系统收卷和恢复继续运行。
+- 作业页面通过 `GET /api/v1/assignments/{id}/my-progress` 恢复当前学生每题最新提交及历史完成状态，不再依赖个人最近 100 条记录。编辑草稿只保留在页面内存，刷新不保留；离开有未提交修改时提示。
+- Judge 消息仍由 `RPUSH` 入队，消费者改为 `BLPOP` 并轮转作业/考试队列；升级需协调停止旧消费者，再启动全部新消费者（包括已启用的 AI Worker），避免新旧消费方向混跑。保留现存 Redis 消息，勿清空队列；数据库条件领取继续防止重复执行。
+- 名单 XLSX 的 Nginx 请求上限为 6 MiB，课程学生 CSV 为 3 MiB，为 multipart 留余量；后端文件上限仍为 5 / 2 MiB。
+
 ## 数据库迁移、初始化与回滚
 
 开发库：
@@ -554,7 +580,9 @@ cd backend
 .venv/bin/python -m alembic check  # 需要可连接的数据库
 ```
 
-CI 会分别运行 SQLite 和 MySQL 测试，并跳过需要真实 Docker/Kernel 的历史实验测试文件；完整 CI 门禁见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+CI 分别运行 SQLite 和 MySQL 测试；独立 `lab-runtime` 任务构建当前 Judge/Kernel 镜像，实际执行 CPU 沙箱测试，并以 JUnit 检查零失败、零跳过。PyTorch、GPU、学校并发容量不在该轻量门禁内。完整 CI 门禁见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+
+本轮逐项修复、隔离验证命令、实际结果和未验证范围见 [2026-10-09 修复验证记录](docs/review-fixes-20261009.md)。本地测试不要连接业务 Redis；测试夹具同时替换 FastAPI Redis 依赖和 Judge 服务工厂。
 
 ### 前端
 
