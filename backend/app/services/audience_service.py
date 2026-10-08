@@ -37,9 +37,10 @@ def _link_models(task_type: str):
     raise ValueError(f"unknown task_type: {task_type}")
 
 
-def _task_model(db: Session, task_type: str, task_id: int):
+def _task_model(db: Session, task_type: str, task_id: int, *, current: bool = False):
     model = Assignment if task_type == "assignment" else Exam
-    task = db.get(model, task_id)
+    task = (db.scalar(select(model).where(model.id == task_id).with_for_update()
+                      .execution_options(populate_existing=True)) if current else db.get(model, task_id))
     if task is None:
         raise api_error(404, "TASK_NOT_FOUND", "任务不存在")
     return task
@@ -183,48 +184,59 @@ def save_audience(
     db.flush()
 
 
-def effective_student_ids(db: Session, *, task_type: str, task_id: int, course: Course) -> set[int]:
-    task = _task_model(db, task_type, task_id)
+def effective_student_ids(db: Session, *, task_type: str, task_id: int, course: Course,
+                          current: bool = False) -> set[int]:
+    # Write admission calls this while holding the policy lock. FOR UPDATE is
+    # required on every membership read: the lock alone does not reset an
+    # InnoDB snapshot established earlier by authentication or task lookup.
+    def rows(query):
+        if current:
+            query = query.with_for_update().execution_options(populate_existing=True)
+        return db.scalars(query).all()
+
+    task = _task_model(db, task_type, task_id, current=current)
     mode = task.audience_mode or ALL_ENROLLED
     base: set[int] = set()
     if mode == ALL_ENROLLED:
-        base = set(db.scalars(
+        base = set(rows(
             select(CourseEnrollment.student_id).where(
                 CourseEnrollment.course_id == course.id,
                 CourseEnrollment.status == "enrolled",
             )
-        ).all())
+        ))
     elif mode == SELECTED_CLASSES:
         if task_type == "assignment":
-            class_ids = list(db.scalars(
+            class_ids = rows(
                 select(AssignmentAudienceClass.teaching_class_id).where(AssignmentAudienceClass.assignment_id == task.id)
-            ).all())
+            )
         else:
-            class_ids = list(db.scalars(
+            class_ids = rows(
                 select(ExamAudienceClass.teaching_class_id).where(ExamAudienceClass.exam_id == task.id)
-            ).all())
+            )
         if class_ids:
-            base = set(db.scalars(
+            base = set(rows(
                 select(TeachingClassStudent.student_id).where(
                     TeachingClassStudent.teaching_class_id.in_(class_ids),
                     TeachingClassStudent.status == "active",
                 )
-            ).all())
+            ))
 
     if task_type == "assignment":
-        students = db.scalars(select(AssignmentAudienceStudent).where(AssignmentAudienceStudent.assignment_id == task.id)).all()
+        students = rows(select(AssignmentAudienceStudent).where(AssignmentAudienceStudent.assignment_id == task.id))
     else:
-        students = db.scalars(select(ExamAudienceStudent).where(ExamAudienceStudent.exam_id == task.id)).all()
+        students = rows(select(ExamAudienceStudent).where(ExamAudienceStudent.exam_id == task.id))
     include_ids = {row.student_id for row in students if row.kind == "include"}
     exclude_ids = {row.student_id for row in students if row.kind == "exclude"}
     result = (base - exclude_ids) | include_ids
     from app.models.teaching import CourseOffering, OfferingEnrollment
     if task.offering_id is None:
         return set()
-    offering = db.get(CourseOffering, task.offering_id)
+    offering = (db.scalar(select(CourseOffering).where(CourseOffering.id == task.offering_id)
+                          .with_for_update().execution_options(populate_existing=True))
+                if current else db.get(CourseOffering, task.offering_id))
     if not offering or offering.status != "active":
         return set()
-    members = set(db.scalars(select(OfferingEnrollment.student_id).where(OfferingEnrollment.offering_id == task.offering_id, OfferingEnrollment.status == "active")))
+    members = set(rows(select(OfferingEnrollment.student_id).where(OfferingEnrollment.offering_id == task.offering_id, OfferingEnrollment.status == "active")))
     return result & members
 
 
@@ -334,11 +346,31 @@ def exam_visible_condition(student_id: int):
     return and_(or_(base, include), or_(~exclude, include), offering_student_predicate(Exam.offering_id, student_id))
 
 
-def student_in_assignment_audience(db: Session, assignment: Assignment, student_id: int) -> bool:
+def student_in_assignment_audience(db: Session, assignment: Assignment, student_id: int,
+                                   *, current: bool = False) -> bool:
     return student_id in effective_student_ids(
         db, task_type="assignment", task_id=assignment.id,
-        course=assignment.course if assignment.course else None,
+        course=assignment.course if assignment.course else None, current=current,
     ) if assignment.course else False
+
+
+def require_student_assignment_access(db: Session, assignment: Assignment, student: User,
+                                     *, current: bool = False) -> None:
+    """One read boundary for task metadata, questions, self-tests and submission.
+
+    Callers performing a write also acquire the current teaching-context guard
+    before this check, so execution never relies on the unlocked read decision.
+    """
+    if student.role != 'student':
+        raise api_error(403, 'FORBIDDEN', '仅学生可以访问作业作答入口')
+    course = (db.scalar(select(Course).where(Course.id == assignment.course_id).with_for_update()
+                        .execution_options(populate_existing=True)) if current else db.get(Course, assignment.course_id))
+    if not course or course.status != 'published':
+        raise api_error(403, 'COURSE_NOT_AVAILABLE', '课程未发布')
+    if assignment.status != 'published':
+        raise api_error(403, 'ASSIGNMENT_NOT_AVAILABLE', '作业未发布')
+    if not student_in_assignment_audience(db, assignment, student.id, current=current):
+        raise api_error(403, 'NOT_IN_ASSIGNMENT_AUDIENCE', '你不在本次作业发布范围内')
 
 
 def student_in_exam_audience(db: Session, exam: Exam, student_id: int) -> bool:

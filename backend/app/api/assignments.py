@@ -10,7 +10,6 @@ from app.models import (
     Assignment,
     CodeGrade,
     Course,
-    CourseEnrollment,
     JudgeQuestion,
     QuestionRubric,
     Submission,
@@ -31,7 +30,7 @@ from app.services.time_utils import utc_now
 from app.services.audience_service import (
     assignment_visible_condition, import_audience_students, parse_student_csv,
     populate_audience_cache, require_effective_audience, save_audience,
-    student_in_assignment_audience,
+    require_student_assignment_access,
 )
 
 from app.services.offering_service import teacher_task_condition
@@ -240,15 +239,7 @@ def get_assignment(
     assignment = require_assignment(assignment_id, db)
     course = db.get(Course, assignment.course_id)
     if current_user.role == "student":
-        if not course or not (
-            student_in_assignment_audience(db, assignment, current_user.id)
-            or can_access_course_content(course, current_user, db)
-        ):
-            raise api_error(403, "FORBIDDEN", "没有权限查看该作业")
-        if assignment.status != "published":
-            raise api_error(403, "ASSIGNMENT_NOT_AVAILABLE", "作业未发布")
-        if not student_in_assignment_audience(db, assignment, current_user.id):
-            raise api_error(403, "NOT_IN_ASSIGNMENT_AUDIENCE", "你不在本次作业发布范围内")
+        require_student_assignment_access(db, assignment, current_user)
     elif not course or not can_access_course_content(course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限查看该作业")
     return _assignment_with_summary(db, assignment)
@@ -468,10 +459,10 @@ def list_questions(
 ):
     assignment = require_assignment(assignment_id, db)
     course = db.get(Course, assignment.course_id)
-    if not course or not can_access_course_content(course, current_user, db):
+    if current_user.role == 'student':
+        require_student_assignment_access(db, assignment, current_user)
+    elif not course or not can_access_course_content(course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限查看题目")
-    if current_user.role == "student" and assignment.status != "published":
-        raise api_error(403, "ASSIGNMENT_NOT_AVAILABLE", "作业未发布")
     questions = db.scalars(select(JudgeQuestion).where(JudgeQuestion.assignment_id == assignment_id).order_by(JudgeQuestion.id)).all()
     items = []
     for question in questions:

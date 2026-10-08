@@ -6,11 +6,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.courses import can_access_course_content
 from app.config import Settings, get_settings
 from app.dependencies import PaginationParams, get_current_user, get_db, get_redis_client, pagination
 from app.errors import api_error
-from app.models import Assignment, CodeGrade, Course, CourseEnrollment, JudgeQuestion, Submission, User
+from app.models import Assignment, CodeGrade, Course, JudgeQuestion, Submission, User
 from app.schemas import ImportDiagnosticRead, PaginatedResponse, SampleRunResponse, SubmissionCreate, SubmissionRead
 from app.schemas.unified_submissions import TeacherJudgeSubmissionRead
 from app.services.environment_service import (
@@ -24,7 +23,7 @@ from app.services.import_policy import classify_imports
 from app.services.time_utils import as_utc, utc_now
 from app.worker.judge_worker import _get_timeout, _run_docker_pytest, _status_from_pytest
 from app.services.student_ai_results import build_student_grading_breakdown
-from app.services.audience_service import student_in_assignment_audience
+from app.services.audience_service import require_student_assignment_access
 from app.services.offering_service import require_student_task_write
 
 router = APIRouter(prefix="/judge", tags=["judge"])
@@ -80,20 +79,11 @@ def create_submission(
     assignment = db.get(Assignment, question.assignment_id)
     if not assignment:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
+    # Preserve the submission endpoint's established unpublished-task response.
     if assignment.status != "published":
         raise api_error(400, "ASSIGNMENT_NOT_AVAILABLE", "作业不可提交")
     assignment = require_student_task_write(db, assignment, current_user)
-    course = db.get(Course, assignment.course_id)
-    if current_user.role == "student":
-        if not course or not (
-            student_in_assignment_audience(db, assignment, current_user.id)
-            or can_access_course_content(course, current_user, db)
-        ):
-            raise api_error(403, "FORBIDDEN", "没有权限提交该题目")
-        if not student_in_assignment_audience(db, assignment, current_user.id):
-            raise api_error(403, "NOT_IN_ASSIGNMENT_AUDIENCE", "你不在本次作业发布范围内")
-    elif not course or not can_access_course_content(course, current_user, db):
-        raise api_error(403, "FORBIDDEN", "没有权限提交该题目")
+    require_student_assignment_access(db, assignment, current_user, current=True)
     require_assignment_before_deadline(assignment)
     # check max attempts
     if question.max_attempts is not None:
@@ -282,20 +272,7 @@ def sample_run(
     if not assignment:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
     assignment = require_student_task_write(db, assignment, current_user)
-    if assignment.status != "published":
-        raise api_error(403, "ASSIGNMENT_NOT_AVAILABLE", "作业未发布")
-    course = db.get(Course, assignment.course_id)
-    if not course or course.status != "published":
-        raise api_error(403, "COURSE_NOT_AVAILABLE", "课程未发布")
-    enrollment = db.scalar(
-        select(CourseEnrollment).where(
-            CourseEnrollment.course_id == course.id,
-            CourseEnrollment.student_id == current_user.id,
-            CourseEnrollment.status == "enrolled",
-        )
-    )
-    if not enrollment:
-        raise api_error(403, "NOT_ENROLLED", "请先选课")
+    require_student_assignment_access(db, assignment, current_user, current=True)
     require_assignment_before_deadline(assignment)
 
     public_cases = question.public_cases or []
