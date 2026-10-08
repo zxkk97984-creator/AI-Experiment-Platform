@@ -9,6 +9,7 @@ import { judgeAPI } from '../../api/judge.js'
 import { useAppStore } from '../../stores/app.js'
 import { sanitizeHtml } from '../../utils/sanitize.js'
 import { formatDateTime, parseApiDateTime } from '../../utils/format.js'
+import { createLatestRequestGuard } from '../../utils/latestRequest.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -40,6 +41,23 @@ const testResult = ref(null)
 const deadlineClock = ref(Date.now())
 
 const MAX_POLL_COUNT = 120
+let pageActive = true
+let questionGeneration = 0
+const assignmentRequests = createLatestRequestGuard()
+const sampleRequests = createLatestRequestGuard()
+// Historical restoration, submission and polling all write the same result panel.
+const resultRequests = createLatestRequestGuard()
+let submissionSequence = 0
+const acknowledgedSubmissions = new Map()
+
+function questionContext(question) {
+  return { questionId: question.id, generation: questionGeneration }
+}
+
+function isCurrentQuestion(context) {
+  return pageActive && context.generation === questionGeneration
+    && questions.value[activeQ.value]?.id === context.questionId
+}
 
 const lineCount = computed(() => {
   let count = 1
@@ -115,15 +133,19 @@ function refreshDeadlineClock() {
   deadlineClock.value = Date.now()
 }
 
-async function refreshAssignment() {
+async function refreshAssignment(isRelevant = () => true) {
+  if (!pageActive || !isRelevant()) return
+  const request = assignmentRequests.begin()
   refreshDeadlineClock()
   try {
     const response = await assignmentsAPI.get(route.params.id)
-    assignment.value = response.data
+    if (pageActive && assignmentRequests.isLatest(request) && isRelevant()) assignment.value = response.data
   } catch {
     // 焦点刷新失败不清空当前页面，后续提交仍由服务端门禁兜底。
   }
 }
+
+function handleFocus() { refreshAssignment() }
 
 function handleVisibilityChange() {
   if (document.visibilityState === 'visible') refreshAssignment()
@@ -155,19 +177,20 @@ async function confirmLeave() {
 
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
-  window.addEventListener('focus', refreshAssignment)
+  window.addEventListener('focus', handleFocus)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   deadlineTimer = window.setInterval(refreshDeadlineClock, 30000)
+  const assignmentRequest = assignmentRequests.begin()
   const results = await Promise.allSettled([
     assignmentsAPI.get(route.params.id),
     assignmentsAPI.getQuestions(route.params.id),
     judgeAPI.list({ page_size: 100 }),
   ])
+  if (!pageActive) return
   if (results[0].status === 'fulfilled') {
-    assignment.value = results[0].value.data
-  } else {
-    app.showToast('加载作业失败', 'error')
-  }
+    // A failed or still-pending focus refresh must not discard our only usable response.
+    if (!assignment.value || assignmentRequests.isLatest(assignmentRequest)) assignment.value = results[0].value.data
+  } else if (assignmentRequests.isLatest(assignmentRequest)) app.showToast('加载作业失败', 'error')
   if (results[1].status === 'fulfilled') {
     const qData = results[1].value.data
     questions.value = qData.items || qData || []
@@ -200,32 +223,44 @@ const currentCompleted = computed(() => {
 
 let deadlineTimer = null
 onUnmounted(() => {
+  pageActive = false
+  questionGeneration++
+  assignmentRequests.invalidate()
+  sampleRequests.invalidate()
   stopSubmitPolling()
   if (deadlineTimer) window.clearInterval(deadlineTimer)
-  window.removeEventListener('focus', refreshAssignment)
+  window.removeEventListener('focus', handleFocus)
   window.removeEventListener('beforeunload', onBeforeUnload)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
 async function selectQuestion(idx) {
+  questionGeneration++
+  sampleRequests.invalidate()
   stopSubmitPolling()
   activeQ.value = idx
   testResult.value = null
   submitResult.value = null
   submitting.value = false
+  testing.value = false
   submitPolling.value = false
   bottomTab.value = 'self-test'
   await restoreLatestSubmission(questions.value[idx])
 }
 
 async function restoreLatestSubmission(question) {
-  if (!question) return
+  if (!question || !pageActive) return
   const latest = latestSubmissionByQuestion.get(question.id)
   if (!latest) return
 
+  stopSubmitPolling()
+  const context = questionContext(question)
+  const request = resultRequests.begin()
+  const isCurrent = () => isCurrentQuestion(context) && resultRequests.isLatest(request)
   bottomTab.value = 'submit'
   try {
     const res = await judgeAPI.getResult(latest.id)
+    if (!isCurrent()) return
     submitResult.value = res.data
     const draft = drafts.get(question.id)
     if (draft && !draft.edited && typeof res.data.code === 'string') {
@@ -234,7 +269,7 @@ async function restoreLatestSubmission(question) {
     }
     if (!isSubmissionComplete(res.data, question.grading_mode || 'legacy')) {
       submitting.value = true
-      pollSubmitResult(latest.id, question.id, question.grading_mode || 'legacy')
+      pollSubmitResult(latest.id, question.id, question.grading_mode || 'legacy', isCurrent)
     }
   } catch {
     // 历史结果回载失败不阻塞做题；用户仍可从提交记录页查看。
@@ -257,6 +292,9 @@ async function handleSelfTest() {
     app.showToast('作业已截止，请联系教师延长截止时间后再试', 'error')
     return
   }
+  const context = questionContext(q)
+  const request = sampleRequests.begin()
+  const isCurrent = () => isCurrentQuestion(context) && sampleRequests.isLatest(request)
   testing.value = true
   testResult.value = null
   try {
@@ -264,14 +302,17 @@ async function handleSelfTest() {
       question_id: q.id,
       code: code.value,
     })
+    if (!isCurrent()) return
     // sample-run 直接返回 {output, status, execution_time_ms}，无 submission ID
     testResult.value = res.data
-    testing.value = false
   } catch (e) {
-    if (isDeadlineError(e)) await refreshAssignment()
+    if (!isCurrent()) return
+    if (isDeadlineError(e)) await refreshAssignment(isCurrent)
+    if (!isCurrent()) return
     const msg = e.response?.data?.detail?.message || '自测请求失败'
     app.showToast(msg, 'error')
-    testing.value = false
+  } finally {
+    if (isCurrent()) testing.value = false
   }
 }
 
@@ -284,6 +325,11 @@ async function handleSubmit() {
     app.showToast('作业已截止，请联系教师延长截止时间后再试', 'error')
     return
   }
+  stopSubmitPolling()
+  const context = questionContext(q)
+  const request = resultRequests.begin()
+  const isCurrent = () => isCurrentQuestion(context) && resultRequests.isLatest(request)
+  const sequence = ++submissionSequence
   submitting.value = true
   submitResult.value = null
   bottomTab.value = 'submit'
@@ -291,28 +337,35 @@ async function handleSubmit() {
   const submittedCode = code.value
   try {
     const res = await judgeAPI.submit({ question_id: q.id, code: submittedCode })
+    if (!pageActive) return
     if (res.data.id != null) {
-      const draft = drafts.get(submittingQId)
-      if (draft) {
-        // A newer edit stays dirty against the exact code received by the server.
-        draft.baseline = submittedCode
-        draft.edited = true
+      // A received acknowledgement belongs to its question even after a switch,
+      // but an older request cannot undo a newer acknowledged submission.
+      if (sequence > (acknowledgedSubmissions.get(submittingQId) || 0)) {
+        acknowledgedSubmissions.set(submittingQId, sequence)
+        latestSubmissionByQuestion.set(submittingQId, { ...res.data, question_id: submittingQId })
+        const draft = drafts.get(submittingQId)
+        if (draft) {
+          draft.baseline = submittedCode
+          draft.edited = true
+        }
       }
-      pollSubmitResult(res.data.id, submittingQId, q.grading_mode || 'legacy')
-    } else {
+      if (isCurrent()) pollSubmitResult(res.data.id, submittingQId, q.grading_mode || 'legacy', isCurrent)
+    } else if (isCurrent()) {
       app.showToast('提交未返回有效ID', 'error')
-      submitting.value = false
     }
   } catch (e) {
-    if (isDeadlineError(e)) await refreshAssignment()
+    if (!isCurrent()) return
+    if (isDeadlineError(e)) await refreshAssignment(isCurrent)
+    if (!isCurrent()) return
     const msg = e.response?.data?.detail?.message || '提交失败'
     app.showToast(msg, 'error')
-    submitting.value = false
+  } finally {
+    if (isCurrent() && !submitPolling.value) submitting.value = false
   }
 }
 
 let submitPollTimer = null
-let submitPollCount = 0
 
 // Resizable editor
 const editorHeight = ref(300)
@@ -359,14 +412,17 @@ function isSubmissionComplete(result, gradingMode) {
   return ['accepted', 'graded'].includes(result.status)
 }
 
-function pollSubmitResult(submissionId, questionId, gradingMode) {
-  stopSubmitPolling()
+function pollSubmitResult(submissionId, questionId, gradingMode, isCurrent) {
+  if (!isCurrent()) return
   submitPolling.value = true
-  submitPollCount = 0
-  submitPollTimer = setInterval(async () => {
+  let submitPollCount = 0
+  const poll = async () => {
+    if (!isCurrent()) return
+    submitPollTimer = null
     submitPollCount++
     try {
       const res = await judgeAPI.getResult(submissionId)
+      if (!isCurrent()) return
       submitResult.value = res.data
       if (isSubmissionComplete(res.data, gradingMode)) {
         stopSubmitPolling()
@@ -375,19 +431,26 @@ function pollSubmitResult(submissionId, questionId, gradingMode) {
         if (['accepted', 'graded'].includes(res.data.status) && questionId != null) {
           completedQuestions.value.add(questionId)
         }
+        return
       }
     } catch { /* ignore */ }
+    if (!isCurrent()) return
     if (submitPollCount >= MAX_POLL_COUNT) {
       stopSubmitPolling()
       submitting.value = false
       submitPolling.value = false
       app.showToast('判题超时，请重试', 'error')
+      return
     }
-  }, 1000)
+    submitPollTimer = setTimeout(poll, 1000)
+  }
+  submitPollTimer = setTimeout(poll, 1000)
 }
 
 function stopSubmitPolling() {
-  if (submitPollTimer) { clearInterval(submitPollTimer); submitPollTimer = null }
+  resultRequests.invalidate()
+  if (submitPollTimer) { clearTimeout(submitPollTimer); submitPollTimer = null }
+  submitPolling.value = false
 }
 </script>
 
