@@ -8,6 +8,7 @@ const showToast = vi.fn()
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: { id: '4' } }),
   useRouter: () => ({ push }),
+  onBeforeRouteLeave: vi.fn(),
   createRouter: vi.fn(() => ({
     beforeEach: vi.fn(),
     afterEach: vi.fn(),

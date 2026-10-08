@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
+import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
 import StudentAIGradingResult from '../../components/ai/StudentAIGradingResult.vue'
 import { assignmentsAPI } from '../../api/assignments.js'
 import { judgeAPI } from '../../api/judge.js'
@@ -16,7 +17,21 @@ const app = useAppStore()
 const assignment = ref(null)
 const questions = ref([])
 const activeQ = ref(0)
-const code = ref('')
+// Drafts belong to this mounted page and each question, never to a shared browser account.
+const drafts = reactive(new Map())
+const code = computed({
+  get: () => drafts.get(questions.value[activeQ.value]?.id)?.code || '',
+  set: (value) => {
+    const draft = drafts.get(questions.value[activeQ.value]?.id)
+    if (draft && draft.code !== value) {
+      draft.code = value
+      draft.edited = true
+    }
+  },
+})
+const hasUnsavedDrafts = computed(() => [...drafts.values()].some(draft => draft.code !== draft.baseline))
+const leaveTarget = ref(null)
+const allowLeave = ref(false)
 const submitting = ref(false)
 const testing = ref(false)
 const bottomTab = ref('self-test')
@@ -118,7 +133,31 @@ function isDeadlineError(error) {
   return error.response?.data?.detail?.code === 'ASSIGNMENT_DEADLINE_PASSED'
 }
 
+function onBeforeUnload(event) {
+  if (!hasUnsavedDrafts.value) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+onBeforeRouteLeave((to, _from, next) => {
+  if (allowLeave.value || !hasUnsavedDrafts.value) { next(); return }
+  next(false)
+  leaveTarget.value = to.fullPath
+})
+
+async function confirmLeave() {
+  const target = leaveTarget.value
+  leaveTarget.value = null
+  allowLeave.value = true
+  try { await router.push(target) }
+  finally { allowLeave.value = false }
+}
+
 onMounted(async () => {
+  window.addEventListener('beforeunload', onBeforeUnload)
+  window.addEventListener('focus', refreshAssignment)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  deadlineTimer = window.setInterval(refreshDeadlineClock, 30000)
   const results = await Promise.allSettled([
     assignmentsAPI.get(route.params.id),
     assignmentsAPI.getQuestions(route.params.id),
@@ -132,6 +171,10 @@ onMounted(async () => {
   if (results[1].status === 'fulfilled') {
     const qData = results[1].value.data
     questions.value = qData.items || qData || []
+    for (const question of questions.value) {
+      const initial = question.starter_code || ''
+      drafts.set(question.id, { code: initial, baseline: initial, edited: false })
+    }
   }
   if (results[2].status === 'fulfilled') {
     const subs = results[2].value.data.items || results[2].value.data || []
@@ -146,12 +189,8 @@ onMounted(async () => {
     app.showToast('加载作业失败', 'error')
   }
   if (questions.value.length > 0) {
-    code.value = questions.value[0].starter_code || ''
     await restoreLatestSubmission(questions.value[0])
   }
-  window.addEventListener('focus', refreshAssignment)
-  document.addEventListener('visibilitychange', handleVisibilityChange)
-  deadlineTimer = window.setInterval(refreshDeadlineClock, 30000)
 })
 
 const currentCompleted = computed(() => {
@@ -164,13 +203,13 @@ onUnmounted(() => {
   stopSubmitPolling()
   if (deadlineTimer) window.clearInterval(deadlineTimer)
   window.removeEventListener('focus', refreshAssignment)
+  window.removeEventListener('beforeunload', onBeforeUnload)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
 async function selectQuestion(idx) {
   stopSubmitPolling()
   activeQ.value = idx
-  code.value = questions.value[idx]?.starter_code || ''
   testResult.value = null
   submitResult.value = null
   submitting.value = false
@@ -188,8 +227,10 @@ async function restoreLatestSubmission(question) {
   try {
     const res = await judgeAPI.getResult(latest.id)
     submitResult.value = res.data
-    if (typeof res.data.code === 'string') {
-      code.value = res.data.code
+    const draft = drafts.get(question.id)
+    if (draft && !draft.edited && typeof res.data.code === 'string') {
+      draft.code = res.data.code
+      draft.baseline = res.data.code
     }
     if (!isSubmissionComplete(res.data, question.grading_mode || 'legacy')) {
       submitting.value = true
@@ -247,9 +288,16 @@ async function handleSubmit() {
   submitResult.value = null
   bottomTab.value = 'submit'
   const submittingQId = q.id
+  const submittedCode = code.value
   try {
-    const res = await judgeAPI.submit({ question_id: q.id, code: code.value })
+    const res = await judgeAPI.submit({ question_id: q.id, code: submittedCode })
     if (res.data.id != null) {
+      const draft = drafts.get(submittingQId)
+      if (draft) {
+        // A newer edit stays dirty against the exact code received by the server.
+        draft.baseline = submittedCode
+        draft.edited = true
+      }
       pollSubmitResult(res.data.id, submittingQId, q.grading_mode || 'legacy')
     } else {
       app.showToast('提交未返回有效ID', 'error')
@@ -624,6 +672,15 @@ function stopSubmitPolling() {
 
       </div>
     </template>
+    <ConfirmDialog
+      v-if="leaveTarget"
+      title="有尚未提交的代码"
+      message="未提交的修改仅保留在当前页面。离开后这些修改将丢失，确定离开吗？"
+      confirm-text="放弃草稿并离开"
+      cancel-text="继续编辑"
+      @confirm="confirmLeave"
+      @cancel="leaveTarget = null"
+    />
   </AppLayout>
 </template>
 
