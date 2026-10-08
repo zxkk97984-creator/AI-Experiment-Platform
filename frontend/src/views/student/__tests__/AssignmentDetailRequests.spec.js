@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import AssignmentDetailView from '../AssignmentDetailView.vue'
 
 const mocks = vi.hoisted(() => ({
-  get: vi.fn(), getQuestions: vi.fn(), list: vi.fn(), submit: vi.fn(),
+  get: vi.fn(), getQuestions: vi.fn(), myProgress: vi.fn(), submit: vi.fn(),
   getResult: vi.fn(), sampleRun: vi.fn(), showToast: vi.fn(),
 }))
 vi.mock('vue-router', () => ({
@@ -47,7 +47,7 @@ describe('作业请求上下文与串行轮询', () => {
     vi.resetAllMocks()
     mocks.get.mockResolvedValue({ data: assignment })
     mocks.getQuestions.mockResolvedValue({ data: questions })
-    mocks.list.mockResolvedValue({ data: { items: [] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [] } })
     mocks.submit.mockResolvedValue({ data: { id: 301 } })
     mocks.getResult.mockResolvedValue(result(301, 'running'))
   })
@@ -55,7 +55,7 @@ describe('作业请求上下文与串行轮询', () => {
 
   it('切题后迟到历史不覆盖当前结果，也不启动旧题轮询', async () => {
     const older = deferred()
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 101, question_id: 10 }, { id: 102, question_id: 20 }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 101, question_id: 10 }, { latest_submission_id: 102, question_id: 20 }] } })
     mocks.getResult.mockImplementation(id => id === 101 ? older.promise : Promise.resolve(result(102)))
     await open()
     await choose(1)
@@ -70,7 +70,7 @@ describe('作业请求上下文与串行轮询', () => {
 
   it('同题新提交使较早的历史响应失效', async () => {
     const older = deferred()
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 101, question_id: 10 }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 101, question_id: 10 }] } })
     mocks.getResult.mockImplementation(id => id === 101 ? older.promise : Promise.resolve(result(301)))
     await open()
     await wrapper.get('#code-editor').setValue('new_answer')
@@ -195,7 +195,7 @@ describe('作业请求上下文与串行轮询', () => {
     const pending = deferred()
     if (phase === 'initial') mocks.getQuestions.mockReturnValueOnce(pending.promise)
     if (phase === 'history' || phase === 'initial') {
-      mocks.list.mockResolvedValue({ data: { items: [{ id: 101, question_id: 10 }] } })
+      mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 101, question_id: 10 }] } })
       if (phase === 'history') mocks.getResult.mockReturnValueOnce(pending.promise)
     }
     if (phase === 'submit') mocks.submit.mockReturnValueOnce(pending.promise)

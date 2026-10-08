@@ -24,6 +24,7 @@ vi.mock('../../../api/assignments.js', () => ({
   assignmentsAPI: {
     get: vi.fn(),
     getQuestions: vi.fn(),
+    myProgress: vi.fn(),
   },
 }))
 
@@ -77,7 +78,7 @@ async function mountPage(gradingMode, submissions = []) {
   assignmentsAPI.getQuestions.mockResolvedValue({
     data: { items: [question(gradingMode)] },
   })
-  judgeAPI.list.mockResolvedValue({ data: { items: submissions } })
+  assignmentsAPI.myProgress.mockResolvedValue({ data: { items: submissions.map(s => ({ ...s, latest_submission_id: s.id, completed: ['accepted', 'graded'].includes(s.status) })) } })
   judgeAPI.submit.mockResolvedValue({ data: { id: 101 } })
 
   const mod = await import('../AssignmentDetailView.vue')

@@ -36,6 +36,7 @@ export async function layoutFixture(page, role, options = {}) {
     if (path === '/exams/1') return reply({ id: 1, course_id: 1, title: longTitle, status: 'draft', duration_minutes: 60 })
     if (path === '/exams/1/questions') return reply([])
     if (path === '/experiments/submissions/1') return reply({ id: 1, student_name: user.real_name, student_username: user.username, module_title: longTitle, score: 85, reviewed_at: '2026-09-21T08:00:00Z', cells_snapshot: { intro: '# 实验说明', code: 'print(1)' }, cell_metadata: { intro: { type: 'markdown' }, code: { type: 'code' } } })
+    if (path === '/assignments/1/my-progress') return reply({ items: [] })
     if (path === '/assignments/1/questions') return reply([{ id: 2, title: '正数求和', description: '返回列表中所有正数的和；空列表返回 0。', signature: 'def sum_positive(values: list[int]) -> int:', function_name: 'sum_positive', starter_code: 'def sum_positive(values):\n    return 0', public_cases: Array.from({ length: 15 }, (_, i) => ({ args: [[i, -i, 3]], expected: i + 3 })) }])
     if (path === '/assignments/1') return reply({ id: 1, course_id: 1, title: longTitle, status: 'published', due_at: null })
     if (path.endsWith('/sample-run')) return reply({ status: 'accepted', stdout: '1 passed', execution_time_ms: 12 })

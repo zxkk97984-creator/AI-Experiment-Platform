@@ -24,6 +24,7 @@ vi.mock('../../../api/assignments.js', () => ({
   assignmentsAPI: {
     get: vi.fn(),
     getQuestions: vi.fn(),
+    myProgress: vi.fn(),
   },
 }))
 
@@ -90,7 +91,7 @@ async function mountPage({ assignmentSummary = basicSummary, assignmentOverrides
   assignmentsAPI.getQuestions.mockResolvedValue({
     data: { items: questions },
   })
-  judgeAPI.list.mockResolvedValue({ data: { items: submissions } })
+  assignmentsAPI.myProgress.mockResolvedValue({ data: { items: submissions.map(s => ({ ...s, latest_submission_id: s.id, completed: ['accepted', 'graded'].includes(s.status) })) } })
   wrapper = mount(AssignmentDetailView, {
     global: {
       plugins: [createPinia()],

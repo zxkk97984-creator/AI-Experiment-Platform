@@ -184,7 +184,7 @@ onMounted(async () => {
   const results = await Promise.allSettled([
     assignmentsAPI.get(route.params.id),
     assignmentsAPI.getQuestions(route.params.id),
-    judgeAPI.list({ page_size: 100 }),
+    assignmentsAPI.myProgress(route.params.id),
   ])
   if (!pageActive) return
   if (results[0].status === 'fulfilled') {
@@ -202,10 +202,10 @@ onMounted(async () => {
   if (results[2].status === 'fulfilled') {
     const subs = results[2].value.data.items || results[2].value.data || []
     for (const s of subs) {
-      if (!latestSubmissionByQuestion.has(s.question_id)) {
-        latestSubmissionByQuestion.set(s.question_id, s)
+      if (s.latest_submission_id != null) {
+        latestSubmissionByQuestion.set(s.question_id, { id: s.latest_submission_id, question_id: s.question_id, status: s.status })
       }
-      if (['accepted', 'graded'].includes(s.status)) completedQuestions.value.add(s.question_id)
+      if (s.completed) completedQuestions.value.add(s.question_id)
     }
   }
   if (!assignment.value && questions.value.length === 0) {
@@ -262,6 +262,7 @@ async function restoreLatestSubmission(question) {
     const res = await judgeAPI.getResult(latest.id)
     if (!isCurrent()) return
     submitResult.value = res.data
+    if (['accepted', 'graded'].includes(res.data.status)) completedQuestions.value.add(question.id)
     const draft = drafts.get(question.id)
     if (draft && !draft.edited && typeof res.data.code === 'string') {
       draft.code = res.data.code

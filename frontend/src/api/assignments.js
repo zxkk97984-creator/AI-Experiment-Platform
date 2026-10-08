@@ -8,6 +8,7 @@ export const assignmentsAPI = {
   publish(id) { return client.post(`/assignments/${id}/publish`) },
   deleteAssignment(id) { return client.delete(`/assignments/${id}`) },
   unpublishAssignment(id) { return client.post(`/assignments/${id}/unpublish`) },
+  myProgress(id) { return client.get(`/assignments/${id}/my-progress`) },
   getQuestions(assignmentId) { return client.get(`/assignments/${assignmentId}/questions`) },
   importAudienceStudents(assignmentId, kind, file) {
     const formData = new FormData()

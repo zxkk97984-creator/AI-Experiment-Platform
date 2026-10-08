@@ -18,7 +18,7 @@ async function prepare(page, submissions = []) {
     id, title: `题目 ${id}`, description: `完成题目 ${id}`, starter_code: `starter_${id}`,
     public_cases: [], grading_mode: 'legacy',
   })) }))
-  await page.route('**/api/v1/judge/submissions?*', route => route.fulfill({ json: { items: submissions, total: submissions.length } }))
+  await page.route('**/api/v1/assignments/1/my-progress', route => route.fulfill({ json: { items: submissions.map(s => ({ ...s, latest_submission_id: s.id, completed: ['accepted', 'graded'].includes(s.status) })) } }))
 }
 
 async function deferredRoute(page, pattern) {

@@ -4,7 +4,7 @@ import AssignmentDetailView from '../AssignmentDetailView.vue'
 
 const mocks = vi.hoisted(() => ({
   leave: null, push: vi.fn(), get: vi.fn(), getQuestions: vi.fn(),
-  list: vi.fn(), submit: vi.fn(), getResult: vi.fn(), sampleRun: vi.fn(), showToast: vi.fn(),
+  myProgress: vi.fn(), submit: vi.fn(), getResult: vi.fn(), sampleRun: vi.fn(), showToast: vi.fn(),
 }))
 vi.mock('vue-router', () => ({
   useRoute: () => ({ params: { id: '4' } }),
@@ -62,7 +62,7 @@ describe('作业页面内草稿与离开保护', () => {
     mocks.push.mockResolvedValue(undefined)
     mocks.get.mockResolvedValue({ data: { id: 4, course_id: 1, title: '多题作业' } })
     mocks.getQuestions.mockResolvedValue({ data: questions })
-    mocks.list.mockResolvedValue({ data: { items: [] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [] } })
     mocks.submit.mockResolvedValue({ data: { id: 301 } })
   })
 
@@ -70,6 +70,20 @@ describe('作业页面内草稿与离开保护', () => {
     wrapper?.unmount()
     wrapper = null
     vi.useRealTimers()
+  })
+
+  it('按作业进度恢复很早的提交，最近失败不抹掉历史完成标记', async () => {
+    mocks.myProgress.mockResolvedValue({ data: { items: [
+      { question_id: 10, latest_submission_id: 7, status: 'wrong_answer', completed: true },
+      { question_id: 20, latest_submission_id: null, status: null, completed: false },
+    ] } })
+    mocks.getResult.mockResolvedValue({ data: { id: 7, status: 'wrong_answer', code: 'old saved code' } })
+    await open()
+    expect(mocks.myProgress).toHaveBeenCalledWith('4')
+    expect(mocks.getResult).toHaveBeenCalledWith(7)
+    expect(wrapper.get('#code-editor').element.value).toBe('old saved code')
+    expect(wrapper.findAll('.q-dot')[0].classes()).toContain('done')
+    expect(wrapper.findAll('.q-dot')[1].classes()).not.toContain('done')
   })
 
   it('两道题分别编辑后往返切题保留草稿，未编辑的初始代码不阻止离开', async () => {
@@ -88,7 +102,7 @@ describe('作业页面内草稿与离开保护', () => {
   })
 
   it('历史代码建立干净基线，恢复后没有虚假的离开警告', async () => {
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 201, question_id: 10, status: 'wrong_answer' }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 201, question_id: 10, status: 'wrong_answer' }] } })
     mocks.getResult.mockResolvedValue({ data: { id: 201, status: 'wrong_answer', code: 'historical_10' } })
     await open()
     expect(wrapper.get('#code-editor').element.value).toBe('historical_10')
@@ -98,7 +112,7 @@ describe('作业页面内草稿与离开保护', () => {
 
   it('历史请求尚未完成时开始编辑，迟到历史不能覆盖草稿', async () => {
     const history = deferred()
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 201, question_id: 10, status: 'wrong_answer' }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 201, question_id: 10, status: 'wrong_answer' }] } })
     mocks.getResult.mockReturnValue(history.promise)
     await open()
     await wrapper.get('#code-editor').setValue('new_draft_10')
@@ -110,7 +124,7 @@ describe('作业页面内草稿与离开保护', () => {
   })
 
   it('已编辑题目的草稿不会被再次切回时回载的历史覆盖', async () => {
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 201, question_id: 10, status: 'wrong_answer' }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 201, question_id: 10, status: 'wrong_answer' }] } })
     mocks.getResult.mockResolvedValue({ data: { id: 201, status: 'wrong_answer', code: 'historical_10' } })
     await open()
     await wrapper.get('#code-editor').setValue('edited_10')
@@ -197,7 +211,7 @@ describe('作业页面内草稿与离开保护', () => {
 
   it('历史请求期间卸载，迟到响应不会重新注册页面定时器或离开监听', async () => {
     const history = deferred()
-    mocks.list.mockResolvedValue({ data: { items: [{ id: 201, question_id: 10, status: 'wrong_answer' }] } })
+    mocks.myProgress.mockResolvedValue({ data: { items: [{ latest_submission_id: 201, question_id: 10, status: 'wrong_answer' }] } })
     mocks.getResult.mockReturnValue(history.promise)
     await open()
     await wrapper.get('#code-editor').setValue('draft_10')

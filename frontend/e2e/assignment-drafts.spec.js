@@ -49,3 +49,23 @@ for (const width of [1440, 390]) {
     expect(consoleErrors).toEqual([])
   })
 }
+
+for (const width of [1440, 390]) {
+  test(`当前作业恢复旧提交及历史完成标记 ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await layoutFixture(page, 'student')
+    await page.route('**/api/v1/assignments/1/questions', route => route.fulfill({ json: [2, 3].map(id => ({
+      id, title: `题目 ${id}`, description: '恢复进度', starter_code: '', public_cases: [], grading_mode: 'legacy',
+    })) }))
+    await page.route('**/api/v1/assignments/1/my-progress', route => route.fulfill({ json: { items: [
+      { question_id: 2, latest_submission_id: 7, status: 'wrong_answer', completed: true },
+    ] } }))
+    await page.route('**/api/v1/judge/submissions/7/result', route => route.fulfill({ json: {
+      id: 7, question_id: 2, status: 'wrong_answer', code: 'old_saved_code',
+    } }))
+    await page.goto('/student/assignments/1')
+    await expect(page.locator('#code-editor')).toHaveValue('old_saved_code')
+    await expect(page.locator('.q-dot.done')).toHaveCount(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+  })
+}

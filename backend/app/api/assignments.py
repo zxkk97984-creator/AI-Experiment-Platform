@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, File, UploadFile, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.courses import can_access_course_content, require_course
@@ -15,6 +15,7 @@ from app.models import (
     Submission,
     User,
 )
+from app.schemas.assignment_progress import AssignmentProgressRead
 from app.schemas import (
     AssignmentCreate,
     CourseStudentImportResult,
@@ -243,6 +244,31 @@ def get_assignment(
     elif not course or not can_access_course_content(course, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限查看该作业")
     return _assignment_with_summary(db, assignment)
+
+
+@router.get("/{assignment_id}/my-progress", response_model=AssignmentProgressRead)
+def my_progress(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("student")),
+):
+    assignment = require_assignment(assignment_id, db)
+    require_student_assignment_access(db, assignment, current_user)
+    progress = (select(
+        Submission.question_id,
+        func.max(Submission.id).label("latest_submission_id"),
+        func.max(case((Submission.status.in_(("accepted", "graded")), 1), else_=0)).label("completed"),
+    ).join(JudgeQuestion, Submission.question_id == JudgeQuestion.id)
+        .where(JudgeQuestion.assignment_id == assignment_id, Submission.student_id == current_user.id)
+        .group_by(Submission.question_id).subquery())
+    rows = db.execute(select(JudgeQuestion.id, progress.c.latest_submission_id,
+                             Submission.status, progress.c.completed)
+                      .outerjoin(progress, progress.c.question_id == JudgeQuestion.id)
+                      .outerjoin(Submission, Submission.id == progress.c.latest_submission_id)
+                      .where(JudgeQuestion.assignment_id == assignment_id).order_by(JudgeQuestion.id))
+    return {"items": [{"question_id": qid, "latest_submission_id": sid,
+                       "status": state, "completed": bool(completed)}
+                      for qid, sid, state, completed in rows]}
 
 
 @router.patch("/{assignment_id}", response_model=AssignmentRead)
