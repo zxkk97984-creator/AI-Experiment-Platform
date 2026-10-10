@@ -62,6 +62,11 @@ def _get_timeout(question: JudgeQuestion, settings: Settings) -> int:
 def _status_from_pytest(returncode, stdout, stderr):
     output = f"{stdout}\n{stderr}"
     if returncode == 0:
+        # rc=0 必须伴随 pytest 汇总行：否则说明进程在 pytest 汇报之前就退出了
+        # （学生代码 os._exit(0) 等），不能据此给满分。
+        from app.services.deterministic_scoring import PYTEST_SUMMARY_RE
+        if not PYTEST_SUMMARY_RE.search(output):
+            return "system_error", 0
         return "accepted", 100
     if returncode == 124:
         return "time_limit_exceeded", 0
@@ -156,19 +161,20 @@ def pytest_sessionfinish(session, exitstatus):
 """
 
 
+def _parse_group_result(stdout, stderr, returncode) -> dict | None:
+    """兼容薄封装——校验逻辑统一走 deterministic_scoring 的唯一实现。
+
+    原先此处与 deterministic_scoring 各有一份"取第一个匹配"的同源拷贝，
+    两份都允许伪造行胜出；现在只有一份实现。
+    """
+    from app.services.deterministic_scoring import parse_group_result
+    return parse_group_result(stdout, stderr, returncode)
+
+
 def _parse_result_json(output: str) -> dict | None:
-    import re
-    match = re.search(r"DAI_RESULT_JSON=(\{.*?\})", output)
-    if match:
-        try:
-            data = _json.loads(match.group(1))
-            for k in ("passed", "failed", "errors", "skipped"):
-                if not isinstance(data.get(k), int) or data[k] < 0:
-                    return None
-            return data
-        except Exception:
-            return None
-    return None
+    """保留旧名以便既有调用/测试引用；语义与 deterministic_scoring.parse_result_json 一致。"""
+    from app.services.deterministic_scoring import parse_result_json
+    return parse_result_json(output)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -288,9 +294,10 @@ def run_test_groups(
             system_errors.append(f"测试组 {gid} Docker 执行异常: {exc}")
             results[gid] = {"passed": 0, "failed": 0, "errors": 1, "skipped": 0}
             continue
-        counts = _parse_result_json(stdout)
+        counts = _parse_group_result(stdout, stderr, returncode)
         if counts is None:
-            system_errors.append(f"测试组 {gid} 无法解析结果")
+            # 矛盾/不完整/不可验证的结果不得计分，也不得按 0 分计入
+            system_errors.append(f"测试组 {gid} 结果不可验证，已拒绝自动计分")
             results[gid] = {"passed": 0, "failed": 0, "errors": 1, "skipped": 0}
         else:
             results[gid] = counts

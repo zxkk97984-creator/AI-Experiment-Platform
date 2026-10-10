@@ -86,11 +86,14 @@ def create_submission(
     require_student_assignment_access(db, assignment, current_user, current=True)
     require_assignment_before_deadline(assignment)
     # check max attempts
+    # 平台自身故障（system_error：Docker/环境/结果不可验证等）不消耗学生次数——
+    # 只统计真正产生了判题结论的提交（见 docs 中的"系统错误不扣分"约定）。
     if question.max_attempts is not None:
         count = db.scalar(
             select(func.count()).select_from(Submission).where(
                 Submission.question_id == payload.question_id,
                 Submission.student_id == current_user.id,
+                Submission.grading_status != "system_error",
             )
         ) or 0
         if count >= question.max_attempts:

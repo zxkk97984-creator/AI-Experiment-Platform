@@ -228,7 +228,8 @@ def test_historical_submission_resubmit_uses_snapshot_digest(db_session_factory,
         captured: dict = {}
         def fake_run(workdir, *args, **kwargs):
             captured["image_ref"] = kwargs.get("image_ref")
-            return ("", "", 0, 10)
+            # 真实 pytest 通过时必定打印汇总行；rc=0 无汇总行会被判为不可验证
+            return ("1 passed in 0.01s", "", 0, 10)
 
         with patch("app.worker.judge_worker._run_docker_pytest", side_effect=fake_run), \
              patch("app.services.judge_queue.claim_job", return_value=True), \

@@ -132,7 +132,8 @@ def test_course_assignment_submission_and_worker_result(
         settings.judge_use_docker = True
         # mock Docker 子进程调用为本地 pytest
         with patch('app.worker.judge_worker._run_docker_pytest') as mock_docker:
-            mock_docker.return_value = ('...', '', 0, 100)
+            # 真实 pytest 通过时必定打印汇总行；rc=0 无汇总行会被判为不可验证
+            mock_docker.return_value = ('1 passed in 0.01s', '', 0, 100)
             process_submission(db, redis_client, settings, submission_id)
 
     result_response = client.get(
