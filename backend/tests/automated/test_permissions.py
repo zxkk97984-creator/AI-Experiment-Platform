@@ -409,7 +409,7 @@ def test_unenrolled_submit_rejected_no_db_side_effect(client, db_session_factory
     with db_session_factory() as db:
         before_sub = db.query(models.ExamSubmission).count()
         before_grade = db.query(models.ExamGrade).count()
-    r = client.post(f"{API}/exams/{d['eid']}/submit", headers=auth_header(tok), json={"score": 100})
+    r = client.post(f"{API}/exams/{d['eid']}/submit", headers=auth_header(tok), json={"expected_write_generation": 1, "score": 100})
     assert r.status_code == 404, f"submit: {r.status_code}"
     with db_session_factory() as db:
         assert db.query(models.ExamSubmission).count() == before_sub
@@ -424,7 +424,7 @@ def test_dropped_submit_rejected_no_db_side_effect(client, db_session_factory):
     assert revoked.status_code == 204
     with db_session_factory() as db:
         before_sub = db.query(models.ExamSubmission).count()
-    r = client.post(f"{API}/exams/{d['eid']}/submit", headers=auth_header(tok), json={"score": 100})
+    r = client.post(f"{API}/exams/{d['eid']}/submit", headers=auth_header(tok), json={"expected_write_generation": 1, "score": 100})
     assert r.status_code == 404, f"dropped submit: {r.status_code}"
     with db_session_factory() as db:
         assert db.query(models.ExamSubmission).count() == before_sub

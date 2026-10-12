@@ -217,7 +217,8 @@ def test_mysql_save_and_auto_submit_preserve_answer_and_grade(mysql_readonly_fac
                 return "submitted"
             try:
                 answer = save_answer(db, case.exam, case.questions[0], actor,
-                                     {"selected_options": ["A"], "expected_version": 1})
+                                     {"selected_options": ["A"], "expected_version": 1},
+                                     expected_write_generation=1)
                 return "saved", answer.version
             except HTTPException as exc:
                 db.rollback()
@@ -265,7 +266,7 @@ def test_mysql_batch_relocks_after_each_answer_commit(mysql_readonly_factory, cl
                     _wait(intervened, "automatic submission did not finish between batch items")
             event.listen(db, "after_commit", after_commit)
             try:
-                payload = ExamAnswerBatchRequest(answers=[
+                payload = ExamAnswerBatchRequest(expected_write_generation=1, answers=[
                     {"question_id": ident, "selected_options": ["A"], "expected_version": 1}
                     for ident in case.questions])
                 return put_answers_batch(case.exam, payload, db, actor)

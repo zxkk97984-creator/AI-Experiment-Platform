@@ -24,8 +24,14 @@ const emit = defineEmits(['save-score'])
 const TYPE_META = {
   single_choice: { label: '单选题', order: 1 },
   multi_choice: { label: '多选题', order: 2 },
-  code: { label: '编程题', order: 3 },
-  fill_blank: { label: '填空题', order: 4 },
+  true_false: { label: '判断题', order: 3 },
+  code: { label: '编程题', order: 4 },
+  fill_blank: { label: '填空题', order: 5 },
+}
+// 判断题不配置选项：按 T/F 原键展示对照与讲评
+const TRUE_FALSE_OPTIONS = Object.freeze([{ key: 'T', label: '正确' }, { key: 'F', label: '错误' }])
+function trueFalseText(key) {
+  return { T: '正确（T）', F: '错误（F）' }[String(key)] || '未配置'
 }
 const CHINESE_NUMBERS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 
@@ -148,7 +154,9 @@ function selectedSummary(row) {
     return parts.join('；')
   }
   const selected = (row.answer?.selected_options || []).map(String)
-  return selected.length ? selected.join('、') : '未作答'
+  if (!selected.length) return '未作答'
+  if (row.question.question_type === 'true_false') return selected.map(trueFalseText).join('、')
+  return selected.join('、')
 }
 
 function blankIds(question) {
@@ -319,17 +327,31 @@ function commitScore(row, event) {
           </template>
         </div>
 
-        <div v-if="['single_choice', 'multi_choice'].includes(row.question.question_type)" class="options" aria-label="题目选项与作答对照">
-          <div
-            v-for="(option, key) in row.question.options || {}"
-            :key="key"
-            class="option-row"
-            :class="optionTone(row, key)"
-          >
-            <b>{{ key }}</b>
-            <span>{{ option }}</span>
-            <i v-if="optionVerdict(row, key)" :class="optionVerdict(row, key).tone">{{ optionVerdict(row, key).text }}</i>
-          </div>
+        <div v-if="['single_choice', 'multi_choice', 'true_false'].includes(row.question.question_type)" class="options" aria-label="题目选项与作答对照">
+          <template v-if="row.question.question_type === 'true_false'">
+            <div
+              v-for="option in TRUE_FALSE_OPTIONS"
+              :key="option.key"
+              class="option-row"
+              :class="optionTone(row, option.key)"
+            >
+              <b>{{ option.key }}</b>
+              <span>{{ option.label }}</span>
+              <i v-if="optionVerdict(row, option.key)" :class="optionVerdict(row, option.key).tone">{{ optionVerdict(row, option.key).text }}</i>
+            </div>
+          </template>
+          <template v-if="row.question.question_type !== 'true_false'">
+            <div
+              v-for="(option, key) in row.question.options || {}"
+              :key="key"
+              class="option-row"
+              :class="optionTone(row, key)"
+            >
+              <b>{{ key }}</b>
+              <span>{{ option }}</span>
+              <i v-if="optionVerdict(row, key)" :class="optionVerdict(row, key).tone">{{ optionVerdict(row, key).text }}</i>
+            </div>
+          </template>
         </div>
 
         <template v-else-if="row.question.question_type === 'code'">
@@ -360,7 +382,10 @@ function commitScore(row, event) {
 
         <div class="standard-answer" :class="answerState(row).tone">
           <span>{{ row.question.question_type === 'code' ? '参考答案' : '标准答案' }}</span>
-          <code v-if="['single_choice', 'multi_choice'].includes(row.question.question_type)">
+          <code v-if="row.question.question_type === 'true_false'">
+            {{ correctKeys(row.question).length ? trueFalseText(correctKeys(row.question)[0]) : '未配置' }}
+          </code>
+          <code v-else-if="['single_choice', 'multi_choice'].includes(row.question.question_type)">
             {{ correctKeys(row.question).join('、') || '未配置' }}
           </code>
           <ul v-else-if="row.question.question_type === 'fill_blank'">

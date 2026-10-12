@@ -11,7 +11,10 @@ const props = defineProps({
 })
 const emit = defineEmits(['save', 'close'])
 
-const form = ref({ title: '', course_id: '', duration_minutes: 60, start_at: '', end_at: '' })
+const form = ref({
+  title: '', course_id: '', duration_minutes: 60, start_at: '', end_at: '',
+  exam_kind: 'quiz', timing_mode: 'unified', shuffle_questions: false, shuffle_options: false,
+})
 const offeringId = ref('')
 const courseOfferings = computed(() => props.offerings.filter(o => o.course_id === Number(form.value.course_id) && o.status === 'active'))
 watch(() => form.value.course_id, () => { offeringId.value = '' })
@@ -52,6 +55,10 @@ function save() {
     duration_minutes: Number(form.value.duration_minutes),
     start_at: form.value.start_at || null,
     end_at: form.value.end_at || null,
+    exam_kind: form.value.exam_kind,
+    timing_mode: form.value.timing_mode,
+    shuffle_questions: Boolean(form.value.shuffle_questions),
+    shuffle_options: Boolean(form.value.shuffle_options),
   })
 }
 </script>
@@ -62,9 +69,11 @@ function save() {
       <header class="create-heading"><strong>创建考试</strong><button class="create-close" aria-label="关闭" @click="emit('close')"><AppIcon name="close" :size="18" /></button></header>
       <div class="form-group"><label>考试名称</label><input v-model="form.title" name="title" placeholder="输入考试名称" /></div>
       <div class="grid-2"><div class="form-group"><label>课程</label><button type="button" class="course-picker" @click="openCourseModal"><span v-if="selectedCourse">{{ selectedCourse.title }}（ID: {{ selectedCourse.id }}）</span><span v-else-if="form.course_id">课程 ID: {{ form.course_id }}</span><span v-else class="placeholder">选择课程</span><AppIcon name="chevron-down" :size="17" /></button></div><div class="form-group"><label>时长（分钟）</label><input v-model.number="form.duration_minutes" name="duration-minutes" type="number" min="1" /></div></div>
-      <div class="grid-2"><div class="form-group"><label>开始时间</label><input v-model="form.start_at" type="datetime-local" /></div><div class="form-group"><label>最晚进入时间</label><input v-model="form.end_at" type="datetime-local" /></div></div>
+      <div class="grid-2"><div class="form-group"><label>开始时间</label><input v-model="form.start_at" type="datetime-local" /></div><div class="form-group"><label>{{ form.timing_mode === 'per_student' ? '最晚可开考时间' : '最晚进入时间' }}</label><input v-model="form.end_at" type="datetime-local" /></div></div>
+      <div class="grid-2"><div class="form-group"><label for="exam-kind">考试类型</label><select id="exam-kind" v-model="form.exam_kind" data-testid="exam-kind"><option value="quiz">测验（计入平时）</option><option value="midterm">期中</option><option value="final">期末</option><option value="other">其他</option></select></div><div class="form-group"><label for="exam-timing">时间模式</label><select id="exam-timing" v-model="form.timing_mode" data-testid="exam-timing"><option value="unified">统一时间交卷</option><option value="per_student">进入后完整时长</option></select></div></div>
+      <div class="form-group"><label>考试秩序</label><div class="order-toggles"><label class="toggle"><input v-model="form.shuffle_questions" type="checkbox" data-testid="shuffle-questions" /><span>题目乱序</span></label><label class="toggle"><input v-model="form.shuffle_options" type="checkbox" data-testid="shuffle-options" /><span>选项乱序</span></label></div></div>
       <div class="form-group"><label for="exam-offering">任务归属</label><select id="exam-offering" v-model="offeringId"><option value="">共享课程模板（仅内容负责人可创建）</option><option v-for="o in courseOfferings" :key="o.id" :value="o.id">{{ o.term_name }} · {{ o.class_name }}</option></select></div>
-      <p class="form-hint">“最晚进入时间”只限制新学生进入；已开始的学生始终获得完整考试时长。成绩、题目和答案默认不公开。</p>
+      <p class="form-hint">{{ form.timing_mode === 'per_student' ? '“最晚可开考时间”只限制新学生进入；进入后获得完整考试时长，交卷时间不会被它提前。' : '“统一时间交卷”：个人交卷时间 = min(进入时间 + 时长, 最晚进入时间)，到点统一收卷。' }} 乱序默认关闭，开启后在学生开考时固定顺序，刷新不变。成绩、题目和答案默认不公开。</p>
       <div class="create-actions"><button class="btn-ghost" @click="emit('close')">取消</button><button class="btn-primary" data-action="save-exam" :disabled="!canSave" @click="save">确定</button></div>
     </div>
 
@@ -142,5 +151,8 @@ function save() {
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .grid-2 > .form-group { min-width: 0; }
 .form-hint { margin: 6px 0 0; font-size: var(--text-sm); color: var(--muted); }
+.order-toggles { display: flex; flex-wrap: wrap; gap: 16px; }
+.order-toggles .toggle { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: var(--text-base); cursor: pointer; }
+.order-toggles input { accent-color: var(--accent); }
 @media (max-width: 720px) { .grid-2 { grid-template-columns: 1fr; } }
 </style>

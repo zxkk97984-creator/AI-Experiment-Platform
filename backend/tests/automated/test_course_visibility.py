@@ -822,7 +822,7 @@ def test_public_not_enrolled_cannot_participate(client, db_session_factory):
     assert resp.status_code == 404
     resp = client.post(f"{API}/exams/{eid}/start", headers=auth_header(s_tok))
     assert resp.status_code == 404
-    resp = client.post(f"{API}/exams/{eid}/submit", headers=auth_header(s_tok))
+    resp = client.post(f"{API}/exams/{eid}/submit", headers=auth_header(s_tok), json={"expected_write_generation": 1})
     assert resp.status_code == 404
     resp = client.get(f"{API}/exams/{eid}/questions", headers=auth_header(s_tok))
     assert resp.status_code == 404

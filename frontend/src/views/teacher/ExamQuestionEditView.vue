@@ -21,9 +21,11 @@ const aiConfigQid = ref(null)  // 当前展开 AI 配置的题目 ID
 const choiceEditor = ref(null)
 const testCasesKey = ref(0)
 const modalAiExpanded = ref(true)
-const settings = ref({ title: '', duration_minutes: 60, start_at: '', end_at: '', show_score_after_grading: false, show_questions_after_review: false, show_answers_after_review: false })
+const settings = ref({ title: '', duration_minutes: 60, start_at: '', end_at: '', show_score_after_grading: false, show_questions_after_review: false, show_answers_after_review: false, exam_kind: 'quiz', timing_mode: 'unified', shuffle_questions: false, shuffle_options: false })
 const settingsReady = ref(false)
 const settingsSaving = ref(false)
+// 发布后锁定时间模式 / 乱序 / 时长：与后端 422 EXAM_SETTING_LOCKED 保持一致
+const isPublishedLocked = computed(() => exam.value?.status === 'published')
 const audienceMode = ref('all_enrolled')
 const audienceClassIds = ref([])
 const audienceWhitelistIds = ref([])
@@ -34,7 +36,7 @@ function blankChoice() {
 }
 function blankForm(type = 'single_choice') {
   return {
-    question_type: type, prompt: '', points: 1, choice: blankChoice(), fill_blanks: [],
+    question_type: type, prompt: '', points: 1, choice: blankChoice(), fill_blanks: [], true_false_answer: 'T',
     starter_code: '', public_cases: [], hidden_tests: '', time_limit_ms: 10000,
     memory_limit_mb: 256, grading_mode: type === 'code' ? 'active' : 'legacy',
   }
@@ -59,6 +61,8 @@ async function load() {
       settings.value = {
         title: exam.value.title || '', duration_minutes: exam.value.duration_minutes || 60,
         start_at: toLocalInput(exam.value.start_at), end_at: toLocalInput(exam.value.end_at),
+        exam_kind: exam.value.exam_kind || 'quiz', timing_mode: exam.value.timing_mode || 'unified',
+        shuffle_questions: Boolean(exam.value.shuffle_questions), shuffle_options: Boolean(exam.value.shuffle_options),
         show_score_after_grading: Boolean(exam.value.show_score_after_grading),
         show_questions_after_review: Boolean(exam.value.show_questions_after_review),
         show_answers_after_review: Boolean(exam.value.show_answers_after_review),
@@ -88,6 +92,7 @@ function openEdit(q) {
       scoring_mode: q.correct_answer?.scoring_mode || 'all_or_nothing',
     },
     fill_blanks: (q.correct_answer?.blanks || []).map(blank => ({ ...blank, accepted_answers: [...(blank.accepted_answers || [])] })),
+    true_false_answer: q.question_type === 'true_false' ? String(q.correct_answer?.correct?.[0] || 'T') : 'T',
     starter_code: q.starter_code || '', public_cases: q.public_cases || [], hidden_tests: q.hidden_tests || '',
     time_limit_ms: q.time_limit_ms || 10000, memory_limit_mb: q.memory_limit_mb || 256,
     grading_mode: q.grading_mode || (q.question_type === 'code' ? 'active' : 'legacy'),
@@ -125,6 +130,11 @@ async function save() {
         correct: form.value.choice.options.filter((row) => row.correct).map((row) => row.key.trim()),
         scoring_mode: form.value.question_type === 'multi_choice' ? form.value.choice.scoring_mode : 'all_or_nothing',
       }
+      p.grading_mode = 'legacy'
+    } else if (form.value.question_type === 'true_false') {
+      // 判断题不配置选项：correct_answer 形如 {"correct": ["T"]}，答案沿用 selected_options
+      p.options = null
+      p.correct_answer = { correct: [form.value.true_false_answer === 'F' ? 'F' : 'T'] }
       p.grading_mode = 'legacy'
     } else if (form.value.question_type === 'fill_blank') {
       if (!form.value.fill_blanks.length) throw new Error('请至少插入一个空格')
@@ -169,11 +179,12 @@ function questionPublishOk(q) {
     return Object.keys(q.options || {}).length >= 2 && (q.correct_answer?.correct || []).length >= 1
   }
   if (q.question_type === 'fill_blank') return (q.correct_answer?.blanks || []).length > 0
+  if (q.question_type === 'true_false') return ['T', 'F'].includes(String(q.correct_answer?.correct?.[0] || ''))
   return false
 }
 
 const questionChecks = computed(() => questions.value.map((q, index) => ({
-  label: `第 ${String(index + 1).padStart(2, '0')} 题 · ${q.question_type === 'code' ? '编程题' : q.question_type === 'single_choice' ? '单选题' : q.question_type === 'multi_choice' ? '多选题' : '填空题'}`,
+  label: `第 ${String(index + 1).padStart(2, '0')} 题 · ${({ code: '编程题', single_choice: '单选题', multi_choice: '多选题', true_false: '判断题', fill_blank: '填空题' })[q.question_type] || q.question_type}`,
   ok: questionPublishOk(q),
   hint: q.question_type === 'code' && !questionPublishOk(q) ? 'AI 配置未完成' : '',
 })))
@@ -206,6 +217,9 @@ async function saveSettings({ publish = false, unpublish = false } = {}) {
   try {
     const payload = {
       title: settings.value.title.trim(), duration_minutes: Number(settings.value.duration_minutes),
+      exam_kind: settings.value.exam_kind, timing_mode: settings.value.timing_mode,
+      shuffle_questions: Boolean(settings.value.shuffle_questions),
+      shuffle_options: Boolean(settings.value.shuffle_options),
       start_at: settings.value.start_at ? new Date(settings.value.start_at).toISOString() : null,
       end_at: settings.value.end_at ? new Date(settings.value.end_at).toISOString() : null,
       show_score_after_grading: settings.value.show_score_after_grading,
@@ -287,7 +301,7 @@ onMounted(load)
                   <div class="question-meta">
                     <strong class="question-index">{{ String(i + 1).padStart(2, '0') }}</strong>
                     <span class="badge" :class="q.question_type === 'single_choice' ? 'badge-primary' : q.question_type === 'multi_choice' ? 'badge-info' : 'badge-neutral'">
-                      {{ { single_choice:'单选题', multi_choice:'多选题', fill_blank:'填空题', code:'编程题' }[q.question_type] }}
+                      {{ { single_choice:'单选题', multi_choice:'多选题', true_false:'判断题', fill_blank:'填空题', code:'编程题' }[q.question_type] }}
                     </span>
                     <span class="qp">{{ q.points }} 分</span>
                     <span v-if="q.question_type === 'code'" class="badge-mode" :class="{ incomplete: !configStatus(q).ok }">
@@ -338,14 +352,43 @@ onMounted(load)
                 <input id="exam-start" v-model="settings.start_at" type="datetime-local" :disabled="exam?.status !== 'draft'">
               </div>
               <div class="form-group">
-                <label for="exam-end">最晚进入时间</label>
+                <label for="exam-end">{{ settings.timing_mode === 'per_student' ? '最晚可开考时间' : '最晚进入时间（统一收卷）' }}</label>
                 <input id="exam-end" v-model="settings.end_at" type="datetime-local" :disabled="exam?.status !== 'draft'">
+              </div>
+              <div class="form-group">
+                <label for="exam-kind">考试类型</label>
+                <select id="exam-kind" v-model="settings.exam_kind" :disabled="isPublishedLocked" data-testid="settings-exam-kind">
+                  <option value="quiz">测验（计入平时）</option>
+                  <option value="midterm">期中</option>
+                  <option value="final">期末</option>
+                  <option value="other">其他</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="exam-timing">时间模式</label>
+                <select id="exam-timing" v-model="settings.timing_mode" :disabled="isPublishedLocked" data-testid="settings-timing-mode">
+                  <option value="unified">统一时间交卷</option>
+                  <option value="per_student">进入后完整时长</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>考试秩序（乱序）</label>
+                <div class="order-toggles">
+                  <label class="toggle"><input v-model="settings.shuffle_questions" type="checkbox" :disabled="isPublishedLocked" data-testid="settings-shuffle-questions" /><span>题目乱序</span></label>
+                  <label class="toggle"><input v-model="settings.shuffle_options" type="checkbox" :disabled="isPublishedLocked" data-testid="settings-shuffle-options" /><span>选项乱序</span></label>
+                </div>
               </div>
             </div>
 
             <div class="timing-note">
               <AppIcon name="info" :size="16" />
-              <span>学生在最晚进入时间前开始，即可获得完整的 {{ settings.duration_minutes || 0 }} 分钟。</span>
+              <span>{{ settings.timing_mode === 'per_student'
+                ? `学生在最晚可开考时间前开始，即可获得完整的 ${settings.duration_minutes || 0} 分钟；交卷时间不会被它提前。`
+                : `统一时间交卷：个人交卷时间 = min(开始 + ${settings.duration_minutes || 0} 分钟, 最晚进入时间)，到点统一收卷。` }}</span>
+            </div>
+            <div v-if="isPublishedLocked" class="timing-note locked">
+              <AppIcon name="info" :size="16" />
+              <span>考试已发布：时间模式、乱序开关与考试时长已锁定。如需延长作答时间，请在学生列表中对该生使用「延时」入口（留痕）。</span>
             </div>
 
             <div class="audience-section">
@@ -444,6 +487,7 @@ onMounted(load)
             <DsSelect v-model="form.question_type" class="modal-field" @change="form.grading_mode = form.question_type === 'code' ? 'active' : 'legacy'">
               <option value="single_choice">单选题</option>
               <option value="multi_choice">多选题</option>
+              <option value="true_false">判断题</option>
               <option value="fill_blank">填空题</option>
               <option value="code">编程题</option>
             </DsSelect>
@@ -461,6 +505,17 @@ onMounted(load)
           <!-- 选择题字段 -->
           <template v-if="['single_choice', 'multi_choice'].includes(form.question_type)">
             <ChoiceOptionsEditor ref="choiceEditor" v-model="form.choice" :question-type="form.question_type" />
+          </template>
+
+          <template v-else-if="form.question_type === 'true_false'">
+            <!-- 判断题只有 T/F 两个答案：不配置选项，答案由 ExamAnswer.selected_options 承载 -->
+            <div class="form-group">
+              <label>正确答案</label>
+              <div class="order-toggles">
+                <label class="toggle"><input v-model="form.true_false_answer" type="radio" value="T" data-testid="tf-true" /><span>正确（T）</span></label>
+                <label class="toggle"><input v-model="form.true_false_answer" type="radio" value="F" data-testid="tf-false" /><span>错误（F）</span></label>
+              </div>
+            </div>
           </template>
 
           <template v-else-if="form.question_type === 'fill_blank'">
@@ -638,6 +693,11 @@ onMounted(load)
 .rail-form input,.strategy-section .ds-select { width:100%; min-height:38px; box-sizing:border-box; font-size:12px; }
 .rail-form input:disabled { background:var(--surface-subtle); color:var(--muted); }
 .timing-note { display:flex; align-items:flex-start; gap:8px; margin:15px 0 0; padding:10px 11px; border-radius: var(--radius-md); background:var(--warning-bg); color:var(--danger); font-size:10px; line-height:1.55; }
+.timing-note.locked { background:var(--surface-subtle); color:var(--muted); }
+.order-toggles { display:flex; flex-wrap:wrap; gap:14px; }
+.order-toggles .toggle { display:flex; align-items:center; gap:8px; color:var(--fg); font-size:12px; cursor:pointer; }
+.order-toggles input { accent-color:var(--accent); }
+.rail-form select { width:100%; }
 .timing-note .app-icon { flex:none; margin-top:1px; }
 .strategy-section,.audience-section { margin-top:18px; padding-top:18px; border-top:1px solid var(--border); }
 .strategy-heading { margin-bottom:13px; }

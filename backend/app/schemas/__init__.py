@@ -763,6 +763,10 @@ class ExamCreate(BaseModel):
     duration_minutes: int = 60
     start_at: datetime | None = None
     end_at: datetime | None = None
+    exam_kind: Literal["quiz", "midterm", "final", "other"] = "quiz"
+    timing_mode: Literal["unified", "per_student"] = "unified"
+    shuffle_questions: bool = False
+    shuffle_options: bool = False
     show_score_after_grading: bool = False
     show_questions_after_review: bool = False
     show_answers_after_review: bool = False
@@ -778,6 +782,10 @@ class ExamUpdate(BaseModel):
     duration_minutes: int | None = None
     start_at: datetime | None = None
     end_at: datetime | None = None
+    exam_kind: Literal["quiz", "midterm", "final", "other"] | None = None
+    timing_mode: Literal["unified", "per_student"] | None = None
+    shuffle_questions: bool | None = None
+    shuffle_options: bool | None = None
     show_score_after_grading: bool | None = None
     show_questions_after_review: bool | None = None
     show_answers_after_review: bool | None = None
@@ -798,6 +806,10 @@ class ExamRead(BaseModel):
     duration_minutes: int
     start_at: datetime | None = None
     end_at: datetime | None = None
+    exam_kind: str = "quiz"
+    timing_mode: str = "unified"
+    shuffle_questions: bool = False
+    shuffle_options: bool = False
     show_score_after_grading: bool = False
     show_questions_after_review: bool = False
     show_answers_after_review: bool = False
@@ -842,8 +854,37 @@ class ExamAnswerSaveItem(BaseModel):
         return {key: validate_text_answer_size(value) for key, value in v.items()}
 
 
+class ExamEventReport(BaseModel):
+    """学生端上报的监考事件——只记录考试过程，不自动判定作弊、不自动扣分。
+
+    client_ts 由客户端生成并在断网补报时原样回传，服务端按它幂等去重。
+    """
+
+    kind: Literal["blur", "focus", "reconnect"]
+    client_ts: datetime
+    # focus 事件携带本次离开页面的毫秒数（离开那一刻还不知道本次离开多久）
+    duration_ms: int | None = Field(default=None, ge=0, le=24 * 60 * 60 * 1000)
+
+
 class ExamAnswerBatchRequest(BaseModel):
+    # 换机接管后旧设备必须被拒：写入代次由会话下发，客户端每次写入都要回传。
+    expected_write_generation: int = Field(ge=1)
     answers: list[ExamAnswerSaveItem] = Field(default_factory=list, max_length=200)
+    events: list[ExamEventReport] = Field(default_factory=list, max_length=200)
+
+
+class ExamSubmitPayload(BaseModel):
+    expected_write_generation: int = Field(ge=1)
+
+
+class ExamTakeoverRequest(BaseModel):
+    """换机接管：二次验密 + 写入代次 CAS，两设备并发只有一个能提升代次。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=1, max_length=200)
+    expected_write_generation: int = Field(ge=1)
+    device_id: str | None = Field(default=None, max_length=64)
 
 
 class ExamTimeExtensionRequest(BaseModel):
@@ -953,6 +994,7 @@ class ExamSubmissionRead(BaseModel):
     submitted_at: datetime | None = None
     review_reason: str | None = None
     review_required_at: datetime | None = None
+    write_generation: int = 1
 
 
 class ExamGradeRead(BaseModel):

@@ -25,6 +25,9 @@ const statusMeta = {
 }
 
 const totalText = computed(() => `共 ${exams.value.length} 场考试`)
+const EXAM_KIND_LABELS = { quiz: '测验', midterm: '期中', final: '期末', other: '其他' }
+const examKindLabel = (exam) => EXAM_KIND_LABELS[exam.exam_kind] || '测验'
+const timingLabel = (exam) => (exam.timing_mode === 'per_student' ? '进入后完整时长' : '统一时间交卷')
 const metaFor = (exam) => statusMeta[exam.student_status] || statusMeta.scheduled
 
 onMounted(async () => {
@@ -87,10 +90,11 @@ function openExam(exam) {
             <span v-if="metaFor(exam).hint" class="status-hint">{{ metaFor(exam).hint }}</span>
           </div>
           <h2>{{ exam.title }}</h2>
+          <p class="exam-tags"><span>{{ examKindLabel(exam) }}</span><span>{{ timingLabel(exam) }}</span><span v-if="exam.shuffle_questions">题目乱序</span><span v-if="exam.shuffle_options">选项乱序</span></p>
           <dl>
             <div><dt>考试时长</dt><dd>{{ exam.duration_minutes }} 分钟</dd></div>
             <div><dt>开始时间</dt><dd>{{ formatDateTime(exam.start_at) }}</dd></div>
-            <div><dt>最晚进入</dt><dd>{{ formatDateTime(exam.end_at) }}</dd></div>
+            <div><dt>{{ exam.timing_mode === 'per_student' ? '最晚可开考' : '最晚进入' }}</dt><dd>{{ formatDateTime(exam.end_at) }}</dd></div>
           </dl>
           <button
             type="button"
@@ -117,6 +121,8 @@ function openExam(exam) {
 </template>
 
 <style scoped>
+.exam-tags { display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 0; }
+.exam-tags span { padding:2px 8px;border-radius: var(--radius-full);background:var(--surface-subtle);color:var(--muted);font-size:11px; }
 .exam-center { display: flex; flex-direction: column; gap: var(--space-5); }
 .eyebrow { margin: 0 0 8px; color: var(--accent); font: 700 11px/1 var(--font-mono); letter-spacing: .16em; }
 h1 { margin: 0; color: var(--fg); font-family: var(--font-display); font-size: var(--text-3xl); font-weight: 600; letter-spacing: -.01em; }

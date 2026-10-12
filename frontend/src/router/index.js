@@ -48,6 +48,7 @@ const routes = [
   { path: '/teacher/exams', name: 'TeacherExams', component: () => import('../views/teacher/ExamManageView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/grades', name: 'TeacherGrades', component: () => import('../views/teacher/GradesView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/grades/:submissionId', name: 'TeacherGradeDetail', component: () => import('../views/teacher/GradeDetailView.vue'), meta: { role: 'teacher' } },
+  { path: '/teacher/exams/:id/proctor', name: 'TeacherExamProctor', component: () => import('../views/teacher/ProctorView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/edit', name: 'TeacherExamQuestionEdit', component: () => import('../views/teacher/ExamQuestionEditView.vue'), meta: { role: 'teacher' } },
  { path: '/teacher/experiments', name: 'TeacherExperiments', component: () => import('../views/teacher/ExperimentManageView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/experiments/create', redirect: '/teacher/experiments' },

@@ -112,8 +112,11 @@ def test_closed_context_rejects_student_writes_and_get_does_not_collect(client, 
     # Legacy inconsistent data must not allow a GET to perform a student write.
     sid = add_attempt(db_session_factory, case, expired=True)
     for path, payload in [
-        (f"/api/v1/exams/{case['exam']}/answers/{case['exam_question']}", {'selected_options': ['A']}),
-        (f"/api/v1/exams/{case['exam']}/answers", {'answers': [{'question_id': case['exam_question'], 'selected_options': ['A']}]}),
+        (f"/api/v1/exams/{case['exam']}/answers/{case['exam_question']}",
+         {'expected_write_generation': 1, 'selected_options': ['A']}),
+        (f"/api/v1/exams/{case['exam']}/answers",
+         {'expected_write_generation': 1,
+          'answers': [{'question_id': case['exam_question'], 'selected_options': ['A']}]}),
     ]:
         r = client.put(path, headers=h, json=payload)
         if path.endswith('/answers'):
@@ -121,7 +124,8 @@ def test_closed_context_rejects_student_writes_and_get_does_not_collect(client, 
             assert r.json()['results'][0]['code'] == 'OFFERING_READ_ONLY'
         else:
             assert r.status_code == 409, r.text
-    assert client.post(f"/api/v1/exams/{case['exam']}/submit", headers=h).status_code == 409
+    assert client.post(f"/api/v1/exams/{case['exam']}/submit", headers=h,
+                       json={'expected_write_generation': 1}).status_code == 409
     assert client.post(f"/api/v1/exams/{case['exam']}/questions/{case['exam_question']}/sample-run",
                        headers=h, json={'code': 'pass'}).status_code == 409
     assert client.get(f"/api/v1/exams/{case['exam']}/session", headers=h).status_code == 200
@@ -137,9 +141,11 @@ def test_completed_submission_retry_remains_read_only_after_closure(client, db_s
     case = teaching_case
     sid = add_attempt(db_session_factory, case, status=status)
     assert transition(client, case, kind).status_code == 200
-    r = client.post(f"/api/v1/exams/{case['exam']}/submit", headers=case['headers']['a'])
+    r = client.post(f"/api/v1/exams/{case['exam']}/submit", headers=case['headers']['a'],
+                    json={'expected_write_generation': 1})
     assert r.status_code == 201, r.text
-    outsider = client.post(f"/api/v1/exams/{case['exam']}/submit", headers=case['headers']['b'])
+    outsider = client.post(f"/api/v1/exams/{case['exam']}/submit", headers=case['headers']['b'],
+                           json={'expected_write_generation': 1})
     assert outsider.status_code == 404, outsider.text
     with db_session_factory() as db:
         assert db.get(ExamSubmission, sid).status == status

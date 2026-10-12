@@ -183,7 +183,77 @@ describe('ExamView 安全状态与结果展示', () => {
     await wrapper.get('input[type="radio"]').trigger('change')
     await vi.advanceTimersByTimeAsync(801)
     await flushPromises()
-    expect(examsAPI.saveAnswers).toHaveBeenCalledWith(3, [expect.objectContaining({ question_id: 1, selected_options: ['A'], expected_version: 0 })])
+    expect(examsAPI.saveAnswers).toHaveBeenCalledWith(
+      3,
+      [expect.objectContaining({ question_id: 1, selected_options: ['A'], expected_version: 0 })],
+      1,
+      [],
+    )
+    wrapper.unmount()
+  })
+
+  it('保存被判定为 DEVICE_SUPERSEDED 时停止写入并给出换机提示', async () => {
+    vi.useFakeTimers()
+    examsAPI.saveAnswers.mockImplementationOnce(() => Promise.reject({
+      response: { status: 409, data: { detail: { code: 'DEVICE_SUPERSEDED' } } },
+    }))
+    const wrapper = await mountExam('started')
+    await wrapper.get('input[type="radio"]').trigger('change')
+    await vi.advanceTimersByTimeAsync(801)
+    await flushPromises()
+    expect(wrapper.text()).toContain('本设备已失去答题写入权限')
+    // 失去权限后不再自动保存：再编辑一次也不会发出新的写入请求
+    examsAPI.saveAnswers.mockClear()
+    examsAPI.saveAnswers.mockResolvedValue({ data: { server_now: SERVER_NOW, results: [] } })
+    await wrapper.get('input[type="radio"]').trigger('change')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(examsAPI.saveAnswers).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('切屏回到页面后把 blur/focus 事件与答案合并上报', async () => {
+    vi.useFakeTimers()
+    const wrapper = await mountExam('started')
+    await wrapper.get('input[type="radio"]').trigger('change')
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true })
+    window.dispatchEvent(new Event('blur'))
+    await vi.advanceTimersByTimeAsync(5)
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true })
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(801)
+    await flushPromises()
+    const events = examsAPI.saveAnswers.mock.calls.at(-1)?.[3]
+    expect(events.map(event => event.kind)).toEqual(['blur', 'focus'])
+    expect(events[1].duration_ms).toBeGreaterThanOrEqual(0)
+    wrapper.unmount()
+  })
+
+  it('判断题渲染 T/F 两个选项并按原选项键提交', async () => {
+    vi.useFakeTimers()
+    const wrapper = await mountExam('started', { questions: [
+      { id: 9, question_type: 'true_false', prompt: 'Python 的 list 可变', options: null, points: 10 },
+    ] })
+    expect(wrapper.text()).toContain('判断题')
+    const inputs = wrapper.findAll('input[type="radio"]')
+    expect(inputs).toHaveLength(2)
+    await inputs[0].setValue()
+    await vi.advanceTimersByTimeAsync(801)
+    await flushPromises()
+    expect(examsAPI.saveAnswers).toHaveBeenCalledWith(
+      3,
+      [expect.objectContaining({ question_id: 9, selected_options: ['T'] })],
+      1,
+      [],
+    )
+    wrapper.unmount()
+  })
+
+  it('考试页展示监考与隐私告知，并声明不自动扣分', async () => {
+    const wrapper = await mountExam('started')
+    expect(wrapper.text()).toContain('监考记录说明')
+    expect(wrapper.text()).toContain('不会自动认定作弊，也不会自动扣分')
+    expect(wrapper.text()).toContain('统一时间交卷')
     wrapper.unmount()
   })
 

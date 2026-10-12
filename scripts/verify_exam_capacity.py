@@ -109,6 +109,7 @@ class Student:
     answered: dict[int, list[str]] = field(default_factory=dict)
     saving: int = 0
     version_regressions: int = 0
+    write_generation: int = 1  # 换机/接管会推进写入代次；每次保存都必须回传当前值
     saved_ok: int = 0          # 成功保存次数（A13：每人必须有成功样本）
     verified: bool = False     # 核对阶段是否成功读取到会话
     access_expires_at: float = 0.0
@@ -160,13 +161,16 @@ async def _ensure_started(client: httpx.AsyncClient, exam_id: int, student: Stud
     submission = payload.get("submission")
     if submission and submission.get("status") == "started":
         student.submission_id = submission["id"]
+        student.write_generation = int(submission.get("write_generation") or 1)
         for saved in payload.get("saved_answers") or []:
             student.versions[saved["question_id"]] = saved.get("version", 0)
         return True
     started = await client.post(f"/api/v1/exams/{exam_id}/start", headers=_auth(student))
     if started.status_code >= 400:
         return False
-    student.submission_id = (started.json().get("submission") or {}).get("id")
+    started_submission = started.json().get("submission") or {}
+    student.submission_id = started_submission.get("id")
+    student.write_generation = int(started_submission.get("write_generation") or 1)
     return student.submission_id is not None
 
 
@@ -182,7 +186,7 @@ async def _one_student_loop(client: httpx.AsyncClient, exam_id: int, student: St
         question_id = questions[round_index % len(questions)]
         selection = [choice[round_index % 2]]
         expected = student.versions.get(question_id, 0)
-        payload = {"answers": [{
+        payload = {"expected_write_generation": student.write_generation, "answers": [{
             "question_id": question_id,
             "expected_version": expected,
             "selected_options": selection,

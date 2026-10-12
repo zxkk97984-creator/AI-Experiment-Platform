@@ -40,6 +40,15 @@ const secondaryTab = ref(false)
 const autoSubmitting = ref(false)
 const currentQuestion = ref(null)
 const allowLeave = ref(false)
+// 写入代次：换机接管后旧设备停留在旧代次，服务端 409 DEVICE_SUPERSEDED 拒绝其写入。
+const writeGeneration = ref(1)
+const deviceToken = ref('')
+const deviceSuperseded = ref(false)
+const takeoverError = ref('')
+const takeoverBusy = ref(false)
+// 监考事件队列：切屏/回到页面/重连，与答案一起在 800ms 防抖批次里上报，断网时本地缓存补报。
+const monitorEvents = ref([])
+let awayStartedAt = null
 // single-flight：保存与同步各自最多一个在途请求
 let saveInFlight = null
 let syncInFlight = null
@@ -55,10 +64,16 @@ const TERMINAL_STATUSES = ['submitted', 'grading', 'graded', 'review_required']
 
 const queueKey = computed(() => `exam-answer-queue:${examId}:${submission.value?.id || 'pending'}`)
 const codeRunKey = computed(() => `exam-code-runs:${examId}:${submission.value?.id || 'pending'}`)
+const deviceTokenKey = computed(() => `exam-device-token:${examId}:${submission.value?.id || 'pending'}`)
 const active = computed(() => submission.value?.status === 'started' && exam.value?.student_status === 'in_progress')
 const completed = computed(() => Boolean(submission.value && submission.value.status !== 'started'))
 const scoreVisible = computed(() => Boolean(submission.value?.score_visible && submission.value?.score != null))
-const canEdit = computed(() => active.value && !locked.value && !secondaryTab.value && !autoSubmitting.value)
+const canEdit = computed(() => active.value && !locked.value && !deviceSuperseded.value && !secondaryTab.value && !autoSubmitting.value)
+// 时间模式文案：统一时间交卷 vs 进入后完整时长（后者 end_at 只是最晚可开考时间）
+const timingMode = computed(() => exam.value?.timing_mode || 'unified')
+const timingNote = computed(() => timingMode.value === 'per_student'
+  ? `进入后获得完整 ${exam.value?.duration_minutes ?? '—'} 分钟，最晚 ${formatDateTime(exam.value?.end_at)} 前可开考`
+  : `统一时间交卷：${formatDateTime(exam.value?.end_at)} 统一收卷，个人时长不会越过该时间`)
 const saveLabel = computed(() => ({
   saving: '保存中…', saved: '已保存', pending: '等待保存', offline: '离线待同步', error: '保存失败',
 }[saveState.value] || '已保存'))
@@ -144,8 +159,13 @@ function promptSegments(question) {
 }
 
 function typeLabel(type) {
-  return { single_choice: '单选题', multi_choice: '多选题', fill_blank: '填空题', code: '编程题' }[type] || type
+  return { single_choice: '单选题', multi_choice: '多选题', true_false: '判断题', fill_blank: '填空题', code: '编程题' }[type] || type
 }
+// 判断题固定 T/F 两个选项：答案仍按原选项键 ["T"] / ["F"] 提交
+const TRUE_FALSE_OPTIONS = Object.freeze([
+  { key: 'T', label: '正确' },
+  { key: 'F', label: '错误' },
+])
 
 function correctKeys(question) {
   return (question.correct_answer?.correct || []).map(String)
@@ -153,6 +173,11 @@ function correctKeys(question) {
 
 function correctOptionLabels(question) {
   return correctKeys(question).map((key) => `${key}：${question.options?.[key] ?? ''}`)
+}
+
+function trueFalseLabel(question) {
+  const key = correctKeys(question)[0]
+  return { T: '正确（T）', F: '错误（F）' }[key] || '未配置'
 }
 
 function blankAnswers(question) {
@@ -197,10 +222,13 @@ function hydrate(payload, { mergeQueue = true, syncOnly = false } = {}) {
   if (syncOnly && sameAttempt && active.value) {
     // 活动期间只同步会话元数据（截止时间、状态、公开策略、服务器时间），
     // 冻结题目内容与本地答案/版本/当前题/pending——刷新不得覆盖学生正在作答的内容。
+    // 刻意不同步 write_generation：若代次已在别处提升，本设备必须继续保持旧代次并被服务端拒绝，
+    // 而不是静默"追上"新代次继续写入。
     session.value = { ...payload, questions: previous.questions }
     return
   }
   session.value = payload
+  if (payload.submission) writeGeneration.value = Number(payload.submission.write_generation || 1)
   const nextVersions = {}
   for (const saved of payload.saved_answers || []) {
     nextVersions[saved.question_id] = saved.version || 0
@@ -271,7 +299,52 @@ function answerPayload(questionId, value) {
   const base = { question_id: Number(questionId), expected_version: versions.value[questionId] || 0 }
   if (question?.question_type === 'fill_blank') return { ...base, text_answers: value || {} }
   if (question?.question_type === 'code') return { ...base, code_answer: value || '' }
+  // 判断题同样沿用 selected_options 的 ["T"] / ["F"]，答案始终关联原选项标识
   return { ...base, selected_options: value || [] }
+}
+
+/** 服务端判定本设备已被换机取代（写入代次过期）。 */
+function isDeviceSuperseded(error) {
+  const detail = error?.response?.data?.detail
+  return error?.response?.status === 409 && detail?.code === 'DEVICE_SUPERSEDED'
+}
+
+function markDeviceSuperseded() {
+  if (deviceSuperseded.value) return
+  deviceSuperseded.value = true
+  saveState.value = 'error'
+  window.clearTimeout(debounceTimer)
+  app.showToast('本设备已失去答题写入权限，请在新设备继续作答', 'error')
+}
+
+/** 监考事件只记录过程：不自动判作弊、不自动扣分，因此失败也不阻断答题。 */
+function pushMonitorEvent(kind, durationMs = null) {
+  monitorEvents.value = [...monitorEvents.value, {
+    kind,
+    client_ts: new Date().toISOString(),
+    ...(durationMs == null ? {} : { duration_ms: Math.max(0, Math.round(durationMs)) }),
+  }]
+  persistLocalQueue()
+}
+
+/** 同一次离开只记一条 blur：blur 与 visibilitychange 常常同时触发。 */
+function onPageHidden() {
+  if (!active.value || deviceSuperseded.value || awayStartedAt !== null) return
+  awayStartedAt = Date.now()
+  pushMonitorEvent('blur')
+}
+
+function onPageVisible() {
+  if (awayStartedAt === null) return
+  const duration = Date.now() - awayStartedAt
+  awayStartedAt = null
+  pushMonitorEvent('focus', duration)
+  if (navigator.onLine && canEdit.value) flushPending()
+}
+
+function onVisibilityChange() {
+  if (document.hidden) onPageHidden()
+  else onPageVisible()
 }
 
 function nextEditSeq(questionId) {
@@ -312,8 +385,12 @@ function flushPending() {
 
 async function drainPending() {
   const entryIds = Object.keys(pending.value).filter(id => !conflicted.value.has(Number(id)))
-  if (!Object.keys(pending.value).length || !active.value || secondaryTab.value) return { ok: true }
-  if (!entryIds.length) {
+  const queuedEvents = [...monitorEvents.value]
+  if ((!Object.keys(pending.value).length && !queuedEvents.length) || !active.value || secondaryTab.value) {
+    return { ok: true }
+  }
+  if (deviceSuperseded.value) return { ok: false, superseded: true }
+  if (!entryIds.length && !queuedEvents.length) {
     // 只剩冲突题：停止自动重试，等学生明确选择
     saveState.value = 'error'
     return { ok: false, blocked: true }
@@ -324,8 +401,19 @@ async function drainPending() {
   const snapshot = Object.fromEntries(entries)
   const seqs = Object.fromEntries(entries.map(([id]) => [id, editSeq.value[id] || 0]))
   try {
-    const response = await examsAPI.saveAnswers(examId, entries.map(([id, value]) => answerPayload(id, value)))
+    const response = await examsAPI.saveAnswers(
+      examId,
+      entries.map(([id, value]) => answerPayload(id, value)),
+      writeGeneration.value,
+      queuedEvents,
+    )
     calibrate(response.data.server_now)
+    // 事件已确认送达（服务端按 client_ts 幂等去重），只清掉本批发送的那些
+    if (queuedEvents.length) {
+      const sent = new Set(queuedEvents)
+      monitorEvents.value = monitorEvents.value.filter(event => !sent.has(event))
+      persistLocalQueue()
+    }
     // 先校验整批响应：重复/缺失/未知题目/结构非法一律整批不应用，
     // 保留草稿与本地版本（绝不因为坏响应清掉待确认的答案）。
     const validation = validateBatchResults(response.data.results, entries)
@@ -344,6 +432,7 @@ async function drainPending() {
           // 冲突题：停止自动重试，展示本地与服务器答案由学生选择
           openConflict(qid)
         }
+        if (result.code === 'DEVICE_SUPERSEDED') markDeviceSuperseded()
         continue
       }
       const currentVersion = versions.value[qid] || 0
@@ -364,6 +453,10 @@ async function drainPending() {
     }
     return { ok: allOk && Object.keys(nextPending).length === 0, stopped: !allOk, snapshot }
   } catch (error) {
+    if (isDeviceSuperseded(error)) {
+      markDeviceSuperseded()
+      return { ok: false, superseded: true, snapshot }
+    }
     saveState.value = navigator.onLine ? 'error' : 'offline'
     persistLocalQueue()
     return { ok: false, error }
@@ -458,8 +551,17 @@ function resolveConflict(choice) {
 
 function persistLocalQueue() {
   if (!submission.value?.id) return
-  if (!Object.keys(pending.value).length) { localStorage.removeItem(queueKey.value); return }
-  localStorage.setItem(queueKey.value, JSON.stringify({ submissionId: submission.value.id, answers: answers.value, pending: pending.value }))
+  if (!Object.keys(pending.value).length && !monitorEvents.value.length) {
+    localStorage.removeItem(queueKey.value)
+    return
+  }
+  localStorage.setItem(queueKey.value, JSON.stringify({
+    submissionId: submission.value.id,
+    answers: answers.value,
+    pending: pending.value,
+    // 断网期间的监考事件随答案一起缓存，联网后原样补报（client_ts 不变，服务端幂等去重）
+    events: monitorEvents.value,
+  }))
 }
 
 function restoreLocalQueue() {
@@ -470,7 +572,8 @@ function restoreLocalQueue() {
     if (saved.submissionId !== submission.value?.id) { clearLocalQueue(); return }
     answers.value = { ...answers.value, ...(saved.answers || {}) }
     pending.value = saved.pending || {}
-    if (Object.keys(pending.value).length) {
+    monitorEvents.value = Array.isArray(saved.events) ? saved.events : []
+    if (Object.keys(pending.value).length || monitorEvents.value.length) {
       saveState.value = navigator.onLine ? 'pending' : 'offline'
       window.setTimeout(flushPending, 100)
     }
@@ -572,12 +675,17 @@ async function submitExam({ forced = false, confirmed = false } = {}) {
     }
   }
   try {
-    const response = await examsAPI.submit(examId)
+    const response = await examsAPI.submit(examId, writeGeneration.value)
     sessionGeneration += 1
     hydrate(response.data, { mergeQueue: false })
     clearLocalQueue()
     app.showToast(secondsLeft.value === 0 ? '考试时间已到，系统已自动交卷' : '交卷成功', 'success')
   } catch (error) {
+    if (isDeviceSuperseded(error)) {
+      markDeviceSuperseded()
+      autoSubmitting.value = false
+      return
+    }
     // 响应未知（超时/断网）：先向服务器确认状态，再决定是否重试
     const confirmedState = await syncSession()
     const terminal = isTerminalStatus(confirmedState?.submission?.status) || completed.value
@@ -653,6 +761,45 @@ function cancelDialog() {
   dialog.value = null
 }
 
+/** 换机接管：再次验证密码后提升写入代次，旧设备立即失去写入权限，剩余时间不重置。 */
+function openTakeover() {
+  takeoverError.value = ''
+  takeoverBusy.value = false
+  dialog.value = { kind: 'takeover', password: '' }
+}
+
+async function confirmTakeover() {
+  if (takeoverBusy.value) return
+  if (!takeoverError.value) takeoverError.value = ''
+  takeoverBusy.value = true
+  try {
+    const response = await examsAPI.takeover(examId, {
+      current_password: String(dialog.value?.password || ''),
+      expected_write_generation: writeGeneration.value,
+      device_id: tabId,
+    })
+    const payload = response.data
+    writeGeneration.value = Number(payload.submission?.write_generation || writeGeneration.value)
+    deviceToken.value = payload.submission?.device_token || ''
+    try { localStorage.setItem(deviceTokenKey.value, deviceToken.value) } catch { /* 存储不可用时忽略 */ }
+    deviceSuperseded.value = false
+    locked.value = false
+    dialog.value = null
+    // 重新拉取完整会话：恢复已保存答案与剩余时间（服务端不重置剩余时间）
+    await load()
+    app.showToast('已在本设备接管本场考试，剩余作答时间不变', 'success')
+  } catch (error) {
+    const detail = error.response?.data?.detail
+    takeoverError.value = detail?.code === 'DEVICE_SUPERSEDED'
+      ? '写入代次已变化（可能已在另一台设备接管），请刷新页面后重试'
+      : detail?.code === 'CURRENT_PASSWORD_INVALID'
+        ? '当前密码不正确'
+        : (detail?.message || '换机失败，请检查网络后重试')
+  } finally {
+    takeoverBusy.value = false
+  }
+}
+
 function scrollToQuestion(id) {
   currentQuestion.value = id
   document.getElementById(`question-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -681,6 +828,8 @@ function resumeIfExtended(data) {
 
 function onOnline() {
   if (!active.value) return
+  // 断网期间缓存的监考事件在重连时补报（client_ts 原样回传，服务端幂等去重）
+  pushMonitorEvent('reconnect')
   // 先同步会话（可能已延时/已收卷）：离线到点后若教师已延时，必须解锁并恢复编辑，
   // 否则学生会一直卡在"时间已到"的锁定状态。
   syncSession().then((data) => {
@@ -722,6 +871,9 @@ onMounted(() => {
   fallbackTimer = window.setInterval(() => { if (active.value) flushPending() }, 10_000)
   window.addEventListener('beforeunload', onBeforeUnload)
   window.addEventListener('online', onOnline)
+  window.addEventListener('blur', onPageHidden)
+  window.addEventListener('focus', onPageVisible)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
@@ -730,6 +882,9 @@ onBeforeUnmount(() => {
   window.clearInterval(fallbackTimer)
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('online', onOnline)
+  window.removeEventListener('blur', onPageHidden)
+  window.removeEventListener('focus', onPageVisible)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   channel?.close()
 })
 </script>
@@ -750,6 +905,24 @@ onBeforeUnmount(() => {
       <div v-if="warningVisible" class="minute-warning" role="alert">
         <strong>考试即将结束</strong><span>剩余不足 1 分钟，请尽快完成并检查答案。</span>
       </div>
+
+      <section v-if="deviceSuperseded" class="integrity-banner danger" role="alert">
+        <strong>本设备已失去答题写入权限</strong>
+        <span>本场考试已在另一台设备接管。请在新设备继续作答；本页不再保存答案。</span>
+        <button type="button" class="btn btn-ghost" @click="openTakeover">在这台设备重新接管</button>
+      </section>
+
+      <section v-if="active" class="integrity-note" aria-label="考试秩序与隐私告知">
+        <div>
+          <strong>{{ timingMode === 'per_student' ? '进入后完整时长' : '统一时间交卷' }}</strong>
+          <p>{{ timingNote }}</p>
+        </div>
+        <div>
+          <strong>监考记录说明</strong>
+          <p>本场考试会记录切屏次数、离开时长、换机事件与设备标识摘要（IP / 浏览器标识仅保存不可逆摘要），供教师了解考试过程。<b>不会自动认定作弊，也不会自动扣分。</b></p>
+        </div>
+        <button v-if="!deviceSuperseded" type="button" class="btn btn-ghost" @click="openTakeover">换台设备继续</button>
+      </section>
 
       <section v-if="secondaryTab && active" class="tab-warning">
         <strong>此页面已切换为只读</strong>
@@ -778,9 +951,15 @@ onBeforeUnmount(() => {
               <b>{{ key }}</b><span>{{ option }}</span><small v-if="visibility.answers && correctKeys(question).includes(String(key))">正确答案</small>
             </div>
           </div>
+          <div v-else-if="question.question_type === 'true_false'" class="review-options" aria-label="判断题选项">
+            <div v-for="option in TRUE_FALSE_OPTIONS" :key="option.key" class="review-option" :class="{ correct: visibility.answers && correctKeys(question).includes(option.key) }">
+              <b>{{ option.key }}</b><span>{{ option.label }}</span><small v-if="visibility.answers && correctKeys(question).includes(option.key)">正确答案</small>
+            </div>
+          </div>
           <div v-if="visibility.answers" class="standard-answer">
             <span>{{ question.question_type === 'code' ? '参考答案' : '标准答案' }}</span>
             <strong v-if="['single_choice', 'multi_choice'].includes(question.question_type)">{{ correctOptionLabels(question).join('、') || '未配置' }}</strong>
+            <strong v-else-if="question.question_type === 'true_false'">{{ trueFalseLabel(question) }}</strong>
             <ul v-else-if="question.question_type === 'fill_blank'">
               <li v-for="blank in blankAnswers(question)" :key="blank.id"><span>{{ blank.accepted.join(' / ') || '未配置' }}</span></li>
             </ul>
@@ -838,6 +1017,9 @@ onBeforeUnmount(() => {
             <div v-else-if="question.question_type === 'multi_choice'" class="options">
               <label v-for="(option, key) in question.options" :key="key" :class="{ selected: (answers[question.id] || []).includes(key) }"><input type="checkbox" :disabled="!canEdit" :checked="(answers[question.id] || []).includes(key)" @change="stageAnswer(question.id, (answers[question.id] || []).includes(key) ? answers[question.id].filter(item => item !== key) : [...(answers[question.id] || []), key])"><b>{{ key }}</b><span>{{ option }}</span></label>
             </div>
+            <div v-else-if="question.question_type === 'true_false'" class="options" aria-label="判断题选项">
+              <label v-for="option in TRUE_FALSE_OPTIONS" :key="option.key" :class="{ selected: (answers[question.id] || []).includes(option.key) }"><input type="radio" :name="`q-${question.id}`" :disabled="!canEdit" :checked="(answers[question.id] || []).includes(option.key)" @change="stageAnswer(question.id, [option.key])"><b>{{ option.key }}</b><span>{{ option.label }}</span></label>
+            </div>
             <template v-else-if="question.question_type === 'code'">
               <textarea class="code-editor" :value="answers[question.id] || ''" :disabled="!canEdit" rows="12" spellcheck="false" @input="stageAnswer(question.id, $event.target.value)" @blur="flushPending"></textarea>
               <div class="code-actions">
@@ -878,8 +1060,29 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
+    <!-- 换机接管：二次验密后提升写入代次；旧设备立即失去写入权限，剩余时间不重置 -->
+    <section v-if="dialog?.kind === 'takeover'" class="modal-backdrop takeover-backdrop" @click.self="cancelDialog">
+      <section class="modal takeover-panel" role="dialog" aria-modal="true" aria-label="换机接管">
+        <header class="modal-head"><h2>在这台设备继续答题</h2></header>
+        <div class="modal-body">
+          <p>接管后本设备获得作答权限，原设备立即失去写入权限；已保存的答案会恢复，<b>剩余作答时间不会重置</b>。请输入当前密码完成验证。</p>
+          <label class="takeover-field">
+            <span>当前密码</span>
+            <input v-model="dialog.password" type="password" autocomplete="current-password" data-testid="takeover-password" @keyup.enter="confirmTakeover">
+          </label>
+          <p v-if="takeoverError" class="takeover-error" role="alert">{{ takeoverError }}</p>
+        </div>
+        <footer class="modal-foot confirm-actions">
+          <button type="button" class="btn btn-ghost" :disabled="takeoverBusy" @click="cancelDialog">取消</button>
+          <button type="button" class="btn btn-primary" :disabled="takeoverBusy" data-testid="takeover-confirm" @click="confirmTakeover">
+            {{ takeoverBusy ? '处理中…' : '接管并继续' }}
+          </button>
+        </footer>
+      </section>
+    </section>
+
     <ConfirmDialog
-      v-if="dialog"
+      v-if="dialog && dialog.kind !== 'takeover'"
       :title="dialog.kind === 'scheduled' ? '考试尚未开始' : dialog.kind === 'start' ? '确认开始考试' : dialog.kind === 'expired-offline' ? '时间已到，网络不可用' : dialog.kind.startsWith('submit') ? '确认提交试卷' : '确认退出考试'"
       :message="dialog.kind === 'scheduled' ? `本场考试将于 ${formatDateTime(exam?.start_at)} 开放，系统以服务器时间为准。` : dialog.kind === 'start' ? `开始后将获得 ${exam?.duration_minutes} 分钟完整作答时间，倒计时不会因退出或刷新暂停。` : dialog.kind === 'expired-offline' ? '当前无法连接服务器确认考试状态。答案草稿已保留在本机，系统不会依据本地时间自动交卷。可稍后重试连接，或立即尝试交卷。' : dialog.kind === 'submit-incomplete' ? '当前尚有未完成的题目，确定交卷吗' : dialog.kind === 'submit' ? '系统会先保存最新答案。交卷完成后将无法继续修改。' : dialog.kind === 'leave-incomplete' ? '当前尚有未完成的题目，退出将暂存题目' : '仍有答案尚未同步，确定保存并退出吗？'"
       :confirm-text="dialog.kind === 'scheduled' ? '返回考试中心' : dialog.kind === 'start' ? '开始计时' : dialog.kind === 'expired-offline' ? '立即尝试交卷' : ['submit-incomplete', 'leave-incomplete'].includes(dialog.kind) ? '确定' : dialog.kind === 'submit' ? '确认交卷' : '保存并离开'"
@@ -896,6 +1099,10 @@ onBeforeUnmount(() => {
 .exam-page { display: flex; flex-direction: column; gap: 24px; }.exam-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 18px; }.back-link { margin: 0 0 20px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; }.eyebrow { margin: 0 0 7px; color: var(--accent); font: 700 11px/1 var(--font-mono); letter-spacing: .14em; }.exam-heading h1 { margin: 0; color: var(--fg); font-size: 29px; letter-spacing: -.03em; }
 .timer { min-width: 174px; padding: 12px 18px; border: 1px solid var(--warning-bg); border-radius: var(--radius-lg); background: var(--warning-bg); text-align: center; color: var(--danger); }.timer span,.timer small { display:block;font-size:10px;letter-spacing:.08em}.timer strong { display:block;margin:2px 0;font:750 25px/1.2 var(--font-mono);letter-spacing:.05em}.timer.urgent { color:var(--danger);border-color:var(--danger-bg);background:var(--danger-bg);animation:pulse 1.4s ease-in-out infinite }
 .minute-warning { position:fixed;z-index:70;top:22px;left:50%;transform:translateX(-50%);display:flex;gap:14px;align-items:center;min-width:min(520px,calc(100vw - 32px));padding:15px 18px;border-radius:13px;background:var(--danger);color:white;box-shadow:0 14px 35px oklch(0.54 0.20 25 / 0.25); }.minute-warning span { font-size:13px;opacity:.9 }.tab-warning { display:flex;align-items:center;gap:12px;padding:14px 18px;border:1px solid var(--warning-bg);border-radius: var(--radius-lg);background:var(--warning-bg);color:var(--warning);font-size:13px}.tab-warning span{color:var(--warning)}
+/* 监考告知与写入权限横幅：只用设计系统变量，正文 14px、间距走 4px 网格 */
+.integrity-note { display:flex;flex-wrap:wrap;align-items:center;gap:16px;padding:16px;border:1px solid var(--border);border-radius: var(--radius-lg);background:var(--surface-subtle); }.integrity-note>div{flex:1 1 260px;min-width:0}.integrity-note strong{display:block;margin-bottom:4px;color:var(--fg);font-size:13px}.integrity-note p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}.integrity-note b{color:var(--fg)}
+.integrity-banner{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:16px;border:1px solid var(--danger-bg);border-radius: var(--radius-lg);background:var(--danger-bg);color:var(--danger);font-size:13px}.integrity-banner strong{font-size:14px}.integrity-banner span{flex:1 1 240px;line-height:1.7}
+.takeover-panel{width:min(520px,calc(100vw - 32px))}.takeover-field{display:grid;gap:8px;margin-top:16px}.takeover-field span{color:var(--muted);font-size:12px}.takeover-field input{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--border);border-radius: var(--radius-md);background:var(--surface);color:var(--fg);font-size:14px}.takeover-error{margin:12px 0 0;color:var(--danger);font-size:12px}
 .result-panel { display:grid;grid-template-columns:auto 1fr minmax(220px,auto);align-items:center;gap:22px;padding:28px;border:1px solid var(--border);border-radius:18px;background:var(--surface);box-shadow:0 10px 30px oklch(0.2 0.01 150 / 0.04)}.result-mark{display:grid;place-items:center;width:52px;height:52px;border-radius: var(--radius-lg);background:var(--success-bg);color:var(--success);font-size:26px}.result-kicker{margin:0 0 5px;color:var(--muted);font-size:12px;font-weight:650}.result-copy h2{margin:0;color:var(--fg);font-size:30px}.result-copy h2 span{font-size:16px;color:var(--muted);font-weight:500}.result-copy>p:last-child{margin:6px 0 0;color:var(--muted);font-size:13px}.result-panel dl,.start-panel dl{margin:0;display:grid;gap:8px}.result-panel dl div,.start-panel dl div{display:flex;justify-content:space-between;gap:30px;font-size:12px}.result-panel dt,.start-panel dt{color:var(--faint)}.result-panel dd,.start-panel dd{margin:0;color:var(--fg);font-weight:600}
 .start-panel{max-width:640px;margin:34px auto;padding:42px;border:1px solid var(--border);border-radius:18px;background:var(--surface);text-align:center}.start-icon{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 15px;border-radius: var(--radius-lg);background:var(--accent-soft);color:var(--accent);font-size:18px}.start-panel h2{margin:0 0 10px;color:var(--fg);font-size:21px}.start-panel>p{max-width:510px;margin:0 auto 24px;color:var(--muted);font-size:13px;line-height:1.8}.start-panel dl{padding:18px;border-radius: var(--radius-lg);background:var(--surface-subtle);text-align:left}.start-button{margin-top:22px;padding:11px 30px}.start-panel.missed .start-icon{background:var(--danger-bg);color:var(--danger)}
 .workspace{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start;min-height:0}.questions-column{grid-column:1;grid-row:1}.exam-sidebar{grid-column:2;grid-row:1;position:sticky;top:calc(var(--header-height) + var(--page-pad));height:calc(100vh - var(--header-height) - 48px);min-width:0;padding:20px;border:1px solid var(--border);border-radius:15px;background:var(--surface);display:flex;flex-direction:column;box-sizing:border-box}.exam-sidebar .timer{min-width:0;width:100%;box-sizing:border-box;margin-bottom:16px}.exam-sidebar .timer,.save-row,.progress-line,.submit-button,.exam-sidebar>p{flex:0 0 auto}.save-row{display:flex;align-items:center;gap:8px;color:var(--fg);font-size:12px}.save-dot{width:7px;height:7px;border-radius:50%;background:var(--success)}.save-dot.saving,.save-dot.pending{background:var(--warning)}.save-dot.danger{background:var(--danger)}.progress-line{height:6px;margin:16px 0 8px;border-radius: var(--radius-full);background:var(--border);overflow:hidden}.progress-line span{display:block;height:100%;border-radius:inherit;background:var(--accent);transition:width .25s}.exam-sidebar>p,.exam-sidebar>small{color:var(--muted);font-size:11px}.exam-sidebar nav{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:20px 0;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;align-content:start;padding-right:4px}.exam-sidebar nav button{box-sizing:border-box;width:100%;min-width:0;min-height:44px;aspect-ratio:1;border:1px solid var(--border);border-radius: var(--radius-md);background:white;color:var(--muted);cursor:pointer}.exam-sidebar nav button.answered{border-color:var(--success-bg);background:var(--success-bg);color:var(--success)}.exam-sidebar nav button.current{outline:2px solid var(--info-bg)}.submit-button{width:100%;padding:10px;border:0;border-radius: var(--radius-md);background:var(--fg);color:white;font-weight:650;cursor:pointer}.submit-button:disabled{opacity:.5}.exam-sidebar>small{display:block;margin-top:9px;text-align:center;line-height:1.5}
