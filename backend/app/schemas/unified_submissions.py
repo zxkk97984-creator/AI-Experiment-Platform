@@ -62,6 +62,7 @@ class TeacherJudgeSubmissionRead(BaseModel):
     status: str
     grading_status: str
     score: float | None = None
+    result_revision: int = 0
     created_at: datetime | None = None
     finished_at: datetime | None = None
     tests_passed: int | None = None

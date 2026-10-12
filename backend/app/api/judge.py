@@ -1,16 +1,23 @@
 ﻿import math
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.dependencies import PaginationParams, get_current_user, get_db, get_redis_client, pagination
 from app.errors import api_error
-from app.models import Assignment, CodeGrade, Course, JudgeQuestion, Submission, User
-from app.schemas import ImportDiagnosticRead, PaginatedResponse, SampleRunResponse, SubmissionCreate, SubmissionRead
+from app.models import (
+    Assignment, CodeGrade, Course, JudgeQuestion, ManualScoreAudit, Submission, User,
+)
+from app.schemas import (
+    ImportDiagnosticRead, ManualScoreRequest, PaginatedResponse, SampleRunResponse,
+    StudentSubmissionRead, SubmissionCreate, SubmissionRead,
+)
 from app.schemas.unified_submissions import TeacherJudgeSubmissionRead
 from app.services.environment_service import (
     installed_imports_for_version,
@@ -27,6 +34,37 @@ from app.services.audience_service import require_student_assignment_access
 from app.services.offering_service import require_student_task_write
 
 router = APIRouter(prefix="/judge", tags=["judge"])
+
+# 幂等正文摘要有固定版本：只包含不可变的请求内容（题目 + 原样代码），
+# 不含环境/截止/次数等可变配置——否则同一请求会算出不同摘要。
+REQUEST_DIGEST_VERSION = 1
+
+
+def submission_request_digest(question_id: int, code: str) -> str:
+    """固定 v1 规范 JSON 的 SHA-256 摘要（不归一化代码空白/换行）。"""
+    import hashlib
+    import json as _json
+
+    payload = _json.dumps(
+        {"v": REQUEST_DIGEST_VERSION, "question_id": int(question_id), "code": code},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _existing_idempotent_submission(db, student_id: int, client_request_id: str, digest: str):
+    """返回 (submission, conflict)：命中同键同正文 → 原提交；同键不同正文 → 冲突。"""
+    existing = db.scalar(
+        select(Submission).where(
+            Submission.student_id == student_id,
+            Submission.client_request_id == client_request_id,
+        )
+    )
+    if existing is None:
+        return None, False
+    if existing.request_digest == digest:
+        return existing, False
+    return None, True
 
 
 def require_assignment_before_deadline(assignment: Assignment) -> None:
@@ -63,7 +101,7 @@ def can_view_submission(submission: Submission, user: User, db: Session) -> bool
     return submission.student_id == user.id
 
 
-@router.post("/submissions", response_model=SubmissionRead, status_code=status.HTTP_201_CREATED)
+@router.post("/submissions", response_model=None, status_code=status.HTTP_201_CREATED)
 def create_submission(
     payload: SubmissionCreate,
     db: Session = Depends(get_db),
@@ -84,6 +122,21 @@ def create_submission(
         raise api_error(400, "ASSIGNMENT_NOT_AVAILABLE", "作业不可提交")
     assignment = require_student_task_write(db, assignment, current_user)
     require_student_assignment_access(db, assignment, current_user, current=True)
+
+    # 幂等查询**先于**次数与截止限制：重放一个已接收的请求不应因"之后到点/用完次数"而失败。
+    request_key = str(payload.client_request_id) if payload.client_request_id else None
+    digest = submission_request_digest(payload.question_id, payload.code) if request_key else None
+    if request_key:
+        existing, conflict = _existing_idempotent_submission(
+            db, current_user.id, request_key, digest
+        )
+        if conflict:
+            raise api_error(409, "IDEMPOTENCY_KEY_REUSED",
+                            "同一请求键已用于不同的提交内容，请使用新的请求键")
+        if existing is not None:
+            # A02：同键重放同样返回学生白名单投影，绝不回传 stdout/stderr/result_details
+            return student_projection(existing, db)
+
     require_assignment_before_deadline(assignment)
     # check max attempts
     # 平台自身故障（system_error：Docker/环境/结果不可验证等）不消耗学生次数——
@@ -115,16 +168,37 @@ def create_submission(
         environment_version_id=env_id,
         import_policy_mode_snapshot=policy.mode,
         allowed_imports_snapshot=sorted(policy.allowed_imports),
+        client_request_id=request_key,
+        request_digest=digest,
     )
     db.add(submission)
-    db.commit()
+    # 批次三 3B：提交创建时绑定题目当前 active 评分版本；
+    # 没有 active 版本时留空（后续评分转人工，绝不静默绑定最新配置）。
+    from app.services.grading_version_service import bind_submission_version
+
+    bind_submission_version(db, submission)
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发同键：唯一约束是事实源，读取 winner 并按幂等语义返回；
+        # 其他数据库错误正常失败（不回退为"假装成功"）。
+        db.rollback()
+        winner, conflict = _existing_idempotent_submission(
+            db, current_user.id, request_key or "", digest or ""
+        )
+        if winner is not None:
+            return student_projection(winner, db)
+        if conflict:
+            raise api_error(409, "IDEMPOTENCY_KEY_REUSED",
+                            "同一请求键已用于不同的提交内容，请使用新的请求键")
+        raise
     db.refresh(submission)
 
     # 使用统一入队入口：条件 UPDATE pending→queued + Redis 推送
     from app.services.judge_queue import enqueue_job
     enqueue_job(db, job_type="assignment", object_id=submission.id)
 
-    return submission
+    return student_projection(submission, db)
 
 @router.get("/submissions", response_model=PaginatedResponse)
 def list_submissions(
@@ -150,18 +224,33 @@ def list_submissions(
         ).where(scope)
     total = db.scalar(count_query) or 0
     submissions = db.scalars(query.order_by(Submission.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
-    return PaginatedResponse(items=[SubmissionRead.model_validate(item) for item in submissions], page=page, page_size=page_size, total=total)
+    if current_user.role == "student":
+        grade_rows = db.scalars(select(CodeGrade).where(
+            CodeGrade.submission_id.in_([item.id for item in submissions])
+        )).all() if submissions else []
+        grades_by_submission = {grade.submission_id: grade for grade in grade_rows}
+        items = [student_projection(item, ai_grade=grades_by_submission.get(item.id))
+                 for item in submissions]
+    else:
+        items = [SubmissionRead.model_validate(item) for item in submissions]
+    return PaginatedResponse(items=items, page=page, page_size=page_size, total=total)
 
 
-@router.get("/submissions/{submission_id}", response_model=SubmissionRead)
+@router.get("/submissions/{submission_id}", response_model=None)
 def get_submission(
     submission_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """提交详情：学生得到白名单投影，教师/管理员得到完整视图。
+
+    学生响应体不含 stdout/stderr（原始判题输出可能包含隐藏测试信息）。
+    """
     submission = require_submission(submission_id, db)
     if not can_view_submission(submission, current_user, db):
         raise api_error(403, "FORBIDDEN", "没有权限查看该提交")
+    if current_user.role == "student":
+        return student_projection(submission, db)
     return _with_diagnostic(submission)
 
 
@@ -215,7 +304,7 @@ def get_teacher_submission_detail(
     )
 
 
-@router.get("/submissions/{submission_id}/result", response_model=SubmissionRead)
+@router.get("/submissions/{submission_id}/result", response_model=None)
 def get_submission_result(
     submission_id: int,
     db: Session = Depends(get_db),
@@ -236,6 +325,7 @@ def get_submission_result(
         )
         if cg and cg.ai_result:
             submission.grading_breakdown = build_student_grading_breakdown(cg)
+        return student_projection(submission, db)
 
     return _with_diagnostic(submission)
 
@@ -250,6 +340,188 @@ def _with_diagnostic(submission: Submission) -> SubmissionRead:
         except Exception:
             data.diagnostic = None
     return data
+
+def student_projection(submission: Submission, db: Session | None = None, *,
+                       ai_grade: CodeGrade | None = None) -> StudentSubmissionRead:
+    """白名单投影：只暴露学生可见字段，绝不返回 stdout/stderr 与隐藏测试内容。
+
+    同时给出**终态与评分来源**，前端据此停止轮询并展示"等待复核/人工已定分"：
+    * ``processing_terminal``：判题流程已到终态（completed/system_error），不必再轮询；
+    * ``score_finalized``：已有最终分且无在途工作；
+    * ``grading_source``：manual（教师人工定分）/ ai（AI 已完成）/ auto（自动判题）。
+    """
+    details = submission.result_details or {}
+    manual = details.get("manual_review")
+    grading_status = submission.grading_status
+    processing_terminal = grading_status in ("completed", "system_error")
+    if ai_grade is None and db is not None:
+        ai_grade = db.scalar(select(CodeGrade).where(CodeGrade.submission_id == submission.id))
+    active_ai_pending = bool(
+        ai_grade is not None and ai_grade.mode == "active"
+        and ai_grade.status in ("pending", "queued", "running")
+    )
+    active_ai_review = bool(
+        ai_grade is not None and ai_grade.mode == "active"
+        and (ai_grade.status == "review_required" or ai_grade.needs_teacher_review)
+    )
+    if active_ai_pending:
+        processing_terminal = False
+    score_finalized = (
+        processing_terminal and submission.score is not None
+        and not active_ai_pending and not active_ai_review
+    )
+    if isinstance(manual, dict) and manual.get("score") is not None:
+        grading_source = "manual"
+    elif (ai_grade is not None and ai_grade.mode == "active"
+          and ai_grade.status == "completed" and score_finalized):
+        grading_source = "ai"
+    elif score_finalized:
+        grading_source = "auto"
+    else:
+        grading_source = None
+    return StudentSubmissionRead(
+        id=submission.id,
+        question_id=submission.question_id,
+        student_id=submission.student_id,
+        code=submission.code,
+        status=submission.status,
+        grading_status=submission.grading_status,
+        score=submission.score,
+        tests_passed=submission.tests_passed,
+        tests_total=submission.tests_total,
+        execution_time_ms=submission.execution_time_ms,
+        grading_breakdown=getattr(submission, "grading_breakdown", None),
+        diagnostic=_diagnostic_of(submission),
+        manual_review=manual if isinstance(manual, dict) else None,
+        processing_terminal=processing_terminal,
+        score_finalized=score_finalized,
+        grading_source=grading_source,
+        created_at=submission.created_at,
+        finished_at=submission.finished_at,
+    )
+
+
+def _diagnostic_of(submission: Submission) -> ImportDiagnosticRead | None:
+    diag = (submission.result_details or {}).get("diagnostic")
+    if isinstance(diag, dict) and diag.get("code"):
+        try:
+            return ImportDiagnosticRead.model_validate(diag)
+        except Exception:
+            return None
+    return None
+
+
+@router.patch("/submissions/{submission_id}/manual-score", response_model=TeacherJudgeSubmissionRead)
+def manual_score_submission(
+    submission_id: int,
+    payload: ManualScoreRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """教师/管理员人工最终分（批次三 3D）。
+
+    与自动判题、AI 评分相互独立：不改写历史结果，只产生**新的结果版本**
+    （``result_revision`` 原子 +1）并记录评分者、说明与时间。
+
+    拒绝条件：
+    * 非教师/管理员 → 403；
+    * 无该作业的授课范围 → 403；
+    * 判题仍在运行（``grading_status == "running"``）→ 409 GRADING_IN_PROGRESS
+      （在途写入持有认领，人工分必须先等它结束，避免相互覆盖）；
+    * 传入的 ``expected_result_revision`` 与当前不一致 → 409 RESULT_REVISION_CONFLICT。
+    """
+    if current_user.role not in ("teacher", "admin"):
+        raise api_error(403, "FORBIDDEN", "仅教师和管理员可以人工评分")
+    # Lock the result row before touching associated AI records. AI terminal writers
+    # follow this same target-then-CodeGrade order, so stale AI work cannot win later.
+    submission = db.scalar(
+        select(Submission).where(Submission.id == submission_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if submission is None:
+        raise api_error(404, "SUBMISSION_NOT_FOUND", "提交不存在")
+    if not can_view_submission(submission, current_user, db):
+        raise api_error(403, "FORBIDDEN", "没有权限评分该提交")
+    # A03：在途状态必须覆盖"排队/运行中的主判题"和"排队/运行中的 AI 评分记录"。
+    # 只拒绝 running 会放过 queued 提交与 pending AI——它们随后会用旧认领写回并覆盖人工分。
+    if submission.grading_status in ("queued", "running"):
+        raise api_error(409, "GRADING_IN_PROGRESS", "判题仍在进行，请稍后重试")
+    in_flight_grades = db.scalars(
+        select(CodeGrade.id).where(
+            CodeGrade.submission_id == submission_id,
+            CodeGrade.status.in_(("pending", "queued", "running")),
+        ).with_for_update()
+    ).all()
+    if in_flight_grades:
+        raise api_error(409, "AI_GRADING_IN_PROGRESS", "AI 评分仍在进行，请稍后重试")
+    current_revision = submission.result_revision or 0
+    if payload.expected_result_revision != current_revision:
+        raise api_error(409, "RESULT_REVISION_CONFLICT", "结果已更新，请刷新后重试")
+
+    now = datetime.now(timezone.utc)
+    details = dict(submission.result_details or {})
+    history = details.get("manual_review_history")
+    history = list(history) if isinstance(history, list) else []
+    record = {
+        "score": float(payload.score),
+        "reason": payload.reason,
+        "actor_id": current_user.id,
+        "actor_role": current_user.role,
+        "at": now.isoformat(),
+    }
+    history.append(record)
+    details["manual_review_history"] = history[-10:]
+    details["manual_review"] = record
+    # 同一条条件 UPDATE 完成：结果、终态、修订号 CAS 与旧认领失效。
+    # 以读到的修订号为条件 → 两个教师并发时只有一个命中，另一个 409。
+    from sqlalchemy import update
+
+    cas = db.execute(
+        update(Submission)
+        .execution_options(synchronize_session=False)
+        .where(
+            Submission.id == submission_id,
+            Submission.result_revision == current_revision,
+            Submission.grading_status.notin_(("queued", "running")),
+        )
+        .values(
+            score=float(payload.score),
+            status="graded",
+            grading_status="completed",
+            result_details=details,
+            claim_token=None,
+            heartbeat_at=None,
+            result_revision=Submission.result_revision + 1,
+            finished_at=submission.finished_at or now,
+        )
+    )
+    if cas.rowcount != 1:
+        db.rollback()
+        raise api_error(409, "RESULT_REVISION_CONFLICT", "结果已更新，请刷新后重试")
+    # 防御性收口：即使存在在途 AI 记录（竞态窗口内新建），也使其认领失效并标记人工已覆盖，
+    # 保留 AI 原始证据字段（分数/明细）不被改写。
+    db.execute(
+        update(CodeGrade)
+        .execution_options(synchronize_session=False)
+        .where(
+            CodeGrade.submission_id == submission_id,
+            CodeGrade.status.in_(("pending", "queued", "running")),
+        )
+        .values(status="completed", needs_teacher_review=True,
+                review_reason="教师人工评分已覆盖", claim_token=None)
+    )
+    # append-only 审计：每次人工给分新增一行（展示用 history 只是最近若干条）
+    db.add(ManualScoreAudit(
+        target_kind="submission", target_id=submission_id,
+        score=float(payload.score), reason=payload.reason,
+        actor_id=current_user.id, actor_role=current_user.role,
+        result_revision=current_revision + 1, previous_score=submission.score,
+        source="manual_score",
+    ))
+    db.commit()
+    db.refresh(submission)
+    return get_teacher_submission_detail(submission_id, db, current_user)
+
 
 @router.post("/questions/{question_id}/sample-run", response_model=SampleRunResponse)
 def sample_run(
@@ -274,6 +546,21 @@ def sample_run(
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
     assignment = require_student_task_write(db, assignment, current_user)
     require_student_assignment_access(db, assignment, current_user, current=True)
+
+    # 幂等查询**先于**次数与截止限制：重放一个已接收的请求不应因"之后到点/用完次数"而失败。
+    request_key = str(payload.client_request_id) if payload.client_request_id else None
+    digest = submission_request_digest(payload.question_id, payload.code) if request_key else None
+    if request_key:
+        existing, conflict = _existing_idempotent_submission(
+            db, current_user.id, request_key, digest
+        )
+        if conflict:
+            raise api_error(409, "IDEMPOTENCY_KEY_REUSED",
+                            "同一请求键已用于不同的提交内容，请使用新的请求键")
+        if existing is not None:
+            # A02：同键重放同样返回学生白名单投影，绝不回传 stdout/stderr/result_details
+            return student_projection(existing, db)
+
     require_assignment_before_deadline(assignment)
 
     public_cases = question.public_cases or []

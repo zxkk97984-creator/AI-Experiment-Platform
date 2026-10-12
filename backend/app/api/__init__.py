@@ -14,6 +14,8 @@ from .environments import router as environments_router
 from .exams import router as exams_router
 from .experiments import router as experiments_router
 from .labs import router as labs_router
+from .grading_versions import router as grading_versions_router
+from .grading_versions_exam import router as grading_versions_exam_router
 from .judge import router as judge_router
 from .jupyter import router as jupyter_router
 from .lesson_progress import router as lesson_progress_router
@@ -39,6 +41,8 @@ api_router.include_router(environments_router)
 api_router.include_router(assignments_router)
 api_router.include_router(ai_grading_router)
 api_router.include_router(dashboard_router)
+api_router.include_router(grading_versions_router)
+api_router.include_router(grading_versions_exam_router)
 api_router.include_router(judge_router)
 api_router.include_router(lesson_progress_router)
 api_router.include_router(lesson_videos_router)

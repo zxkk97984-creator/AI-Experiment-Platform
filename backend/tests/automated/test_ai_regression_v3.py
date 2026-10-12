@@ -5,11 +5,13 @@ make_student 建真实父行，不再硬编码 assignment_id=1、student_id=1。
 """
 import pytest
 
+from conftest import grant_judge_claim
+
 
 # ── P0: 缺配置/缺Rubric → 系统错误不扣分 ──
 
-def test_v1_without_test_groups_system_error(db_session_factory):
-    """非 legacy 无测试组→系统错误（score 不覆盖）"""
+def test_v1_without_test_groups_and_without_bound_version_goes_to_manual_review(db_session_factory):
+    """实时配置不构成可信基线；未绑定的新评分一律转人工且不产出分数。"""
     from app.models import Submission
     from app.services.judge_queue import enqueue_job
     from conftest import make_judge_question, make_student
@@ -31,9 +33,10 @@ def test_v1_without_test_groups_system_error(db_session_factory):
     settings = Settings(_env_file=None, judge_use_docker=False, judge_timeout_seconds=5)
     with db_session_factory() as db:
         result = process_submission(db, None, settings, sub.id)
-        assert result.status == "system_error", f"应为 system_error: {result.status}"
-        # 系统错误不扣分：score 必须为 None（严禁写 0）
-        assert result.score is None, f"缺配置不应产生有效分，实际: {result.score}"
+        assert result.status == "review_required", f"缺可信版本应转人工: {result.status}"
+        assert result.grading_status == "completed"
+        assert result.score is None
+        assert result.result_details["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
 
 
 def test_v1_missing_rubric_system_error(db_session_factory):
@@ -58,14 +61,16 @@ def test_v1_missing_rubric_system_error(db_session_factory):
                          code="def f(): pass",
                          status="running", grading_status="running")
         db.add(sub); db.commit()
+        # 判题函数只在认领成功后调用；补上认领前置，否则结果写入会被栅栏拒绝
+        grant_judge_claim(db, Submission, sub.id)
 
         settings = Settings(_env_file=None, judge_use_docker=False)
         result = _v1_judge_submission(db, None, settings, sub, q, None, None, 5, 256)
         assert result.status == "system_error"
 
 
-def test_legacy_fallback_only_for_legacy(db_session_factory):
-    """legacy 模式正确走 legacy 路径（mock Docker 验证）"""
+def test_legacy_without_bound_version_does_not_fall_back_to_pytest(db_session_factory):
+    """旧题的 hidden_tests 不能替代确认过的版本基线或启动正式 pytest 评分。"""
     from unittest.mock import patch
     from app.models import Submission
     from app.worker.judge_worker import process_submission
@@ -87,10 +92,11 @@ def test_legacy_fallback_only_for_legacy(db_session_factory):
     settings = Settings(_env_file=None, judge_use_docker=False, judge_timeout_seconds=5)
     with db_session_factory() as db:
         with patch("app.worker.judge_worker._run_docker_pytest",
-                   side_effect=Exception("no docker")):
+                   side_effect=AssertionError("unbound submissions must not run the legacy scorer")) as docker:
             result = process_submission(db, None, settings, sub.id)
-        # legacy 路径：Docker 异常应被捕获为 system_error
-        assert result.status == "system_error"
+        assert result.status == "review_required"
+        assert result.score is None
+        docker.assert_not_called()
 
 
 # ── P0: 考试权限——越权覆盖返回 403 ──

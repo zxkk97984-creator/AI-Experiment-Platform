@@ -74,3 +74,42 @@ it('waits for AI details on graded results', async () => {
   await vi.advanceTimersByTimeAsync(6000)
   expect(judgeAPI.getResult).toHaveBeenCalledTimes(2)
 })
+
+
+// A06：人工定分 / 进入复核的后端终态必须停止轮询，并给出可读说明
+it('人工定分（grading_source=manual）停止轮询并提示教师已定分', async () => {
+  judgeAPI.getResult.mockResolvedValue({ data: {
+    id: 1, question_id: 3, student_id: 9, code: 'def f(): pass',
+    status: 'succeeded', grading_status: 'completed', score: 88,
+    processing_terminal: true, score_finalized: true, grading_source: 'manual',
+    manual_review: { score: 88, reason: '人工复核' },
+  } })
+  await open()
+  await vi.advanceTimersByTimeAsync(60000)
+  expect(judgeAPI.getResult).toHaveBeenCalledTimes(1), '终态后不得继续轮询'
+  expect(wrapper.get('[data-testid="grading-state"]').text()).toContain('人工评定最终分')
+  expect(wrapper.text()).toContain('88')
+})
+
+it('进入人工复核（终态但未定分）停止轮询并提示无需等待', async () => {
+  judgeAPI.getResult.mockResolvedValue({ data: {
+    id: 1, question_id: 3, student_id: 9, code: 'def f(): pass',
+    status: 'succeeded', grading_status: 'completed', score: null,
+    processing_terminal: true, score_finalized: false, grading_source: 'auto',
+  } })
+  await open()
+  await vi.advanceTimersByTimeAsync(60000)
+  expect(judgeAPI.getResult).toHaveBeenCalledTimes(1)
+  expect(wrapper.get('[data-testid="grading-state"]').text()).toContain('人工复核')
+})
+
+it('仍在判题（非终态）继续轮询', async () => {
+  judgeAPI.getResult.mockResolvedValue({ data: {
+    id: 1, question_id: 3, student_id: 9, code: 'def f(): pass',
+    status: 'running', grading_status: 'running', score: null,
+    processing_terminal: false, score_finalized: false,
+  } })
+  await open()
+  await vi.advanceTimersByTimeAsync(60000)
+  expect(judgeAPI.getResult.mock.calls.length).toBeGreaterThan(1)
+})

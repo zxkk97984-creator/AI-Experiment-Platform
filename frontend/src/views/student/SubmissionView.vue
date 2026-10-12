@@ -18,8 +18,22 @@ let timer = null
 const TERMINAL_STATUSES = ['accepted', 'wrong_answer', 'runtime_error', 'time_limit_exceeded', 'system_error']
 
 function isResultComplete(result) {
+  // 后端给出的终态优先：人工定分/进入复核后必须停止轮询（A06），
+  // 否则学生会一直刷新到"判题超时"。
+  if (result.processing_terminal) return true
   if (TERMINAL_STATUSES.includes(result.status)) return true
   return result.status === 'graded' && Boolean(result.grading_breakdown)
+}
+
+/** 人工定分 / 等待复核 / AI 定分的可读说明（无则返回空串）。 */
+function gradingStateText(result) {
+  if (!result) return ''
+  if (result.grading_source === 'manual') return '教师已人工评定最终分，无需等待自动判题'
+  if (result.processing_terminal && !result.score_finalized) {
+    return '已进入人工复核，教师处理后会更新结果，本页无需继续等待'
+  }
+  if (result.grading_source === 'ai' && result.score_finalized) return 'AI 评分已完成'
+  return ''
 }
 
 const error = ref('')
@@ -125,6 +139,9 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="panel-body">
+            <div v-if="gradingStateText(submission)" class="row-wrap" data-testid="grading-state">
+              <span class="meta">{{ gradingStateText(submission) }}</span>
+            </div>
             <div class="row-wrap">
               <span class="meta">状态：{{ submission.status }}</span>
               <span v-if="submission.score != null" class="meta">得分：<strong>{{ submission.score }}</strong></span>

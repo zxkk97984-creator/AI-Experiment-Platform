@@ -665,6 +665,8 @@ class JudgeQuestionUpdate(BaseModel):
 class SubmissionCreate(BaseModel):
     question_id: int
     code: str
+    # 可选幂等请求键（旧客户端省略时保持原行为）
+    client_request_id: UUID | None = None
 
     @field_validator("code")
     @classmethod
@@ -690,6 +692,48 @@ class SubmissionRead(BaseModel):
     grading_breakdown: dict | None = None  # 仅 active 模式学生可见
     # Phase 5：结构化 import/环境诊断——学生 API 只返回安全中文信息，不含裸 traceback
     diagnostic: ImportDiagnosticRead | None = None
+
+
+class StudentSubmissionRead(BaseModel):
+    """学生可见的判题结果**白名单**投影（批次三 3D）。
+
+    刻意不包含 ``stdout`` / ``stderr`` / 隐藏测试内容 / 期望值 / 教师备注：
+    学生只看到状态、分数、通过计数、逐组得分与安全诊断信息。
+    新增字段必须同时更新 ``tests/automated/test_manual_score_and_projection.py``
+    里的白名单断言，否则测试会失败——这是防止未来字段泄漏的闸门。
+    """
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: int
+    question_id: int
+    student_id: int
+    code: str
+    status: str
+    grading_status: str
+    score: float | None = None
+    tests_passed: int | None = None
+    tests_total: int | None = None
+    execution_time_ms: int | None = None
+    grading_breakdown: dict | None = None
+    diagnostic: ImportDiagnosticRead | None = None
+    manual_review: dict | None = None
+    # 终态与来源（A06）：前端据此停止轮询并区分"等待复核/人工已定分/AI 已定分"
+    processing_terminal: bool = False
+    score_finalized: bool = False
+    grading_source: str | None = None
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ManualScoreRequest(BaseModel):
+    """教师/管理员对作业提交的人工最终分（独立于 AI 与自动判题）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    score: float = Field(ge=0)
+    reason: str = Field(min_length=1, max_length=500)
+    expected_result_revision: int = Field(ge=0)
 
 
 class SampleRunResponse(BaseModel):
@@ -883,6 +927,7 @@ class ExamAnswerScoreUpdate(BaseModel):
 
     score: float = Field(ge=0, allow_inf_nan=False)
     reason: str = Field(min_length=3, max_length=1000)
+    expected_result_revision: int = Field(ge=0)
 
     @field_validator("reason")
     @classmethod

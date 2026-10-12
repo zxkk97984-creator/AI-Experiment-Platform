@@ -7,7 +7,8 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from app.errors import api_error
-from app.models import Exam, ExamAnswer, ExamGrade, ExamQuestion, ExamSubmission, QuestionRubric, User
+from app.models import (Exam, ExamAnswer, ExamGrade, ExamQuestion, ExamSubmission,
+                        JudgeGradingVersion, User)
 from app.services.student_ai_results import build_student_grading_breakdown
 from app.services.offering_service import require_student_task_write
 
@@ -15,6 +16,7 @@ logger = logging.getLogger("dai.exam_service")
 
 _BLANK_PATTERN = re.compile(r"\[\[blank:([A-Za-z0-9_-]+)\]\]")
 _COMPLETED_SUBMISSION_STATUSES = ("submitted", "grading", "graded", "review_required")
+_LIVE_POINTS = object()
 
 def require_exam_editable(exam, user):
     if user.role != "admin" and exam.created_by_id != user.id:
@@ -27,7 +29,7 @@ def round_score(value: float) -> float:
     return float(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
-def score_choice_answer(question, selected_options) -> float:
+def score_choice_answer(question, selected_options, *, points: float | None = None) -> float:
     """选择题评分；历史数据默认完全匹配，多选可启用无错选部分得分。"""
     answer_config = question.correct_answer or {}
     correct = set(answer_config.get("correct", []))
@@ -36,8 +38,9 @@ def score_choice_answer(question, selected_options) -> float:
             and answer_config.get("scoring_mode", "all_or_nothing") == "partial_no_wrong":
         if selected - correct or not correct:
             return 0.0
-        return round_score(float(question.points) * len(selected & correct) / len(correct))
-    return round_score(float(question.points)) if correct == selected else 0.0
+        return round_score(float(question.points if points is None else points)
+                           * len(selected & correct) / len(correct))
+    return round_score(float(question.points if points is None else points)) if correct == selected else 0.0
 
 
 def _normalized_fill_value(value, *, case_sensitive: bool) -> str:
@@ -45,12 +48,12 @@ def _normalized_fill_value(value, *, case_sensitive: bool) -> str:
     return normalized if case_sensitive else normalized.casefold()
 
 
-def score_fill_blank_answer(question, text_answers) -> float:
+def score_fill_blank_answer(question, text_answers, *, points: float | None = None) -> float:
     """多空填空题按空等分；每空支持多个可接受答案与大小写设置。"""
     blanks = (question.correct_answer or {}).get("blanks", [])
     if not blanks:
         return 0.0
-    per_blank = float(question.points) / len(blanks)
+    per_blank = float(question.points if points is None else points) / len(blanks)
     earned = 0.0
     provided = text_answers or {}
     for blank in blanks:
@@ -182,6 +185,12 @@ def start_exam(exam, student, db):
     sub = ExamSubmission(exam_id=exam.id, student_id=student.id, status="started",
                          started_at=now, expires_at=expires_at)
     db.add(sub)
+    db.flush()
+    # 批次三 3B：开始考试即冻结逐代码题的评分版本；
+    # 之后创建/补建答案只从该映射复制，考试中途改题目配置不影响本场考试。
+    from app.services.grading_version_service import freeze_exam_versions
+
+    freeze_exam_versions(db, sub)
     db.commit()
     db.refresh(sub)
     return sub
@@ -235,6 +244,14 @@ def save_answer(db, exam_id, question_id, student, payload):
         ans.selected_options = payload.get("selected_options", [])
     if ans.id is not None:
         ans.version += 1
+    else:
+        # 批次三 3B：新答案落库后再绑定版本。
+        # 必须放在版本号判定之后：既有语义用 ans.id is None 判断"首次保存"，
+        # 提前 flush 会让首次保存被当作更新而多记一个版本号。
+        db.flush()
+        from app.services.grading_version_service import bind_exam_answer_version
+
+        bind_exam_answer_version(db, ans)
     sub.last_saved_at = now
     db.commit()
     db.refresh(ans)
@@ -292,23 +309,39 @@ def _prepare_answers(sub, db):
     by_qid = {a.question_id: a for a in answers}
     code_answers = []
 
+    from app.services.grading_version_service import frozen_points_for_question
+
     for q in questions:
         ans = by_qid.get(q.id)
         if not ans:
+            ans = ExamAnswer(
+                submission_id=sub.id, question_id=q.id, grading_status="completed",
+                score=0.0,
+            )
+            db.add(ans)
+        frozen_points = frozen_points_for_question(sub, q.id)
+        if frozen_points is None:
+            ans.score = None
+            ans.grading_status = "system_error"
+            ans.system_error = "考试开始时缺少可信分值快照，需教师人工复核"
+            ans.finished_at = None
             continue
         if q.question_type in ("single_choice", "multi_choice"):
-            ans.score = score_choice_answer(q, ans.selected_options)
+            ans.score = score_choice_answer(q, ans.selected_options, points=frozen_points)
             ans.grading_status = "completed"
+            ans.result_revision = (ans.result_revision or 0) + 1
         elif q.question_type == "fill_blank":
-            ans.score = score_fill_blank_answer(q, ans.text_answers)
+            ans.score = score_fill_blank_answer(q, ans.text_answers, points=frozen_points)
             ans.grading_status = "completed"
+            ans.result_revision = (ans.result_revision or 0) + 1
         elif q.question_type == "code":
-            if ans.code_answer:
+            if ans.code_answer and ans.code_answer.strip():
                 ans.grading_status = "pending"
                 code_answers.append((ans, q))
             else:
                 ans.score = 0  # 未作答：正常 0 分
                 ans.grading_status = "completed"
+                ans.result_revision = (ans.result_revision or 0) + 1
     return code_answers
 
 
@@ -403,7 +436,9 @@ def retry_exam_submission(submission_id: int, answer_ids: list[int], actor, db):
     if not answer_ids:
         raise api_error(422, "NO_ANSWERS", "至少选择一道需要重试的答案")
 
-    # 逐题校验配置完整（仅 code 题需要；选择题无需判题配置）
+    # 逐题校验配置完整（代码题还需有效版本；全部题型都必须有开始考试时的分值快照）。
+    from app.services.grading_version_service import frozen_points_for_question
+
     for aid in answer_ids:
         ans = db.get(ExamAnswer, aid)
         if not ans or ans.submission_id != submission_id:
@@ -413,29 +448,28 @@ def retry_exam_submission(submission_id: int, answer_ids: list[int], actor, db):
         q = db.get(ExamQuestion, ans.question_id)
         if not q:
             raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
+        if frozen_points_for_question(sub, q.id) is None:
+            raise api_error(409, "FROZEN_POINTS_MISSING", "该考试提交缺少可信分值快照，需管理员修复基线后再重试")
         if q.question_type == "code":
-            gmode = getattr(q, "grading_mode", "legacy") or "legacy"
-            if gmode == "legacy":
-                if not q.hidden_tests or not q.hidden_tests.strip():
-                    raise api_error(422, "CONFIG_INCOMPLETE", "题目缺少隐藏测试，无法重试（请先补齐配置）")
-            else:
-                if not (q.test_groups or []):
-                    raise api_error(422, "CONFIG_INCOMPLETE", "题目缺少测试组，无法重试（请先补齐配置）")
-                # 每个测试组必须有 tests 代码——缺 tests 是永久配置错误，
-                # 配置未修好必须拒绝重试（不得重置 attempt/status 形成第二轮无限失败）
-                missing_tests = [g.get("id") for g in q.test_groups
-                                 if not (g.get("tests") or "").strip()]
-                if missing_tests:
-                    raise api_error(422, "CONFIG_INCOMPLETE",
-                                    "题目测试组缺少测试代码，无法重试（请先补齐配置）")
-                locked = db.scalar(
-                    select(QuestionRubric).where(
-                        QuestionRubric.exam_question_id == q.id,
-                        QuestionRubric.status == "locked",
-                    ).order_by(QuestionRubric.version.desc()).limit(1)
-                )
-                if locked is None:
-                    raise api_error(422, "CONFIG_INCOMPLETE", "题目缺少锁定 Rubric，无法重试（请先生成并锁定评分规则）")
+            entry = (sub.grading_version_map or {}).get(str(q.id))
+            version_id = ans.grading_version_id or (
+                entry.get("version_id") if isinstance(entry, dict) else entry
+            )
+            version = db.get(JudgeGradingVersion, version_id) if version_id else None
+            if (version is None
+                    or (version.payload or {}).get("schema_version") != 2
+                    or (version.payload or {}).get("execution_model") != "isolated_case_v2"):
+                raise api_error(409, "GRADING_VERSION_REQUIRED", "缺少可信的逐例隔离评分版本，不能自动重试，请人工处理")
+            if version.grading_mode_snapshot in ("active", "shadow"):
+                rubric_snapshot = (version.context_snapshot or {}).get("rubric_snapshot")
+                if not version.rubric_id or not isinstance(rubric_snapshot, dict) or not rubric_snapshot:
+                    raise api_error(409, "RUBRIC_BASELINE_MISSING", "冻结 Rubric 基线不可用，不能自动重试，请人工处理")
+            try:
+                from app.services.data_grading import DataGradingConfigError, plan_cases
+
+                plan_cases(version)
+            except DataGradingConfigError as exc:
+                raise api_error(409, "GRADING_BASELINE_INVALID", "冻结评分版本不可执行，请教师人工处理") from exc
 
     # 原子重置/重评选中的答案：
     # - code 题：重置为 pending（score 保持 NULL），等待重新判题
@@ -454,9 +488,14 @@ def retry_exam_submission(submission_id: int, answer_ids: list[int], actor, db):
             ans.system_error = None
             ans.result_details = None
             ans.score = None  # 原始方案：选中的 system_error 答案清理 score=NULL，等判题后定分
+            # 受控重试必须让旧认领失效：清空代次后，旧 Worker 的迟到写入一律被拒。
+            ans.claim_token = None
+            ans.heartbeat_at = None
+            ans.result_revision = (ans.result_revision or 0) + 1
             code_answer_ids.append(aid)
         else:
-            ans.score = score_choice_answer(q, ans.selected_options)
+            frozen_points = frozen_points_for_question(sub, q.id)
+            ans.score = score_choice_answer(q, ans.selected_options, points=frozen_points)
             ans.grading_status = "completed"
             ans.attempt_count = 0
             ans.queued_at = None
@@ -465,6 +504,9 @@ def retry_exam_submission(submission_id: int, answer_ids: list[int], actor, db):
             ans.last_error = None
             ans.system_error = None
             ans.result_details = None
+            ans.claim_token = None
+            ans.heartbeat_at = None
+            ans.result_revision = (ans.result_revision or 0) + 1
 
     # 清父 review 字段并转 grading
     sub.status = "grading"
@@ -528,7 +570,7 @@ def get_my_grade(exam_id, student, db):
         answer_list.append(item)
 
     score_visible = bool(exam and exam.show_score_after_grading and sub.status == "graded")
-    max_score = float(db.scalar(select(func.sum(ExamQuestion.points)).where(ExamQuestion.exam_id == exam_id)) or 0)
+    max_score = _frozen_exam_max_score(sub)
     return {"submission_id": sub.id, "status": sub.status, "score": sub.score if score_visible else None,
             "score_visible": score_visible, "max_score": max_score,
             "started_at": sub.started_at.isoformat() if sub.started_at else None,
@@ -541,6 +583,22 @@ def get_my_grade(exam_id, student, db):
 
 def exam_max_score(exam_id: int, db: Session) -> float:
     return float(db.scalar(select(func.sum(ExamQuestion.points)).where(ExamQuestion.exam_id == exam_id)) or 0)
+
+
+def _frozen_exam_max_score(submission: ExamSubmission | None) -> float | None:
+    """Return a complete frozen maximum; never substitute today's question points."""
+    mapping = submission.grading_version_map if submission else None
+    if not isinstance(mapping, dict) or not mapping:
+        return None
+    points = []
+    for entry in mapping.values():
+        if not isinstance(entry, dict) or entry.get("points") is None:
+            return None
+        try:
+            points.append(float(entry["points"]))
+        except (TypeError, ValueError):
+            return None
+    return sum(points)
 
 
 def student_exam_status(exam: Exam, submission: ExamSubmission | None, now=None) -> tuple[str, bool, bool]:
@@ -587,6 +645,8 @@ def build_student_exam_summary(
         max_score = float(max_scores.get(exam.id, 0.0))
     else:
         max_score = exam_max_score(exam.id, db)
+    if submission is not None:
+        max_score = _frozen_exam_max_score(submission)
     return {
         "id": exam.id,
         "course_id": exam.course_id,
@@ -606,14 +666,15 @@ def build_student_exam_summary(
     }
 
 
-def _student_question_payload(question: ExamQuestion, *, include_correct_answers: bool = False) -> dict:
+def _student_question_payload(question: ExamQuestion, *, include_correct_answers: bool = False,
+                              points: float | None | object = _LIVE_POINTS) -> dict:
     payload = {
         "id": question.id,
         "exam_id": question.exam_id,
         "question_type": question.question_type,
         "prompt": question.prompt,
         "options": question.options,
-        "points": float(question.points),
+        "points": float(question.points) if points is _LIVE_POINTS else points,
         "order_index": question.order_index,
         "starter_code": question.starter_code,
         "public_cases": question.public_cases,
@@ -702,10 +763,20 @@ def build_student_exam_session(exam: Exam, student: User, db: Session) -> dict:
             "submission_reason": submission.submission_reason,
             "review_reason": submission.review_reason,
         }
+    from app.services.grading_version_service import frozen_points_for_question
+
+    student_questions = [
+        _student_question_payload(
+            q, include_correct_answers=answers_visible,
+            points=(frozen_points_for_question(submission, q.id)
+                    if submission is not None else _LIVE_POINTS),
+        )
+        for q in questions
+    ]
     return {
         "exam": summary,
         "submission": submission_payload,
-        "questions": [_student_question_payload(q, include_correct_answers=answers_visible) for q in questions],
+        "questions": student_questions,
         "saved_answers": saved_answers,
         "visibility": {
             "score": score_visible,

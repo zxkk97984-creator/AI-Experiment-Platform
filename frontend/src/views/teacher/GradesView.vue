@@ -10,10 +10,13 @@ import { useAppStore } from '../../stores/app.js'
 import { formatDateTime } from '../../utils/format.js'
 import { EXAM_GRADE_STATUS_MAP, statusBadge } from '../../utils/status.js'
 import { useServerClock } from '../../composables/useServerClock.js'
+import { areaPathForRole } from '../../router/roleHome.js'
 
 const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
+// 教师与管理员复用同一页面：链接前缀取自当前已鉴权路由（服务端授权不变）
+const area = (suffix) => areaPathForRole((route.path || '').startsWith('/admin') ? 'admin' : 'teacher', suffix)
 const grades = ref([])
 const exam = ref({})
 const summary = ref({ expected_count: 0, submitted_count: 0, graded_count: 0, average_score: null, highest_score: null, pass_rate: 0, excellent_rate: 0 })
@@ -103,7 +106,7 @@ async function load() {
 }
 function resetPage() { page.value = 1; load() }
 function changePage(nextPage) { page.value = nextPage; load() }
-function viewDetail(item) { if (item.submission_id) router.push(`/teacher/exams/${route.params.id}/grades/${item.submission_id}`) }
+function viewDetail(item) { if (item.submission_id) router.push(area(`/exams/${route.params.id}/grades/${item.submission_id}`)) }
 function remainingTime(item) {
   if (item.status !== 'in_progress' || !item.expires_at || !nowMs.value) return '—'
   const total = Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - nowMs.value) / 1000))
@@ -168,12 +171,12 @@ onMounted(load)
 <template>
   <AppLayout content-mode="list">
     <section class="grades-page">
-      <button class="back-link" @click="router.push('/teacher/exams')"><AppIcon name="back" :size="17" />返回考试管理</button>
+      <button class="back-link" @click="router.push(area('/exams'))"><AppIcon name="back" :size="17" />返回考试管理</button>
       <header class="page-head"><div><h1>{{ exam.title || '考试成绩' }} · 成绩总览</h1><p>查看本场考试成绩、统计与学生表现</p></div><button class="btn-primary export-button" :disabled="!grades.length || exportBusy" @click="exportGrades"><AppIcon name="download" :size="18" />{{ exportBusy ? '导出中…' : '导出成绩' }}</button></header>
 
       <section class="review-control">
         <div><p class="control-kicker">讲评与公开</p><h2>{{ exam.review_released_at ? '讲评已发布' : '讲评尚未发布' }}</h2><p>成绩：{{ exam.show_score_after_grading ? '评分后公开' : '隐藏' }} · 题目：{{ exam.show_questions_after_review ? '讲评后公开' : '隐藏' }} · 答案：{{ exam.show_answers_after_review ? '讲评后公开' : '隐藏' }}</p></div>
-        <div class="review-actions"><button class="btn-ghost" @click="router.push(`/teacher/exams/${route.params.id}/edit`)">调整公开策略</button><button v-if="!exam.review_released_at" class="btn-primary" :disabled="!canReleaseReview" :title="canReleaseReview ? '' : '最晚进入时间结束且无人正在考试后才可发布'" @click="actionDialog = { kind: 'review' }">发布讲评</button><span v-else>{{ formatDateTime(exam.review_released_at) }}</span></div>
+        <div class="review-actions"><button class="btn-ghost" @click="router.push(area(`/exams/${route.params.id}/edit`))">调整公开策略</button><button v-if="!exam.review_released_at" class="btn-primary" :disabled="!canReleaseReview" :title="canReleaseReview ? '' : '最晚进入时间结束且无人正在考试后才可发布'" @click="actionDialog = { kind: 'review' }">发布讲评</button><span v-else>{{ formatDateTime(exam.review_released_at) }}</span></div>
       </section>
 
       <section class="status-overview" aria-label="考试进度统计"><article v-for="status in statusCards" :key="status[0]" :class="status[2]"><strong>{{ status[1] }}</strong><span>{{ status[0] }}</span></article></section>

@@ -391,6 +391,7 @@ class ImportDiagnosticRead(BaseModel):
     - IMPORT_NOT_INSTALLED：策略允许但环境未安装（平台配置问题，不扣分）
     - ENVIRONMENT_DRIFT：manifest 声称安装但镜像实际缺失（平台问题）
     - ENVIRONMENT_IMAGE_MISSING：绑定环境版本没有可用镜像（平台问题，不扣分）
+    - 评分基线/版本/Rubric 不可验证：安全提示教师复核，不包含隐藏测试或内部日志
     """
 
     code: Literal[
@@ -398,6 +399,11 @@ class ImportDiagnosticRead(BaseModel):
         "IMPORT_NOT_INSTALLED",
         "ENVIRONMENT_DRIFT",
         "ENVIRONMENT_IMAGE_MISSING",
+        "MISSING_GRADING_BASELINE",
+        "MISSING_SCORE_BASELINE",
+        "MANUAL_REVIEW_REQUIRED",
+        "DATA_VERSION_MODE_MISMATCH",
+        "RUBRIC_REQUIRED",
     ]
     module: str
     message: str

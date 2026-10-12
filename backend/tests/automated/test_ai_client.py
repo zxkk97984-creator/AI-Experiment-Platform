@@ -23,6 +23,53 @@ def make_test_settings(**overrides):
 # ── 端点与认证 ──
 
 
+def test_opencode_go_uses_real_client_identity_and_stable_session():
+    from app.services.ai_client import DeepSeekClient
+
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"ok":true}'}}]
+        })
+
+    client = DeepSeekClient(
+        make_test_settings(ai_base_url="https://opencode.ai/zen/go/v1",
+                           ai_model="deepseek-v4.1-flash"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        for _ in range(2):
+            assert client.chat_json([{"role": "user", "content": "JSON code check"}],
+                                    operation="ai_grading") == {"ok": True}
+        assert str(seen[0].url) == "https://opencode.ai/zen/go/v1/chat/completions"
+        assert json.loads(seen[0].content)["model"] == "deepseek-v4.1-flash"
+        assert seen[0].headers["User-Agent"] == "dai-experiment-platform/1.0"
+        assert seen[0].headers["x-opencode-session"]
+        assert seen[0].headers["x-opencode-session"] == seen[1].headers["x-opencode-session"]
+    finally:
+        client._client.close()
+
+
+def test_opencode_go_headers_are_not_sent_to_other_providers():
+    from app.services.ai_client import DeepSeekClient, sanitize_ai_error
+
+    def handler(request):
+        assert "x-opencode-session" not in request.headers
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"ok":true}'}}]
+        })
+
+    client = DeepSeekClient(make_test_settings(), transport=httpx.MockTransport(handler))
+    try:
+        client.chat_json([{"role": "user", "content": "JSON code check"}],
+                         operation="ai_grading")
+    finally:
+        client._client.close()
+    assert sanitize_ai_error("invalid oc_sk_unit_test_only") == "invalid oc_sk_***"
+
+
 def test_chat_uses_configured_endpoint_and_model():
     """验证客户端使用配置的端点、模型和认证头"""
     from app.services.ai_client import DeepSeekClient

@@ -92,7 +92,7 @@ const TEST_STATUS_ICON = { queued: '⏳', running: '🔄', accepted: '✓', wron
 const TEST_STATUS_LABEL = { queued: '排队等待判题...', running: '正在判题中...', accepted: '全部测试通过', wrong_answer: '答案错误', runtime_error: '运行错误', time_limit_exceeded: '执行超时', system_error: '系统错误', no_public_cases: '无公开样例' }
 const TEST_STATUS_CLASS = { queued: 'muted', running: 'muted', accepted: 'success', wrong_answer: 'error', runtime_error: 'error', time_limit_exceeded: 'warning', system_error: 'error', no_public_cases: 'muted' }
 
-const SUBMIT_STATUS_LABEL = { queued: '⏳ 排队等待判题...', running: '🔄 正在判题中...', accepted: '✓ 全部通过', graded: '✓ AI 评分完成', wrong_answer: '✗ 答案错误', runtime_error: '✗ 运行错误', time_limit_exceeded: '⏱ 执行超时', system_error: '⚠ 系统错误' }
+const SUBMIT_STATUS_LABEL = { queued: '⏳ 排队等待判题...', running: '🔄 正在判题中...', accepted: '✓ 全部通过', graded: '✓ AI 评分完成', review_required: '⚠ 待教师复核', wrong_answer: '✗ 答案错误', runtime_error: '✗ 运行错误', time_limit_exceeded: '⏱ 执行超时', system_error: '⚠ 系统错误' }
 
 const submitResult = ref(null)
 const submitPolling = ref(false)
@@ -404,6 +404,8 @@ function onEditorDragEnd() {
 
 function isSubmissionComplete(result, gradingMode) {
   if (!result) return false
+  // 后端终态（人工定分/进入复核/completed）优先：停止轮询，避免"判题超时"（A06）
+  if (result.processing_terminal) return true
   if (TERMINAL_ERROR_STATUSES.includes(result.status)) return true
   if (gradingMode === 'active') {
     // CodeGrade 与 Submission 分两次落库时可能短暂出现 graded 但尚无明细；

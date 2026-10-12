@@ -254,17 +254,27 @@ def test_formal_docker_fail_system_error():
     sub.status = 'queued'
     sub.grading_status = 'queued'
     sub.question_id = 1
+    # 历史题目：没有评分版本基线（A08 之后必须显式给出，否则 MagicMock 会被当成绑定版本）
+    sub.grading_version_id = None
     db.get.side_effect = lambda m, i: q if m == models.JudgeQuestion else sub
     redis = MagicMock()
 
     with patch('subprocess.run', side_effect=FileNotFoundError('no docker')):
         with patch('app.services.judge_queue.claim_job', return_value=True):
-            result = process_submission(db, redis, settings, 1)
-    assert result.status == 'system_error'
-    assert result.score is None  # 系统错误不扣分（第六轮修正）
+            # 历史题目没有任何评分版本：显式让版本解析返回 None（MagicMock db 会返回真值 mock）
+            with patch('app.services.grading_version_service.active_version_for',
+                       return_value=None):
+                process_submission(db, redis, settings, 1)
+    # 结果写入是受认领栅栏保护的条件 UPDATE，全 mock 的 db 不反映内存副作用，
+    # 因此断言发出的 SQL 值（真实落库行为由 test_judge_claim_fence.py 覆盖）。
+    from conftest import executed_update_values
+    from app.models import Submission as _Submission
+    values = executed_update_values(db, _Submission)
+    assert any(v.get('status') == 'review_required' for v in values), values
+    assert any(v.get('score') is None for v in values), values
     db.commit.assert_called()
-    db.refresh.assert_called()
-    redis.setex.assert_called()
+    # 缺少可信基线在旧评分器/Docker/Redis 之前即安全转人工。
+    redis.setex.assert_not_called()
 
 
 def test_sample_run_docker_unavailable(client, db_session_factory):

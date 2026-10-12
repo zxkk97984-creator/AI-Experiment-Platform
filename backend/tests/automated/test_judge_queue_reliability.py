@@ -122,11 +122,11 @@ def test_duplicate_enqueue_only_one_valid(db_session_factory):
     with db_session_factory() as db:
         # 第一次入队：pending → queued，成功
         ok1 = enqueue_job(db, job_type="assignment", object_id=sid)
-        assert ok1 is True
+        assert ok1
 
         # 第二次入队：状态已是 queued，条件更新不命中
         ok2 = enqueue_job(db, job_type="assignment", object_id=sid)
-        assert ok2 is False
+        assert not ok2
 
         # 验证 DB 状态
         sub = db.get(Submission, sid)
@@ -140,10 +140,10 @@ def test_duplicate_enqueue_exam_only_one_valid(db_session_factory):
 
     with db_session_factory() as db:
         ok1 = enqueue_job(db, job_type="exam", object_id=aid)
-        assert ok1 is True
+        assert ok1
 
         ok2 = enqueue_job(db, job_type="exam", object_id=aid)
-        assert ok2 is False
+        assert not ok2
 
         ans = db.get(ExamAnswer, aid)
         assert ans.grading_status == "queued"
@@ -164,7 +164,7 @@ def test_redis_failure_preserves_db_state(db_session_factory):
             ok = enqueue_job(db, job_type="assignment", object_id=sid)
 
         # 虽然 Redis 推送失败，但 DB 状态已正确更新
-        assert ok is True
+        assert ok
 
         sub = db.get(Submission, sid)
         assert sub.grading_status == "queued", f"Redis故障时DB状态应为queued，实际: {sub.grading_status}"
@@ -244,12 +244,12 @@ def test_claim_job_atomic_grab(db_session_factory):
     # 两个"Worker"同时尝试抢占
     with db_session_factory() as db1:
         ok1 = claim_job(db1, job_type="assignment", object_id=sid)
-        assert ok1 is True
+        assert ok1
 
         # 第二个会话独立操作
         with db_session_factory() as db2:
             ok2 = claim_job(db2, job_type="assignment", object_id=sid)
-            assert ok2 is False, "第二个Worker应抢占失败"
+            assert not ok2, "第二个Worker应抢占失败"
 
     # 验证最终状态
     with db_session_factory() as db:
@@ -267,11 +267,11 @@ def test_claim_job_exam_atomic_grab(db_session_factory):
 
     with db_session_factory() as db1:
         ok1 = claim_job(db1, job_type="exam", object_id=aid)
-        assert ok1 is True
+        assert ok1
 
         with db_session_factory() as db2:
             ok2 = claim_job(db2, job_type="exam", object_id=aid)
-            assert ok2 is False
+            assert not ok2
 
     with db_session_factory() as db:
         ans = db.get(ExamAnswer, aid)
@@ -346,7 +346,7 @@ def test_system_error_not_auto_retried(db_session_factory):
 
         # 自动入队拒绝 system_error：不再复活
         ok = enqueue_job(db, job_type="assignment", object_id=sid)
-        assert ok is False, "system_error 不应被自动入队复活"
+        assert not ok, "system_error 不应被自动入队复活"
         sub = db.get(Submission, sid)
         assert sub.grading_status == "system_error"
         assert sub.attempt_count == 1  # 不再递增
@@ -466,6 +466,9 @@ def test_requeue_stale_running_jobs(db_session_factory):
         from datetime import timedelta
         sub = db.get(Submission, sid)
         sub.started_at = sub.started_at - timedelta(seconds=600)
+        # 存活信号是 heartbeat_at（认领时写入、判题在测试组间续期）；
+        # 只回拨 started_at 已不足以模拟"Worker 失联"。
+        sub.heartbeat_at = sub.heartbeat_at - timedelta(seconds=600)
         db.commit()
 
         stats = requeue_stale_jobs(db, job_type="assignment",

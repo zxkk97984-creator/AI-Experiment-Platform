@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from redis import Redis
@@ -14,7 +15,9 @@ from app.models import CodeGrade
 
 logger = logging.getLogger("dai.ai_queue")
 
-STALE_RUNNING_SECONDS = 600  # 10 分钟
+# 10 分钟→30 分钟：AI 客户端最多重试 3 次 × 60–180s，合法运行会超过 600s 并在仍在运行时
+# 被重新入队（白跑一遍）。栅栏落地后旧运行的写入会被丢弃，这里抬高阈值避免无谓重跑。
+STALE_RUNNING_SECONDS = 1800
 
 
 def _ai_queue_name() -> str:
@@ -43,27 +46,121 @@ def enqueue_ai_grade(db: Session, redis_client: Redis, code_grade_id: int) -> bo
     return True
 
 
-def claim_ai_grade(db: Session, code_grade_id: int) -> bool:
-    """条件更新 queued → running。非 queued 返回 False。"""
+def claim_ai_grade(db: Session, code_grade_id: int) -> str | None:
+    """条件更新 queued → running，并铸造本次认领的 token。非 queued 返回 None。
+
+    返回 token 表示认领成功；同一会话随后的评分写入必须带它（见 finish_ai_grade /
+    fail_ai_grade 的栅栏条件），使失去认领的旧运行无法覆盖新结果。
+    """
+    token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     result = db.execute(
         update(CodeGrade)
         .where(CodeGrade.id == code_grade_id, CodeGrade.status == "queued")
-        .values(status="running", started_at=now, attempt_count=CodeGrade.attempt_count + 1)
+        .values(status="running", started_at=now, attempt_count=CodeGrade.attempt_count + 1,
+                claim_token=token)
     )
     db.commit()
-    return result.rowcount > 0
+    if result.rowcount == 0:
+        return None
+    db.info.setdefault("ai_claims", {})[code_grade_id] = token
+    return token
 
 
-def complete_ai_grade(db: Session, code_grade_id: int) -> None:
-    """标记完成（仅 running → completed，不覆盖 review_required）"""
-    now = datetime.now(timezone.utc)
-    db.execute(
-        update(CodeGrade)
-        .where(CodeGrade.id == code_grade_id, CodeGrade.status == "running")
-        .values(status="completed", finished_at=now)
+def current_ai_claim_token(db: Session, code_grade_id: int) -> str | None:
+    return (db.info.get("ai_claims") or {}).get(code_grade_id)
+
+
+def _forget_ai_claim(db: Session, code_grade_id: int) -> None:
+    claims = db.info.get("ai_claims")
+    if claims:
+        claims.pop(code_grade_id, None)
+
+
+def ai_claim_guard(db: Session, code_grade_id: int):
+    """返回本会话对该 CodeGrade 的认领栅栏条件列表；未认领时返回 None。
+
+    调用方在自己的条件 UPDATE 里带上它，即可让"评分写入"与"仍持有认领"原子绑定。
+    """
+    token = current_ai_claim_token(db, code_grade_id)
+    if not token:
+        return None
+    return [CodeGrade.id == code_grade_id, CodeGrade.status == "running",
+            CodeGrade.claim_token == token]
+
+
+def finish_ai_grade(db: Session, code_grade_id: int, values: dict,
+                    related_updates: list[tuple] | None = None,
+                    target_revision_guard: tuple | None = None) -> bool:
+    """AI 评分终态写入：确认仍持有认领 + 写入全部字段，一次事务提交。
+
+    related_updates 为 [(Model, pk, values_dict), ...]，用于在同一事务内写入
+    派生结果（如 active 模式下 Submission.score / ExamAnswer.score）——
+    它们与 CodeGrade 的栅栏写入同生共死，避免"CodeGrade 被拒但正式分已改"。
+    """
+    if target_revision_guard is not None:
+        model, target_id, expected_revision = target_revision_guard
+        target = db.scalar(
+            select(model).where(model.id == target_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if target is None or (expected_revision is not None
+                              and (target.result_revision or 0) != expected_revision):
+            logger.warning("拒绝过期 AI 正式结果: grade=%s target=%s#%s",
+                           code_grade_id, model.__tablename__, target_id)
+            db.rollback()
+            return False
+        if related_updates and expected_revision is None:
+            logger.warning("拒绝缺少来源修订号的 AI 正式结果: grade=%s", code_grade_id)
+            db.rollback()
+            return False
+
+    guard = ai_claim_guard(db, code_grade_id)
+    if guard is None:
+        logger.warning("拒绝无认领的 AI 评分写入: grade=%s", code_grade_id)
+        db.rollback()
+        return False
+    payload = dict(values)
+    payload.setdefault("finished_at", datetime.now(timezone.utc))
+    payload["claim_token"] = None
+    # 结果修订号与结果本身在同一事务内原子推进（人工改分/客户端据此判断过时写入）
+    payload["result_revision"] = CodeGrade.result_revision + 1
+    result = db.execute(
+        update(CodeGrade).execution_options(synchronize_session=False)
+        .where(*guard).values(**payload)
     )
+    if result.rowcount == 0:
+        db.rollback()
+        logger.warning("AI 评分写入被栅栏拒绝（已失去认领）: grade=%s", code_grade_id)
+        return False
+    for model, pk, related_values in (related_updates or []):
+        conditions = [model.id == pk]
+        if target_revision_guard is not None and model is target_revision_guard[0] \
+                and pk == target_revision_guard[1]:
+            conditions.append(model.result_revision == target_revision_guard[2])
+        related = db.execute(
+            update(model).execution_options(synchronize_session=False)
+            .where(*conditions).values(**related_values)
+        )
+        if related.rowcount != 1:
+            # 关联目标不存在（或被并发删除）：整个事务回滚，主结果不得落库，
+            # 否则会出现"CodeGrade 已终态、正式分未写入"的分裂状态。
+            db.rollback()
+            from app.services.grading_errors import RelatedWriteError
+            raise RelatedWriteError(
+                f"AI 评分关联写入失败（{model.__tablename__}#{pk} 未命中），已回滚: grade={code_grade_id}"
+            )
     db.commit()
+    db.expire_all()
+    _forget_ai_claim(db, code_grade_id)
+    return True
+
+
+def complete_ai_grade(db: Session, code_grade_id: int, values: dict | None = None) -> bool:
+    """标记完成（仅仍持有认领的 running → completed，不覆盖 review_required）"""
+    payload = dict(values or {})
+    payload["status"] = "completed"
+    return finish_ai_grade(db, code_grade_id, payload)
 
 
 def fail_ai_grade(
@@ -83,38 +180,48 @@ def fail_ai_grade(
     now = datetime.now(timezone.utc)
 
     if retryable and current < max_attempts:
+        guard = ai_claim_guard(db, code_grade_id)
+        if guard is None:
+            logger.warning("拒绝无认领的 AI 失败写入: grade=%s", code_grade_id)
+            return
         result = db.execute(
             update(CodeGrade)
             .execution_options(synchronize_session=False)
-            .where(CodeGrade.id == code_grade_id, CodeGrade.status == "running")
-            .values(status="queued", last_error=safe, queued_at=now)
+            .where(*guard)
+            .values(status="queued", last_error=safe, queued_at=now, claim_token=None)
         )
         if result.rowcount == 0:
             db.rollback()
-            return  # 已被并发 Worker 处理，不覆盖
+            return  # 已被并发 Worker 处理或已失去认领，不覆盖
         db.commit()
         db.expire_all()
+        _forget_ai_claim(db, code_grade_id)
         from app.services.op_metrics import record as record_metric
 
         record_metric(redis_client, "judge_failures_total", label="retryable")
         msg = json.dumps({"type": "ai_grade", "id": code_grade_id, "attempt": current + 1})
         redis_client.rpush(_ai_queue_name(), msg)
     else:
+        guard = ai_claim_guard(db, code_grade_id)
+        if guard is None:
+            logger.warning("拒绝无认领的 AI 失败写入: grade=%s", code_grade_id)
+            return
         result = db.execute(
             update(CodeGrade)
             .execution_options(synchronize_session=False)
-            .where(CodeGrade.id == code_grade_id, CodeGrade.status == "running")
+            .where(*guard)
             .values(
                 status="review_required", needs_teacher_review=True,
                 review_reason=f"AI 评分失败（尝试 {current} 次）: {safe}",
-                last_error=safe,
+                last_error=safe, claim_token=None,
             )
         )
         if result.rowcount == 0:
             db.rollback()
-            return  # 已被并发 Worker 处理，不覆盖
+            return  # 已被并发 Worker 处理或已失去认领，不覆盖
         db.commit()
         db.expire_all()
+        _forget_ai_claim(db, code_grade_id)
         from app.services.op_metrics import record as record_metric
 
         record_metric(redis_client, "judge_failures_total", label="permanent")
@@ -155,9 +262,16 @@ def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
             .where(
                 CodeGrade.id == grade.id,
                 CodeGrade.status == "running",
-                CodeGrade.started_at == grade.started_at,
+                # 栅栏用认领 token 而非 started_at：token 不受 MySQL DATETIME(0) 截断影响。
+                # NULL 安全比较：迁移前/旧代码认领的行 claim_token 为 NULL，`==` 会得到 NULL。
+                CodeGrade.claim_token.is_not_distinct_from(grade.claim_token),
+                # 代次之外复核"实际仍然过期"：SELECT 与 UPDATE 之间若已被重新认领/刷新，
+                # 旧扫描结果不得把它重置（重新认领会换 token，这里再兜一层）。
+                CodeGrade.started_at < running_threshold,
             )
-            .values(status="queued", last_error="Worker 超时未响应", queued_at=now)
+            .values(status="queued", last_error="Worker 超时未响应", queued_at=now,
+                    # 释放代次：下一次认领铸造新 token，旧运行的评分写入随即失效
+                    claim_token=None)
         )
         if result.rowcount == 0:
             db.rollback()

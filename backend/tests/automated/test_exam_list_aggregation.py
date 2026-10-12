@@ -52,20 +52,26 @@ def exam_seed(db_session_factory):
             )
             db.add(exam)
             db.flush()
-            db.add(ExamQuestion(
+            q1 = ExamQuestion(
                 exam_id=exam.id, question_type="fill_blank", prompt=f"填空 [[blank:a]] {i}",
                 correct_answer={"blanks": [{"id": "a", "accepted_answers": ["x"]}]},
                 points=5, order_index=1,
-            ))
-            db.add(ExamQuestion(
+            )
+            q2 = ExamQuestion(
                 exam_id=exam.id, question_type="fill_blank", prompt=f"填空 [[blank:b]] {i}",
                 correct_answer={"blanks": [{"id": "b", "accepted_answers": ["y"]}]},
                 points=7, order_index=2,
-            ))
+            )
+            db.add_all([q1, q2])
+            db.flush()  # IDs are needed for the frozen points snapshot below.
             if i % 2 == 0:
                 db.add(ExamSubmission(
                     exam_id=exam.id, student_id=students[0].id, status="submitted",
                     started_at=now, submitted_at=now,
+                    grading_version_map={
+                        str(q1.id): {"version_id": None, "points": 5.0},
+                        str(q2.id): {"version_id": None, "points": 7.0},
+                    },
                 ))
         grant_teaching_fixture(db, course, [u.id for u in students])
         db.commit()

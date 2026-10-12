@@ -76,6 +76,23 @@ def migrate_file(path, *arguments):
     migrate_url(f'sqlite:///{path}', *arguments)
 
 
+def upgrade_to_current_head(path, *, stamped_at: str):
+    """历史阶段手动应用后，用 Alembic 自身把剩余 revision 收敛到当前 head。
+
+    先 stamp 到已手动应用到的版本，再 ``upgrade head``：后续新增迁移自动纳入
+    覆盖范围，不必在测试里硬编码"只调用某一个新的 revision"。真实环境依旧按
+    同一命令执行迁移，因此这里验证的是与部署一致的路径。
+    """
+    migrate_file(path, 'stamp', stamped_at)
+    migrate_file(path, 'upgrade', 'head')
+
+
+def upgrade_url_to_current_head(url, *, stamped_at: str):
+    """``upgrade_to_current_head`` 的显式数据库 URL 版本（MySQL 等）。"""
+    migrate_url(url, 'stamp', stamped_at)
+    migrate_url(url, 'upgrade', 'head')
+
+
 def seed_environment(connection):
     connection.execute(sa.text("INSERT INTO environment_profiles (id, slug, display_name, status) VALUES (1, 'basic', 'Test basic', 'active')"))
     connection.execute(sa.text("""INSERT INTO environment_versions

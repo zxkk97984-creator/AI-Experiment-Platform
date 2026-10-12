@@ -8,7 +8,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
-from conftest import grant_teaching_fixture, make_assignment, make_course, make_exam, make_student
+from conftest import grant_teaching_fixture, make_assignment, make_course, make_exam, make_student, grant_judge_claim
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -168,6 +168,7 @@ class TestSystemErrorNoScore:
             wd = Path(tmp.name)
             (wd / "user_code.py").write_text("def f(): pass")
 
+            grant_judge_claim(db, Submission, sub.id)
             with patch("app.worker.judge_worker._run_docker_pytest",
                       side_effect=Exception("Docker daemon not available")):
                 result = _legacy_judge_submission(db, None, settings, sub, q, wd, wd, 5, 256)

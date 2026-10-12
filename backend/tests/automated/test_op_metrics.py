@@ -194,7 +194,7 @@ def test_middleware_path_template_is_low_cardinality(
 
 def test_fail_ai_grade_records_permanent_counter(db_session_factory, redis_client):
     from app.models import CodeGrade
-    from app.services.ai_grading_queue import fail_ai_grade
+    from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
     from app.config import Settings
     from conftest import make_rubric, make_submission
 
@@ -204,7 +204,7 @@ def test_fail_ai_grade_records_permanent_counter(db_session_factory, redis_clien
     rubric_id = make_rubric(db_session_factory)
     with db_session_factory() as db:
         grade = CodeGrade(submission_id=submission_id, rubric_id=rubric_id,
-                          mode="active", status="running")
+                          mode="active", status="queued")
         db.add(grade)
         db.commit()
         grade_id = grade.id
@@ -213,6 +213,8 @@ def test_fail_ai_grade_records_permanent_counter(db_session_factory, redis_clien
     # 必须显式关闭 session：泄漏的连接会持有 MySQL 元数据锁，
     # 导致 teardown 的 DROP TABLE 永久等待（2026-08 MySQL 回归卡死根因）。
     with db_session_factory() as db:
+        # 失败写入受认领栅栏保护：必须先认领（真实 Worker 序列）
+        assert claim_ai_grade(db, grade_id)
         fail_ai_grade(db, redis_client, grade_id,
                       "AI 服务未启用", retryable=False, max_attempts=3)
     assert op_metrics.read(redis_client, "judge_failures_total", label="permanent") == 1

@@ -112,6 +112,16 @@ _fastapi_testclient.TestClient = SynchronousASGIClient
 _starlette_testclient.TestClient = SynchronousASGIClient
 
 
+@pytest.fixture(autouse=True)
+def _isolated_op_metrics_aggregator():
+    """指标聚合器是进程级内存状态：每个用例前清空，避免跨用例累加。"""
+    from app.services import op_metrics
+
+    op_metrics.reset_pending()
+    yield
+    op_metrics.reset_pending()
+
+
 @pytest.fixture()
 def test_settings(tmp_path):
     # 可通过 DAI_DATABASE_URL 环境变量切换到 MySQL（CI job 设置此变量）
@@ -795,3 +805,37 @@ def make_template_version(db_session_factory, *, template_id=None,
         db.commit()
         db.refresh(version)
         return version.id
+
+
+def grant_judge_claim(db, model, object_id, job_type="assignment"):
+    """测试前置：让当前会话看起来已经认领该判题任务。
+
+    生产序列是 claim_job()（写 claim_token + 记入 db.info）之后才进入判题函数；
+    直接调用判题函数的测试必须先把这两个前置补齐，否则结果写入会被认领栅栏拒绝。
+    """
+    token = "test-claim-token"
+    row = db.get(model, object_id)
+    row.grading_status = "running"
+    row.claim_token = token
+    db.commit()
+    db.info.setdefault("judge_claims", {})[(job_type, object_id)] = token
+    return token
+
+
+def executed_update_values(mock_db, model):
+    """收集 MagicMock 会话上针对某模型执行过的 UPDATE 绑定参数。
+
+    结果写入已从"ORM 赋值"改为"条件 UPDATE"（认领栅栏），
+    全 mock 的 db 无法反映内存对象的副作用，因此这类测试改为断言发出的 SQL 值。
+    """
+    from sqlalchemy import Update
+
+    collected = []
+    for call in mock_db.execute.call_args_list:
+        stmt = call.args[0] if call.args else None
+        if isinstance(stmt, Update) and getattr(stmt.table, "name", None) == model.__tablename__:
+            try:
+                collected.append(stmt.compile().params)
+            except Exception:  # pragma: no cover - 仅测试辅助
+                continue
+    return collected

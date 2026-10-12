@@ -41,10 +41,16 @@ def get_redis_client(
     request: Request,
     settings: Settings = Depends(get_settings),
 ):
-    """Return the app-scoped Redis client, lazily initialized for non-lifespan callers."""
+    """Return the app-scoped Redis client, lazily initialized for non-lifespan callers.
+
+    客户端契约见 ``app/redis_client.py``：连接/读取各 0.5 秒、零自动重试、
+    连接池上限 32。lifespan 未运行时（测试/脚本）用同一工厂惰性创建。
+    """
+    from app.redis_client import build_api_redis
+
     client = getattr(request.app.state, "redis_client", None)
     if client is None:
-        client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        client = build_api_redis(settings)
         request.app.state.redis_client = client
     return client
 
@@ -61,8 +67,14 @@ def get_current_payload(
     if payload.get("type") != "access":
         raise api_error(401, "INVALID_TOKEN_TYPE", "Token 类型无效")
     jti = payload.get("jti")
-    if jti and redis_client.exists(f"blacklist:{jti}"):
-        raise api_error(401, "TOKEN_REVOKED", "Token 已失效")
+    if jti:
+        # 认证关键读取：Redis 故障必须拒绝放行（503），绝不能当成"令牌不存在"。
+        try:
+            revoked = redis_client.exists(f"blacklist:{jti}")
+        except redis.exceptions.RedisError:
+            raise api_error(503, "SERVICE_UNAVAILABLE", "认证服务暂不可用，请稍后重试")
+        if revoked:
+            raise api_error(401, "TOKEN_REVOKED", "Token 已失效")
     payload["_raw_token"] = token
     return payload
 

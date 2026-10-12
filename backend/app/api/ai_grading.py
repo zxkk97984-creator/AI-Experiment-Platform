@@ -15,7 +15,8 @@ from app.dependencies import PaginationParams, get_db, get_redis_client, paginat
 from app.errors import api_error
 from app.models import (
     Assignment, CodeGrade, Course, Exam, ExamAnswer, ExamQuestion,
-    ExamSubmission, GradeOverride, JudgeQuestion, QuestionRubric, Submission, User,
+    ExamSubmission, GradeOverride, JudgeGradingVersion, JudgeQuestion,
+    QuestionRubric, Submission, User,
 )
 from app.schemas import AIServiceStatus, PaginatedResponse
 from app.schemas.ai_grading import (
@@ -43,6 +44,48 @@ router = APIRouter(prefix="/ai-grading", tags=["AI 评分"])
 def _teacher_or_admin(user: User):
     if user.role not in ("teacher", "admin"):
         raise api_error(403, "FORBIDDEN", "仅教师和管理员可访问")
+
+
+def _lock_retry_target_and_validate_source(db: Session, cg: CodeGrade):
+    """Lock target before CodeGrade and require same trusted version/revision evidence."""
+    if cg.submission_id:
+        target = db.scalar(select(Submission).where(Submission.id == cg.submission_id)
+                            .with_for_update().execution_options(populate_existing=True))
+        target_kind = "submission"
+        version_id = target.grading_version_id if target is not None else None
+        target_id = cg.submission_id
+        details = (target.result_details or {}) if target is not None else {}
+        manual = details.get("manual_review")
+        if isinstance(manual, dict) and manual.get("score") is not None:
+            raise api_error(409, "MANUAL_SCORE_FINAL", "人工最终分已生效，不能重试或重评 AI 分")
+    elif cg.exam_answer_id:
+        target = db.scalar(select(ExamAnswer).where(ExamAnswer.id == cg.exam_answer_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        target_kind = "exam_answer"
+        version_id = target.grading_version_id if target is not None else None
+        target_id = cg.exam_answer_id
+        if target is not None and (target.manual_score_at is not None
+                                   or target.manual_score_reason is not None):
+            raise api_error(409, "MANUAL_SCORE_FINAL", "人工最终分已生效，不能重试或重评 AI 分")
+    else:
+        raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
+    if target is None or version_id is None:
+        raise api_error(409, "GRADING_VERSION_REQUIRED", "没有可验证的评分版本基线，请转人工处理")
+    version = db.get(JudgeGradingVersion, version_id)
+    source = ((cg.deterministic_details or {}).get("source")
+              if isinstance(cg.deterministic_details, dict) else None) or {}
+    expected_revision = source.get("result_revision")
+    expected_version = source.get("grading_version_id")
+    if (version is None or version.id != expected_version
+            or version.rubric_id != cg.rubric_id
+            or version.grading_mode_snapshot not in ("active", "shadow")
+            or (version.payload or {}).get("schema_version") != 2
+            or (version.payload or {}).get("execution_model") != "isolated_case_v2"
+            or not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or (target.result_revision or 0) != expected_revision):
+        raise api_error(409, "STALE_GRADING_SOURCE", "评分记录与当前可信版本/结果修订号不匹配，请人工复核")
+    return target_kind, target_id, target, version
 
 
 @router.get("/status", response_model=AIServiceStatus)
@@ -775,15 +818,27 @@ def retry_grade(
     redis_client=Depends(get_redis_client),
 ):
     _teacher_or_admin(current_user)
-    cg = db.get(CodeGrade, grade_id)
-    if cg is None:
+    cg_ref = db.get(CodeGrade, grade_id)
+    if cg_ref is None:
         raise api_error(404, "NOT_FOUND", "评分记录不存在")
 
     # 权限：教师只能操作自己课程的评分
     if current_user.role != "admin":
-        _check_grade_permission(db, cg, current_user)
+        _check_grade_permission(db, cg_ref, current_user)
 
-    # 条件重置：只重置失败终态（review_required/system_error），不碰 running/queued/completed
+    if cg_ref.status in ("running", "queued", "pending"):
+        return {"ok": True, "grade_id": grade_id, "status": cg_ref.status,
+                "message": "评分进行中，不重复入队"}
+    if cg_ref.status == "completed":
+        raise api_error(400, "ALREADY_COMPLETED", "评分已成功完成，无需重试。如需重新评分请使用重评功能。")
+
+    _lock_retry_target_and_validate_source(db, cg_ref)
+    cg = db.scalar(select(CodeGrade).where(CodeGrade.id == grade_id).with_for_update()
+                   .execution_options(populate_existing=True))
+    if cg is None:
+        raise api_error(404, "NOT_FOUND", "评分记录不存在")
+
+    # 目标锁定后重新确认状态，挡住锁等待期间已被其他 worker 改变的任务。
     if cg.status in ("running", "queued", "pending"):
         return {"ok": True, "grade_id": grade_id, "status": cg.status, "message": "评分进行中，不重复入队"}
     if cg.status == "completed":
@@ -792,6 +847,9 @@ def retry_grade(
     cg.status = "pending"
     cg.last_error = None
     cg.attempt_count = 0
+    # 受控重试：旧代次必须失效，否则上一轮仍在运行的写入会与新结果竞争
+    cg.claim_token = None
+    cg.result_revision = (cg.result_revision or 0) + 1
     db.commit()
 
     ok = enqueue_ai_grade(db, redis_client, grade_id)
@@ -824,8 +882,26 @@ def override_grade(
 
     a_score = data.algorithm_score if data.algorithm_score is not None else cg.algorithm_score or 0
     q_score = data.quality_score if data.quality_score is not None else cg.quality_score or 0
-    f_score = cg.functional_score or 0
-    r_score = cg.robustness_score or 0
+    # 确定性分缺失时**不得**按 0 合分。
+    # 注意：functional_score/robustness_score 列有 default=0，因此"没有确定性判题"的记录
+    # 与"真实 0 分"在数值上无法区分；判据是 deterministic_details 是否记录了确定性结果。
+    deterministic_present = bool((cg.deterministic_details or {}).get("groups"))
+    f_score = data.functional_score if data.functional_score is not None else cg.functional_score
+    r_score = data.robustness_score if data.robustness_score is not None else cg.robustness_score
+    if data.final_score_100 is None and not deterministic_present \
+            and (data.functional_score is None or data.robustness_score is None):
+        raise api_error(
+            422, "DETERMINISTIC_SCORES_REQUIRED",
+            "该评分记录缺少确定性分（功能/边界），不能按 0 合分；请显式提供 functional_score "
+            "与 robustness_score，或直接给出 final_score_100",
+            fields={"missing": [name for name, value in (
+                ("functional_score", data.functional_score),
+                ("robustness_score", data.robustness_score)) if value is None]},
+        )
+    if data.functional_score is not None:
+        cg.functional_score = data.functional_score
+    if data.robustness_score is not None:
+        cg.robustness_score = data.robustness_score
 
     if data.algorithm_score is not None:
         cg.algorithm_score = data.algorithm_score
@@ -900,76 +976,99 @@ def regrade_question(
     _teacher_or_admin(current_user)
     course_id = _get_course_id_for_question(db, kind, question_id)
     _ensure_course_teacher(db, course_id, current_user)
-
-    rubric = get_latest_locked_rubric(db, kind=kind, question_id=question_id)
-    if rubric is None:
-        raise api_error(400, "NO_RUBRIC", "该题目尚无锁定 Rubric")
-
-    if kind == "assignment":
-        q = db.get(JudgeQuestion, question_id)
-    else:
-        q = db.get(ExamQuestion, question_id)
-    if q is None:
+    question = db.get(JudgeQuestion if kind == "assignment" else ExamQuestion, question_id)
+    if question is None:
         raise api_error(404, "NOT_FOUND", "题目不存在")
 
-    gmode = getattr(q, 'grading_mode', 'legacy') or 'legacy'
-    count = 0
-    queued = 0
+    from app.services.grading_version_service import (
+        rubric_binding_ok,
+        version_id_from_map_entry,
+    )
 
-    if kind == "assignment":
-        subs = db.scalars(
-            select(Submission).where(Submission.question_id == question_id)
-        ).all()
-        for sub in subs:
-            existing = db.scalar(
-                select(CodeGrade).where(CodeGrade.submission_id == sub.id)
+    target_model = Submission if kind == "assignment" else ExamAnswer
+    target_fk = "submission_id" if kind == "assignment" else "exam_answer_id"
+    target_ids = db.scalars(
+        select(target_model.id).where(target_model.question_id == question_id)
+        .order_by(target_model.id)
+    ).all()
+    count = queued = skipped_manual = skipped_unbound = 0
+    for target_id in target_ids:
+        # Keep the target -> CodeGrade lock order used by manual scoring and AI writes.
+        target = db.scalar(
+            select(target_model).where(target_model.id == target_id).with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if target is None:
+            continue
+        details = target.result_details or {}
+        manual = details.get("manual_review") if kind == "assignment" else None
+        if ((isinstance(manual, dict) and manual.get("score") is not None)
+                or (kind == "exam" and (target.manual_score_at is not None
+                                        or target.manual_score_reason is not None))):
+            skipped_manual += 1
+            continue
+
+        version_id = target.grading_version_id
+        if kind == "exam":
+            parent = db.get(ExamSubmission, target.submission_id)
+            mapping = (parent.grading_version_map or {}) if parent is not None else {}
+            frozen_id = version_id_from_map_entry(mapping.get(str(target.question_id)))
+            if not version_id or frozen_id != version_id:
+                skipped_unbound += 1
+                continue
+        version = db.get(JudgeGradingVersion, version_id) if version_id else None
+        if (version is None or version.execution_mode != "data_v1"
+                or version.grading_mode_snapshot not in ("active", "shadow")
+                or (version.payload or {}).get("schema_version") != 2
+                or (version.payload or {}).get("execution_model") != "isolated_case_v2"
+                or not rubric_binding_ok(db, version)
+                or details.get("grading_version_id") != version.id):
+            skipped_unbound += 1
+            continue
+        f_score, r_score = details.get("f_score"), details.get("r_score")
+        groups = details.get("groups")
+        if (not isinstance(f_score, (int, float)) or isinstance(f_score, bool)
+                or not isinstance(r_score, (int, float)) or isinstance(r_score, bool)
+                or not isinstance(groups, list)):
+            skipped_unbound += 1
+            continue
+
+        existing = db.scalar(
+            select(CodeGrade).where(getattr(CodeGrade, target_fk) == target.id)
+            .with_for_update().execution_options(populate_existing=True)
+        )
+        if existing is not None and existing.status in ("running", "queued", "pending"):
+            continue
+        if existing is not None and (existing.rubric_id != version.rubric_id
+                                     or existing.mode != version.grading_mode_snapshot):
+            # A CodeGrade from another version generation cannot be repurposed.
+            skipped_unbound += 1
+            continue
+        source = {"result_revision": target.result_revision or 0,
+                  "grading_version_id": version.id}
+        deterministic = {"groups": groups, "source": source,
+                         "grading_version_id": version.id}
+        if existing is None:
+            existing = CodeGrade(
+                submission_id=target.id if kind == "assignment" else None,
+                exam_answer_id=target.id if kind == "exam" else None,
+                rubric_id=version.rubric_id, mode=version.grading_mode_snapshot,
+                status="pending", functional_score=float(f_score),
+                robustness_score=float(r_score), deterministic_details=deterministic,
             )
-            if existing:
-                # 跳过进行中的评分，防止并发覆盖
-                if existing.status in ("running", "queued"):
-                    continue
-                existing.status = "pending"
-                existing.rubric_id = rubric.id
-                existing.last_error = None
-                existing.attempt_count = 0
-            else:
-                f_score = (sub.result_details or {}).get("f_score", 0) if sub.result_details else 0
-                r_score = (sub.result_details or {}).get("r_score", 0) if sub.result_details else 0
-                det = (sub.result_details or {}).get("groups", []) if sub.result_details else []
-                existing = CodeGrade(
-                    submission_id=sub.id, rubric_id=rubric.id, mode=gmode, status="pending",
-                    functional_score=f_score, robustness_score=r_score,
-                    deterministic_details=det,
-                )
-                db.add(existing)
-            count += 1
-    else:
-        answers = db.scalars(
-            select(ExamAnswer).where(ExamAnswer.question_id == question_id)
-        ).all()
-        for ans in answers:
-            existing = db.scalar(
-                select(CodeGrade).where(CodeGrade.exam_answer_id == ans.id)
-            )
-            if existing:
-                # 跳过进行中的评分，防止并发覆盖
-                if existing.status in ("running", "queued"):
-                    continue
-                existing.status = "pending"
-                existing.rubric_id = rubric.id
-                existing.last_error = None
-                existing.attempt_count = 0
-            else:
-                f_score = (ans.result_details or {}).get("f_score", 0) if ans.result_details else 0
-                r_score = (ans.result_details or {}).get("r_score", 0) if ans.result_details else 0
-                det = (ans.result_details or {}).get("groups", []) if ans.result_details else []
-                existing = CodeGrade(
-                    exam_answer_id=ans.id, rubric_id=rubric.id, mode=gmode, status="pending",
-                    functional_score=f_score, robustness_score=r_score,
-                    deterministic_details=det,
-                )
-                db.add(existing)
-            count += 1
+            db.add(existing)
+        else:
+            existing.status = "pending"
+            existing.rubric_id = version.rubric_id
+            existing.mode = version.grading_mode_snapshot
+            existing.functional_score = float(f_score)
+            existing.robustness_score = float(r_score)
+            existing.deterministic_details = deterministic
+            existing.last_error = None
+            existing.attempt_count = 0
+            existing.claim_token = None
+            existing.result_revision = (existing.result_revision or 0) + 1
+        count += 1
 
     db.commit()
 

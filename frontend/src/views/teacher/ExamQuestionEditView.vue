@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import AIQuestionConfig from '../../components/ai/AIQuestionConfig.vue'
+import GradingVersionPanel from '../../components/grading/GradingVersionPanel.vue'
 import ChoiceOptionsEditor from '../../components/teacher/exam/ChoiceOptionsEditor.vue'
 import FillBlankEditor from '../../components/teacher/exam/FillBlankEditor.vue'
 import QeTestCases from '../../components/teacher/question-editor/QeTestCases.vue'
@@ -508,6 +509,18 @@ onMounted(load)
               </template>
             </section>
           </template>
+
+            <!-- 可信数据判题（考试题）：转换预检 → 草稿 → 确认 → 启用；开考时冻结版本 -->
+            <section v-if="form.question_type === 'code' && editingQ" class="editor-section">
+              <div class="section-heading">
+                <span>5</span>
+                <div>
+                  <h4>可信数据判题</h4>
+                  <p>数据用例在平台侧比较；启用只影响新开考的场次，进行中的考试使用开考时冻结的版本</p>
+                </div>
+              </div>
+              <GradingVersionPanel :key="`gv-exam-${editingQ}`" :question-id="editingQ" kind="exam" />
+            </section>
           </div>
 
           <div class="modal-actions">

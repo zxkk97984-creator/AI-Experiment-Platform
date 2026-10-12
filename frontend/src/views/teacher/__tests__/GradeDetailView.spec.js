@@ -28,7 +28,7 @@ function detailPayload() {
       id: 1, exam_id: 5, question_type: 'single_choice', prompt: 'Python关键字是什么？',
       points: 10, order_index: 0, options: { A: 'def', B: 'class' }, correct_answer: { correct: ['B'] },
     }],
-    answers: [{ id: 1, question_id: 1, order_index: 0, question_type: 'single_choice', prompt: 'Python关键字是什么？', points: 10, score: 8, selected_options: ['A'] }],
+    answers: [{ id: 1, question_id: 1, order_index: 0, question_type: 'single_choice', prompt: 'Python关键字是什么？', points: 10, score: 8, result_revision: 3, selected_options: ['A'] }],
   }
 }
 
@@ -79,7 +79,7 @@ describe('学生成绩详情', () => {
     await wrapper.find('.score-dialog__actions .btn-primary').trigger('click')
     await flushPromises()
 
-    expect(updateScoreMock).toHaveBeenCalledWith('5', '7', 1, 7.5, '学生部分正确')
+    expect(updateScoreMock).toHaveBeenCalledWith('5', '7', 1, 7.5, '学生部分正确', 3)
     expect(wrapper.find('input[type="text"]').element.value).toBe('7.5')
     expect(wrapper.text()).toContain('得分：7.5 / 10')
   })
@@ -113,7 +113,7 @@ describe('学生成绩详情', () => {
     await wrapper.find('textarea').setValue('整题未作答')
     await wrapper.find('.score-dialog__actions .btn-primary').trigger('click')
     await flushPromises()
-    expect(updateQuestionScoreMock).toHaveBeenCalledWith('5', '7', 1, 5, '整题未作答')
+    expect(updateQuestionScoreMock).toHaveBeenCalledWith('5', '7', 1, 5, '整题未作答', 0)
   })
 
   it('无失效的「导出报告」按钮，打印按钮调用 window.print', async () => {

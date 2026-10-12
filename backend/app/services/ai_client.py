@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -48,6 +49,7 @@ def sanitize_ai_error(text: str) -> str:
     text = re.sub(r"Bearer\s+\S+", "Bearer ***", text)
     # 删除 sk- 开头的 key
     text = re.sub(r"sk-[a-zA-Z0-9]+", "sk-***", text)
+    text = re.sub(r"oc_sk_[a-zA-Z0-9_]+", "oc_sk_***", text)
     # 截断过长文本
     if len(text) > 1000:
         text = text[:1000]
@@ -88,6 +90,15 @@ class DeepSeekClient:
     ):
         self._settings = settings
         self._endpoint = normalize_chat_endpoint(settings.ai_base_url)
+        endpoint = urlsplit(self._endpoint)
+        # OpenCode Go 要求真实客户端标识及稳定会话；重试和同一客户端的辅助请求共用。
+        # https://docs.opencode.ai/docs/go/#where-can-i-use-it
+        self._provider_headers = (
+            {"User-Agent": "dai-experiment-platform/1.0",
+             "x-opencode-session": uuid.uuid4().hex}
+            if endpoint.hostname == "opencode.ai" and endpoint.path.startswith("/zen/go/")
+            else {}
+        )
         # metrics_sink：TASK-029 用量指标回调（op_metrics.ai_metrics_sink），
         # 只接收 {operation, prompt_tokens, completion_tokens}，不含任何原文。
         self._metrics_sink = metrics_sink
@@ -143,6 +154,7 @@ class DeepSeekClient:
             "Authorization": f"Bearer {self._settings.ai_api_key.get_secret_value()}",
             "Content-Type": "application/json",
         }
+        headers.update(self._provider_headers)
 
         last_error: Exception | None = None
 

@@ -22,6 +22,7 @@ from migration_stage_support import (
     assert_historical_integer_types,
     historical_schema,
     load_revision,
+    upgrade_to_current_head,
 )
 
 SCHOOL = load_revision('20261003_0001')
@@ -155,6 +156,11 @@ def migrated_engine(legacy_schema, tmp_path):
     engine = sa.create_engine(f'sqlite:///{path}')
     with engine.begin() as connection:
         _migrate(connection, 'upgrade')
+    engine.dispose()
+    # 历史阶段手动应用完成后，用 Alembic 自身收敛到当前 head：后续新增迁移
+    # （认领代次、结果修订号等）自动纳入，不再硬编码某一个 revision 号。
+    upgrade_to_current_head(path, stamped_at='20261003_0001')
+    engine = sa.create_engine(f'sqlite:///{path}')
     yield engine
     engine.dispose()
 
@@ -282,6 +288,8 @@ def test_mysql_historical_upgrade_matches_models_and_preserves_facts(monkeypatch
             _assert_old_facts(connection)
         # Real MySQL ALTERs keep FK checks enabled, unlike SQLite batch rebuilds.
         migrate_url(configured, 'upgrade', '20261003_0001')
+        # 收敛到当前 head：新增迁移（认领代次/结果修订号）自动纳入覆盖。
+        migrate_url(configured, 'upgrade', 'head')
         with engine.connect() as connection:
             _assert_old_facts(connection)
             _assert_pending_and_legacy(connection)

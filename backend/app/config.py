@@ -1,4 +1,5 @@
 import re
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def __init__(self, **values):
+        """Honor ``DAI_ENV_FILE`` at the settings boundary.
+
+        An explicit ``_env_file`` (including ``None``) supplied by a caller wins.
+        Otherwise a configured path is used; an empty value disables dotenv, while
+        an absent variable preserves the normal local ``.env`` behavior.
+        """
+        if "_env_file" not in values and "DAI_ENV_FILE" in os.environ:
+            configured = os.environ["DAI_ENV_FILE"].strip()
+            values["_env_file"] = configured or None
+        super().__init__(**values)
+
     app_name: str = "DAI Experiment Platform API"
     environment: str = "development"
     # ── 文件日志（结构化 JSON，按大小轮转；管理员日志页直读此文件）──────
@@ -40,8 +53,20 @@ class Settings(BaseSettings):
     judge_image: str = "dai-judge-python:latest"
     judge_use_docker: bool = True
     judge_timeout_seconds: int = 10
+    # 数据库连接池（容量验收暴露的配置缺口）：默认 5+10 在 100 并发学生下会被打满，
+    # 请求排队 30 秒并把整个 API 拖死（连 /health/live 都不响应）。
+    # 这里的默认值按"单实例 100+ 并发学生"留出余量；等待时间有界，
+    # 连接耗尽时快速失败而不是无限排队。
+    db_pool_size: int = 20
+    db_max_overflow: int = 40
+    db_pool_timeout: float = 5.0
+    db_pool_recycle: int = 1800
     judge_memory_limit_mb: int = 256
     judge_cpu_limit: float = 1.0
+    # stale running 判定的上界：必须覆盖最坏判题墙钟
+    # （测试组数 × 每组超时 + 容器启动 + 镜像拉取余量）。
+    # 判题在测试组之间续 heartbeat_at；只有 Worker 真的崩溃/失去认领时才会超过它。
+    judge_stale_running_seconds: int = 1800
     # ── Kernel 镜像（Phase 5） ────────────────────────────────
     # 已绑定环境版本的实验记录用环境 digest 启动；该配置仅用于未绑定环境版本的
     # 存量兼容路径与开发环境。安全参数不在此处放松。

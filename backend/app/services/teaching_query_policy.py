@@ -1,10 +1,17 @@
 """Apply teaching scope before pagination/aggregation, including legacy endpoints.
 
+认证关键复查（黑名单）在 Redis 故障时必须 503，绝不当成"未撤销"放行。
+
 Route authorization remains mandatory. This ORM boundary also protects joins,
 dashboard counts and lazy loads that otherwise accidentally use course ownership.
 """
+import logging
+
 from sqlalchemy import and_, event, exists, or_, select
 from sqlalchemy.orm import Session, with_loader_criteria
+
+
+logger = logging.getLogger(__name__)
 
 
 @event.listens_for(Session, 'do_orm_execute')
@@ -101,7 +108,16 @@ def lock_current_actor(db, user):
                    ('role', 'status', 'session_version', 'credential_version'))):
         raise api_error(403, 'FORBIDDEN', '账号权限或会话已变化，请重新登录')
     jti, redis_client = db.info.get('teaching_token_jti'), db.info.get('teaching_token_redis')
-    if jti and redis_client is not None and redis_client.exists(f'blacklist:{jti}'):
-        raise api_error(401, 'TOKEN_REVOKED', 'Token 已失效')
+    if jti and redis_client is not None:
+        # 写入前撤销复查：Redis 不可用时必须 503（fail closed），
+        # 既不能放行（把已撤销 Token 当有效），也不能冒泡成 500。
+        try:
+            revoked = redis_client.exists(f'blacklist:{jti}')
+        except Exception as exc:  # noqa: BLE001 - 统一转 503
+            logger.error('撤销复查失败（Redis 不可用）: %s', exc)
+            raise api_error(503, 'SERVICE_UNAVAILABLE',
+                            '认证服务暂时不可用，请稍后重试') from exc
+        if revoked:
+            raise api_error(401, 'TOKEN_REVOKED', 'Token 已失效')
     ensure_full_account(current)
     return current

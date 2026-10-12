@@ -69,6 +69,32 @@ def _setup_exam_answer(db_session_factory):
         return ans.id
 
 
+def _bind_trusted_legacy_version(db, submission_id):
+    """Bind an explicit v2 legacy/binary version when a test needs the scoring path."""
+    from app.models import JudgeQuestion
+    from app.services import grading_version_service as versions
+    from app.services.grading_values import encode_value
+
+    submission = db.get(Submission, submission_id)
+    question = db.get(JudgeQuestion, submission.question_id)
+    version = versions.create_draft(
+        db, question_kind="assignment", question_id=question.id,
+        payload={"binary_cases": [{
+            "id": "B1", "input": encode_value((1, 2)),
+            "expected": encode_value(3), "compare": {"kind": "literal"},
+        }]},
+        entry_function=question.function_name, actor_id=None,
+        grading_mode_snapshot="legacy",
+    )
+    versions.confirm_version(db, version, confirm_isolated_case_v2=True)
+    versions.activate_version(db, version)
+    versions.set_question_current_version(db, question_kind="assignment",
+                                          question_id=question.id, version_id=version.id)
+    submission.grading_version_id = version.id
+    db.flush()
+    return version.id
+
+
 # ═══════════════════════════════════════════════════════════════
 # 1. crash 恢复：Worker 领取后崩溃，任务能被恢复扫描重置
 # ═══════════════════════════════════════════════════════════════
@@ -84,7 +110,7 @@ def test_crash_after_claim_recoverable(db_session_factory):
     # 模拟 Worker 领取任务后立即崩溃
     with db_session_factory() as db:
         ok = claim_job(db, job_type="assignment", object_id=sid)
-        assert ok is True
+        assert ok
 
         # 验证已变为 running
         sub = db.get(Submission, sid)
@@ -94,6 +120,7 @@ def test_crash_after_claim_recoverable(db_session_factory):
     with db_session_factory() as db:
         sub = db.get(Submission, sid)
         sub.started_at = datetime.now(timezone.utc) - timedelta(seconds=600)
+        sub.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=600)
         db.commit()
 
     # 恢复扫描：stale_running_seconds=300，应重置此任务
@@ -120,12 +147,12 @@ def test_duplicate_redis_message_not_processed_twice(db_session_factory):
     # Worker-1 领取
     with db_session_factory() as db:
         ok1 = claim_job(db, job_type="assignment", object_id=sid)
-        assert ok1 is True
+        assert ok1
 
     # Worker-2 收到重复消息尝试领取 → 失败
     with db_session_factory() as db:
         ok2 = claim_job(db, job_type="assignment", object_id=sid)
-        assert ok2 is False, "重复消息不应成功抢占"
+        assert not ok2, "重复消息不应成功抢占"
 
     # 状态仍然是 running（Worker-1 设置的）
     with db_session_factory() as db:
@@ -140,11 +167,11 @@ def test_duplicate_redis_message_exam_not_processed_twice(db_session_factory):
     with db_session_factory() as db:
         enqueue_job(db, job_type="exam", object_id=aid)
         ok1 = claim_job(db, job_type="exam", object_id=aid)
-        assert ok1 is True
+        assert ok1
 
     with db_session_factory() as db:
         ok2 = claim_job(db, job_type="exam", object_id=aid)
-        assert ok2 is False
+        assert not ok2
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -228,11 +255,11 @@ def _run_process_submission(db_session_factory, sid):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 3.1 作业路径永久配置错误：立即 system_error，不消耗重试
+# 3.1 未绑定可信评分版本：安全转人工，不使用当前题目配置回退
 # ═══════════════════════════════════════════════════════════════
 
 def test_submission_missing_test_groups_permanent_error_immediate(db_session_factory):
-    """作业 active 缺 test_groups：永久配置错误，立即 system_error，不消耗重试"""
+    """未绑定基线时，即使实时 active 缺组也必须转人工。"""
     from app.models import JudgeQuestion
     ctx = _setup_active_submission(db_session_factory)
 
@@ -241,15 +268,14 @@ def test_submission_missing_test_groups_permanent_error_immediate(db_session_fac
         db.commit()
 
     sub = _run_process_submission(db_session_factory, ctx["sid"])
-    assert sub.grading_status == "system_error", \
-        f"作业缺测试组应立即 system_error: {sub.grading_status}"
-    assert sub.status == "system_error"
-    assert sub.attempt_count <= 1, f"不应消耗重试: {sub.attempt_count}"
-    assert sub.score is None  # 系统错误不扣分
+    assert sub.grading_status == "completed"
+    assert sub.status == "review_required"
+    assert sub.result_details["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
+    assert sub.score is None
 
 
 def test_submission_missing_locked_rubric_permanent_error_immediate(db_session_factory):
-    """作业 active 缺锁定 Rubric：永久配置错误，立即 system_error，不消耗重试"""
+    """未绑定基线时，不读取实时 Rubric 并猜测评分方式。"""
     from app.models import JudgeQuestion, QuestionRubric
     ctx = _setup_active_submission(db_session_factory)
 
@@ -263,14 +289,14 @@ def test_submission_missing_locked_rubric_permanent_error_immediate(db_session_f
         db.commit()
 
     sub = _run_process_submission(db_session_factory, ctx["sid"])
-    assert sub.grading_status == "system_error", \
-        f"作业缺锁定 Rubric 应立即 system_error: {sub.grading_status}"
-    assert sub.attempt_count <= 1, f"不应消耗重试: {sub.attempt_count}"
+    assert sub.grading_status == "completed"
+    assert sub.status == "review_required"
+    assert sub.result_details["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
     assert sub.score is None
 
 
 def test_submission_test_group_missing_tests_permanent_error_immediate(db_session_factory):
-    """作业 test_groups 内缺 tests 代码：永久配置错误，立即 system_error，不进入 Docker"""
+    """未绑定基线时，当前题目的 tests 文本不能触发旧正式评分。"""
     from app.models import JudgeQuestion
     ctx = _setup_active_submission(db_session_factory)
 
@@ -280,14 +306,14 @@ def test_submission_test_group_missing_tests_permanent_error_immediate(db_sessio
         db.commit()
 
     sub = _run_process_submission(db_session_factory, ctx["sid"])
-    assert sub.grading_status == "system_error", \
-        f"测试组缺 tests 应立即 system_error: {sub.grading_status}"
-    assert sub.attempt_count <= 1, f"不应消耗重试: {sub.attempt_count}"
+    assert sub.grading_status == "completed"
+    assert sub.status == "review_required"
+    assert sub.result_details["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
     assert sub.score is None
 
 
 def test_submission_missing_hidden_tests_permanent_error_immediate(db_session_factory):
-    """作业 legacy 缺 hidden_tests：永久配置错误，立即 system_error，不消耗重试"""
+    """缺少可信版本时，实时 hidden_tests 不能作为新正式评分基线。"""
     sid = _setup_submission(db_session_factory)
 
     with db_session_factory() as db:
@@ -297,9 +323,9 @@ def test_submission_missing_hidden_tests_permanent_error_immediate(db_session_fa
         db.commit()
 
     sub = _run_process_submission(db_session_factory, sid)
-    assert sub.grading_status == "system_error", \
-        f"作业缺 hidden_tests 应立即 system_error: {sub.grading_status}"
-    assert sub.attempt_count <= 1, f"不应消耗重试: {sub.attempt_count}"
+    assert sub.grading_status == "completed"
+    assert sub.status == "review_required"
+    assert sub.result_details["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
     assert sub.score is None
 
 
@@ -326,7 +352,7 @@ def test_exam_answer_max_retries_with_finalize(db_session_factory):
 
 
 def test_missing_hidden_tests_permanent_error_immediate(db_session_factory):
-    """缺 hidden_tests 是永久配置错误：立即 system_error，不消耗重试"""
+    """旧 hidden_tests 未绑定版本时不可触发正式判分，任务转人工。"""
     from app.worker.judge_worker import process_exam_answer
     from app.config import get_settings
     import fakeredis
@@ -348,11 +374,11 @@ def test_missing_hidden_tests_permanent_error_immediate(db_session_factory):
         process_exam_answer(db, fakeredis.FakeStrictRedis(), settings, aid)
 
         ans = db.get(ExamAnswer, aid)
-        # 永久错误：一次尝试即 system_error，attempt_count 不递增到 MAX
-        assert ans.grading_status == "system_error", \
-            f"缺 hidden_tests 应立即 system_error: {ans.grading_status}"
+        # 没有绑定的冻结版本：明确告知教师人工处理，而非读取实时 hidden_tests。
+        assert ans.grading_status == "system_error"
         assert ans.attempt_count <= 1, f"不应耗尽重试: {ans.attempt_count}"
         assert ans.score is None  # 系统错误不扣分
+        assert "评分版本基线" in (ans.system_error or "")
 
         # 父级当场转 review_required
         sub = db.get(ExamSubmission, ans.submission_id)
@@ -360,7 +386,7 @@ def test_missing_hidden_tests_permanent_error_immediate(db_session_factory):
 
 
 def test_test_group_missing_tests_permanent_error_immediate(db_session_factory):
-    """test_groups 内缺 tests 代码是永久配置错误：立即 system_error + 父 review_required，不重试"""
+    """未绑定评分版本时，实时 test_groups 缺失不应进入旧评分路径。"""
     from app.worker.judge_worker import process_exam_answer
     from app.config import get_settings
     import fakeredis
@@ -395,7 +421,7 @@ def test_test_group_missing_tests_permanent_error_immediate(db_session_factory):
             f"测试组缺 tests 应立即 system_error: {ans.grading_status}"
         assert ans.attempt_count <= 1, f"不应消耗重试: {ans.attempt_count}"
         assert ans.score is None
-        assert ans.system_error == "测试组缺少测试代码"
+        assert "评分版本基线" in (ans.system_error or "")
 
         sub = db.get(ExamSubmission, ans.submission_id)
         assert sub.status == "review_required", f"父级应转 review_required: {sub.status}"
@@ -492,11 +518,12 @@ def test_process_submission_unknown_exception_triggers_fail_job(db_session_facto
     )
 
     with db_session_factory() as db:
+        _bind_trusted_legacy_version(db, sid)
         enqueue_job(db, job_type="assignment", object_id=sid)
 
     with db_session_factory() as db:
-        # 模拟 _write_submission_files 抛出未知异常（claim_job 已成功后）
-        with patch("app.worker.judge_worker._write_submission_files",
+        # 模拟 data_v1 runner 准备抛出未知异常（版本已解析、认领已成功后）
+        with patch("app.services.data_grading.write_runner_files",
                    side_effect=RuntimeError("模拟未知异常")):
             result = process_submission(db, MagicMock(), settings, sid)
 
@@ -572,6 +599,7 @@ def test_stale_running_exam_trigger_finalize(db_session_factory):
         # 模拟崩溃
         ans = db.get(ExamAnswer, aid)
         ans.started_at = datetime.now(timezone.utc) - timedelta(seconds=600)
+        ans.heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=600)
         db.commit()
 
         # 恢复扫描

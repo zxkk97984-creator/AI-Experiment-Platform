@@ -274,8 +274,8 @@ def test_get_timeout_edge_cases():
 # Judge: Docker fail → system_error, worker continues
 # ═══════════════════════════════════════════════════════════════
 
-def test_judge_docker_failure_sets_system_error():
-    """Docker 异常→status=system_error, score=0, worker 不崩溃"""
+def test_unbound_submission_routes_to_manual_review():
+    """没有评分版本基线时，旧 pytest Docker 路径不得产生正式分。"""
     from app.worker.judge_worker import process_submission
 
     settings = MagicMock()
@@ -301,12 +301,17 @@ def test_judge_docker_failure_sets_system_error():
     db.get.side_effect = lambda m, i: question if m == models.JudgeQuestion else submission
     redis_client = MagicMock()
 
-    # Docker 异常 → process_submission 捕获并设置 system_error
+    # 未绑定版本 → 转人工，不尝试启动 Docker。
     with patch('subprocess.run', side_effect=FileNotFoundError('No docker')):
         with patch('app.services.judge_queue.claim_job', return_value=True):
-            result = process_submission(db, redis_client, settings, 1)
-            assert result.status == 'system_error'
-            assert result.score is None  # 系统错误不扣分（第六轮修正）
+            process_submission(db, redis_client, settings, 1)
+    # 结果写入是受认领栅栏保护的条件 UPDATE：全 mock 的 db 不反映内存副作用，
+    # 因此断言发出的 SQL 值（真实落库行为由 test_judge_claim_fence.py 覆盖）。
+    from conftest import executed_update_values
+    from app.models import Submission as _Submission
+    values = executed_update_values(db, _Submission)
+    assert any(v.get('status') == 'review_required' for v in values), values
+    assert any(v.get('score') is None for v in values), values
 
 
 # ═══════════════════════════════════════════════════════════════

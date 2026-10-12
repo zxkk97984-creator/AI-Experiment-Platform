@@ -31,7 +31,11 @@ def _seed_exam(db_session_factory, *, q1_type="single_choice", q2_type="code",
         now = datetime.now(timezone.utc)
         sub = ExamSubmission(exam_id=exam.id, student_id=student.id, status=sub_status,
                              started_at=now,
-                             expires_at=now - timedelta(minutes=5) if expired else now + timedelta(minutes=30))
+                             expires_at=now - timedelta(minutes=5) if expired else now + timedelta(minutes=30),
+                             grading_version_map={
+                                 str(q1.id): {"version_id": None, "points": 10.0},
+                                 str(q2.id): {"version_id": None, "points": 20.0},
+                             })
         if sub_status in ("submitted", "grading", "graded"):
             sub.submitted_at = now - timedelta(minutes=10)
         db.add(sub); db.flush()

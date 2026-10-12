@@ -355,9 +355,9 @@ async def import_assignment_audience(
         raise api_error(422, "INVALID_AUDIENCE_KIND", "kind 必须为 include 或 exclude")
     assignment = require_assignment(assignment_id, db)
     ensure_assignment_manager(assignment, current_user, db)
-    content = await file.read()
-    if len(content) > 2 * 1024 * 1024:
-        raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
+    from app.services.audience_service import read_bounded_audience_csv
+
+    content = await read_bounded_audience_csv(file)
     rows, error = parse_student_csv(content)
     if error:
         raise api_error(422, "CSV_INVALID", error)

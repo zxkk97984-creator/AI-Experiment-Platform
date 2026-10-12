@@ -17,7 +17,7 @@ from app.errors import api_error
 from app.models import (
     CodeGrade, Course, CourseEnrollment, Exam, ExamAnswer, ExamAudienceClass,
     ExamAudienceStudent, ExamGrade, ExamQuestion, ExamSubmission,
-    QuestionRubric, TeachingClassStudent, User,
+    ManualScoreAudit, QuestionRubric, TeachingClassStudent, User,
 )
 from app.schemas import CourseStudentImportResult, CourseStudentImportRow, ExamAnswerBatchRequest, ExamAnswerScoreUpdate, ExamCreate, ExamGradeRead, ExamQuestionCreate, ExamQuestionRead, ExamQuestionTeacherRead, ExamQuestionUpdate, ExamRead, ExamRetryRequest, ExamSampleRunRequest, ExamSessionRead, ExamSubmitRequest, ExamSubmissionRead, ExamTimeExtensionRequest, ExamUpdate, PaginatedResponse, SampleRunResponse
 from app.services.exam_service import build_student_exam_session, build_student_exam_summary, create_question, delete_question, exam_max_score, extend_exam_submission, force_submit_exam_submission, get_my_grade, get_question, list_questions, release_exam_review, require_exam_editable, retry_exam_submission as retry_exam_submission_service, save_answer, start_exam as svc_start_exam, student_exam_status, submit_exam as svc_submit_exam, update_question, validate_publish
@@ -430,9 +430,9 @@ async def import_exam_audience(
         raise api_error(422, "INVALID_AUDIENCE_KIND", "kind 必须为 include 或 exclude")
     exam = require_exam(exam_id, db)
     ensure_exam_manager(exam, current_user)
-    content = await file.read()
-    if len(content) > 2 * 1024 * 1024:
-        raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
+    from app.services.audience_service import read_bounded_audience_csv
+
+    content = await read_bounded_audience_csv(file)
     rows, error = parse_student_csv(content)
     if error:
         raise api_error(422, "CSV_INVALID", error)
@@ -1064,22 +1064,34 @@ def _exam_grade_detail_payload(exam: Exam, submission: ExamSubmission, db: Sessi
         ).all()
         code_grade_by_answer = {cg.exam_answer_id: cg for cg in code_grades}
 
+    from app.services.grading_version_service import frozen_points_for_question
+
     objective_score = 0.0
     objective_total = 0.0
     code_score = 0.0
     code_total = 0.0
     correct_count = 0
+    points_snapshot_complete = True
+    teacher_questions = []
     for question in questions:
+        frozen_points = frozen_points_for_question(submission, question.id)
+        question_payload = _question_teacher_payload(question, question.id in locked_ids)
+        question_payload["points"] = frozen_points
+        question_payload["points_snapshot_missing"] = frozen_points is None
+        teacher_questions.append(question_payload)
+        if frozen_points is None:
+            points_snapshot_complete = False
+            continue
         answer = answer_by_question.get(question.id)
         if question.question_type == "code":
-            code_total += float(question.points)
+            code_total += frozen_points
             if answer is not None:
                 code_score += float(answer.score or 0)
         else:
-            objective_total += float(question.points)
+            objective_total += frozen_points
             if answer is not None:
                 objective_score += float(answer.score or 0)
-        if answer is not None and answer.score is not None and float(answer.score) >= float(question.points):
+        if answer is not None and answer.score is not None and float(answer.score) >= frozen_points:
             correct_count += 1
 
     elapsed_minutes = None
@@ -1113,6 +1125,7 @@ def _exam_grade_detail_payload(exam: Exam, submission: ExamSubmission, db: Sessi
             "graded_at": submission.graded_at,
             "elapsed_minutes": elapsed_minutes,
             "review_reason": submission.review_reason,
+            "points_snapshot_complete": points_snapshot_complete,
         },
         "analysis": {
             "objective_score": round(objective_score, 2),
@@ -1122,9 +1135,9 @@ def _exam_grade_detail_payload(exam: Exam, submission: ExamSubmission, db: Sessi
             "question_count": len(questions) or len(answers),
             "correct_count": correct_count,
         },
-        "questions": [_question_teacher_payload(q, q.id in locked_ids) for q in questions],
+        "questions": teacher_questions,
         "answers": [
-            _answer_payload(answer, question_map, code_grade_by_answer.get(answer.id))
+            _answer_payload(answer, question_map, code_grade_by_answer.get(answer.id), submission)
             for answer in answers
         ],
     }
@@ -1167,16 +1180,22 @@ def _ai_grading_payload(code_grade: CodeGrade | None) -> dict | None:
     }
 
 
-def _answer_payload(answer: ExamAnswer, question_map: dict[int, ExamQuestion], code_grade: CodeGrade | None = None) -> dict:
+def _answer_payload(answer: ExamAnswer, question_map: dict[int, ExamQuestion], code_grade: CodeGrade | None = None,
+                    submission: ExamSubmission | None = None) -> dict:
     question = question_map.get(answer.question_id) or answer.question
+    from app.services.grading_version_service import frozen_points_for_question
+
+    points = frozen_points_for_question(submission, answer.question_id) if submission else None
     return {
         "id": answer.id,
         "question_id": answer.question_id,
         "order_index": question.order_index,
         "question_type": question.question_type,
         "prompt": question.prompt,
-        "points": float(question.points),
+        "points": points,
         "score": float(answer.score) if answer.score is not None else None,
+        "result_revision": answer.result_revision or 0,
+        "points_snapshot_missing": points is None,
         "grading_status": answer.grading_status,
         "selected_options": answer.selected_options,
         "code_answer": answer.code_answer,
@@ -1215,9 +1234,15 @@ def exam_grade_detail(
     return _exam_grade_detail_payload(exam, submission, db)
 
 
-def _set_manual_answer_score(exam: Exam, submission: ExamSubmission, answer: ExamAnswer, question: ExamQuestion, score: float, reason: str, db: Session) -> dict:
+def _set_manual_answer_score(exam: Exam, submission: ExamSubmission, answer: ExamAnswer,
+                             question: ExamQuestion, score: float, reason: str,
+                             expected_result_revision: int, actor: User, db: Session) -> dict:
     """写入逐题手动得分并重算父级总分。"""
-    max_points = float(question.points)
+    from app.services.grading_version_service import frozen_points_for_question
+
+    max_points = frozen_points_for_question(submission, question.id)
+    if max_points is None:
+        raise api_error(409, "FROZEN_POINTS_MISSING", "该考试提交缺少可信分值快照，不能按当前题目配置修改正式成绩")
     if not math.isfinite(score) or score < 0 or score > max_points:
         raise api_error(
             422,
@@ -1226,27 +1251,62 @@ def _set_manual_answer_score(exam: Exam, submission: ExamSubmission, answer: Exa
             fields={"score": [f"得分必须在 0 到 {max_points:g} 之间"]},
         )
 
-    answer.score = _round_manual_score(score)
-    answer.grading_status = "completed"
-    answer.finished_at = utc_now()
-    answer.manual_score_reason = reason.strip()
-    answer.manual_score_at = utc_now()
-
-    # 编程题若存在正式 AI 评分记录，同步教师改分结果，避免 AI 复核列表仍显示待处理。
-    if question.question_type == "code":
-        code_grade = db.scalar(
-            select(CodeGrade).where(
-                CodeGrade.exam_answer_id == answer.id,
-                CodeGrade.mode == "active",
-            )
+    if answer.grading_status in ("pending", "queued", "running"):
+        # 在途判题/AI 评分：人工改分会让迟到写入与新分数竞争，必须先受控取消或转人工
+        raise api_error(
+            409,
+            "GRADING_IN_PROGRESS",
+            "该题正在判题，请等待判题结束或先转入人工处理后再改分",
         )
-        if code_grade is not None and max_points > 0:
-            code_grade.scaled_score = answer.score
-            code_grade.final_score_100 = _round_manual_score(answer.score / max_points * 100)
-            code_grade.status = "completed"
-            code_grade.needs_teacher_review = False
-            code_grade.review_reason = None
-            code_grade.finished_at = code_grade.finished_at or utc_now()
+
+    current_revision = answer.result_revision or 0
+    if expected_result_revision != current_revision:
+        raise api_error(409, "RESULT_REVISION_CONFLICT", "答案结果已更新，请刷新后重试")
+
+    code_grades = []
+    if question.question_type == "code":
+        code_grades = db.scalars(
+            select(CodeGrade).where(CodeGrade.exam_answer_id == answer.id)
+            .order_by(CodeGrade.id).with_for_update()
+        ).all()
+        if any(grade.status in ("pending", "queued", "running") for grade in code_grades):
+            raise api_error(409, "AI_GRADING_IN_PROGRESS", "AI 评分仍在进行，请等待或先转入人工处理")
+
+    previous_score = answer.score
+    now = utc_now()
+    final_score = _round_manual_score(score)
+    from sqlalchemy import update
+
+    cas = db.execute(
+        update(ExamAnswer)
+        .execution_options(synchronize_session=False)
+        .where(
+            ExamAnswer.id == answer.id,
+            ExamAnswer.result_revision == current_revision,
+            ExamAnswer.grading_status.notin_(("pending", "queued", "running")),
+        )
+        .values(
+            score=final_score,
+            grading_status="completed",
+            finished_at=now,
+            manual_score_reason=reason.strip(),
+            manual_score_at=now,
+            claim_token=None,
+            heartbeat_at=None,
+            result_revision=ExamAnswer.result_revision + 1,
+        )
+    )
+    if cas.rowcount != 1:
+        db.rollback()
+        raise api_error(409, "RESULT_REVISION_CONFLICT", "答案结果已更新，请刷新后重试")
+    db.refresh(answer)
+
+    db.add(ManualScoreAudit(
+        target_kind="exam_answer", target_id=answer.id, score=final_score,
+        reason=reason.strip(), actor_id=actor.id, actor_role=actor.role,
+        result_revision=current_revision + 1, previous_score=previous_score,
+        source="manual_score",
+    ))
 
     db.flush()
 
@@ -1302,7 +1362,9 @@ def _set_manual_answer_score(exam: Exam, submission: ExamSubmission, answer: Exa
 
 
 def _require_editable_submission(exam: Exam, submission_id: int, db: Session) -> ExamSubmission:
-    submission = db.get(ExamSubmission, submission_id)
+    submission = db.scalar(select(ExamSubmission).where(
+        ExamSubmission.id == submission_id,
+    ).with_for_update().execution_options(populate_existing=True))
     if not submission or submission.exam_id != exam.id:
         raise api_error(404, "SUBMISSION_NOT_FOUND", "考试提交不存在")
     if submission.status not in ("graded", "review_required"):
@@ -1328,14 +1390,15 @@ def update_exam_answer_score(
         select(ExamAnswer).where(
             ExamAnswer.id == answer_id,
             ExamAnswer.submission_id == submission_id,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     )
     if answer is None:
         raise api_error(404, "ANSWER_NOT_FOUND", "答题记录不存在")
     question = db.get(ExamQuestion, answer.question_id)
     if question is None or question.exam_id != exam_id:
         raise api_error(404, "QUESTION_NOT_FOUND", "题目不存在")
-    return _set_manual_answer_score(exam, submission, answer, question, float(payload.score), payload.reason, db)
+    return _set_manual_answer_score(exam, submission, answer, question, float(payload.score),
+                                    payload.reason, payload.expected_result_revision, current_user, db)
 
 
 @router.patch("/{exam_id}/grades/{submission_id}/questions/{question_id}/score")
@@ -1374,10 +1437,16 @@ def update_exam_question_score(
             code_answer=None,
             text_answers=None,
             version=1,
+            grading_status="completed",
         )
         db.add(answer)
         db.flush()
-    return _set_manual_answer_score(exam, submission, answer, question, float(payload.score), payload.reason, db)
+        # 批次三 3B：人工评分入口补建答案时同样从冻结映射复制版本
+        from app.services.grading_version_service import bind_exam_answer_version
+
+        bind_exam_answer_version(db, answer)
+    return _set_manual_answer_score(exam, submission, answer, question, float(payload.score),
+                                    payload.reason, payload.expected_result_revision, current_user, db)
 
 
 # ── 考试题目管理 ──

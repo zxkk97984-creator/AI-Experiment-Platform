@@ -20,6 +20,7 @@ export const JUDGE_STATUS_MAP = {
   running: { label: '判题中', color: 'warning' },
   accepted: { label: '通过', color: 'success' },
   graded: { label: 'AI 评分完成', color: 'success' },
+  review_required: { label: '待教师复核', color: 'warning' },
   wrong_answer: { label: '答案错误', color: 'danger' },
   runtime_error: { label: '运行错误', color: 'danger' },
   time_limit_exceeded: { label: '超时', color: 'warning' },

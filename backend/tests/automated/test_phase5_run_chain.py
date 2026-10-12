@@ -39,8 +39,9 @@ from app.models import (
     User,
 )
 from app.services.environment_seed import seed_environment_catalog
+from app.services import judge_queue
 from app.worker.judge_worker import _run_docker_pytest, process_submission
-from conftest import auth_header, create_user, grant_teaching_fixture, login
+from conftest import auth_header, create_user, grant_judge_claim, grant_teaching_fixture, login
 from teaching_test_support import grant_experiment
 
 
@@ -118,6 +119,41 @@ def _make_published_assignment(db, settings, *, question_env_id=None) -> tuple[A
     db.commit()
     db.refresh(question)
     return assignment, question
+
+
+def _activate_legacy_binary_version(db, question: JudgeQuestion) -> int:
+    """为正式判题链路绑定明确确认过的可信 v2 binary 版本。"""
+    from app.services import grading_version_service as versions
+    from app.services.grading_values import encode_value
+
+    version = versions.create_draft(
+        db,
+        question_kind="assignment",
+        question_id=question.id,
+        payload={"binary_cases": [{
+            "id": "B1",
+            "input": encode_value((1, 2)),
+            "expected": encode_value(3),
+            "compare": {"kind": "literal"},
+        }]},
+        entry_function="add",
+        grading_mode_snapshot="legacy",
+    )
+    versions.confirm_version(db, version, confirm_isolated_case_v2=True)
+    versions.activate_version(db, version)
+    versions.set_question_current_version(
+        db, question_kind="assignment", question_id=question.id, version_id=version.id,
+    )
+    db.flush()
+    return version.id
+
+
+def _data_runner_result(value=3):
+    from app.services.grading_runner import RESULT_PREFIX
+    from app.services.grading_values import encode_value
+
+    frame = {"id": "B1", "status": "ok", "value": encode_value(value)}
+    return "", RESULT_PREFIX + json.dumps(frame), 0, 10
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -213,9 +249,11 @@ def test_historical_submission_resubmit_uses_snapshot_digest(db_session_factory,
         db.add(question)
         db.commit()
         db.refresh(question)
+        grading_version_id = _activate_legacy_binary_version(db, question)
         # 旧提交：快照 basic v1（digest A）
         submission = Submission(
             question_id=question.id, student_id=student.id, code="def add(a,b): return a+b",
+            grading_version_id=grading_version_id,
             environment_version_id=basic_id,
             import_policy_mode_snapshot="unrestricted",
             allowed_imports_snapshot=[],
@@ -228,19 +266,23 @@ def test_historical_submission_resubmit_uses_snapshot_digest(db_session_factory,
         captured: dict = {}
         def fake_run(workdir, *args, **kwargs):
             captured["image_ref"] = kwargs.get("image_ref")
-            # 真实 pytest 通过时必定打印汇总行；rc=0 无汇总行会被判为不可验证
-            return ("1 passed in 0.01s", "", 0, 10)
+            return _data_runner_result()
 
-        with patch("app.worker.judge_worker._run_docker_pytest", side_effect=fake_run), \
-             patch("app.services.judge_queue.claim_job", return_value=True), \
-             patch("app.services.judge_queue.complete_job") as mock_complete:
+        # 真实认领前置：结果写入受认领栅栏保护，claim_job 的替身只负责让本会话
+        # "看起来已认领"（token 与 DB 行都已由 grant_judge_claim 落地），
+        # 写入本身仍走真实的受保护路径。
+        token = grant_judge_claim(db, Submission, submission.id)
+        with patch("app.worker.judge_worker._run_docker_data_runner", side_effect=fake_run), \
+             patch("app.services.judge_queue.claim_job", return_value=token), \
+             patch("app.services.judge_queue.complete_job",
+                   wraps=judge_queue.complete_job) as mock_complete:
             process_submission(db, MagicMock(), test_settings, submission.id)
 
         assert captured["image_ref"] == "sha256:" + "a" * 64, \
             f"重判应使用提交快照 digest A，实际: {captured.get('image_ref')}"
-        assert submission.status == "accepted"
+        db.refresh(submission)
+        assert submission.status == "graded"
         mock_complete.assert_called()
-
 
 def test_import_not_allowed_is_student_error_not_retryable(db_session_factory, test_settings):
     """IMPORT_NOT_ALLOWED：学生错误终态、不跑 Docker、不计基础设施重试、明确诊断"""
@@ -263,10 +305,12 @@ def test_import_not_allowed_is_student_error_not_retryable(db_session_factory, t
         db.add(question)
         db.commit()
         db.refresh(question)
+        grading_version_id = _activate_legacy_binary_version(db, question)
         submission = Submission(
             question_id=question.id, student_id=student.id,
             code="import numpy\ndef add(a,b): return a+b",
-            environment_version_id=None,
+            grading_version_id=grading_version_id,
+            environment_version_id=_seed_version_available(db, test_settings),
             import_policy_mode_snapshot="restricted",
             allowed_imports_snapshot=["pandas"],
             status="queued", grading_status="queued",
@@ -280,12 +324,15 @@ def test_import_not_allowed_is_student_error_not_retryable(db_session_factory, t
             docker_called.append(args)
             return ("", "", 0, 10)
 
-        with patch("app.worker.judge_worker._run_docker_pytest", side_effect=fake_run), \
-             patch("app.services.judge_queue.claim_job", return_value=True), \
-             patch("app.services.judge_queue.fail_job") as mock_fail:
+        token = grant_judge_claim(db, Submission, submission.id)
+        with patch("app.worker.judge_worker._run_docker_data_runner", side_effect=fake_run), \
+             patch("app.services.judge_queue.claim_job", return_value=token), \
+             patch("app.services.judge_queue.fail_job",
+                   wraps=judge_queue.fail_job) as mock_fail:
             process_submission(db, MagicMock(), test_settings, submission.id)
 
         assert docker_called == [], "IMPORT_NOT_ALLOWED 不应进入 Docker"
+        db.refresh(submission)
         assert submission.status == "runtime_error", "学生代码违反教学策略按学生错误处理"
         assert submission.score == 0
         diag = (submission.result_details or {}).get("diagnostic", {})
@@ -318,10 +365,12 @@ def test_import_not_installed_is_system_error_no_score(db_session_factory, test_
         db.add(question)
         db.commit()
         db.refresh(question)
+        grading_version_id = _activate_legacy_binary_version(db, question)
         submission = Submission(
             question_id=question.id, student_id=student.id,
             code="import numpy\ndef add(a,b): return a+b",
-            environment_version_id=None,
+            grading_version_id=grading_version_id,
+            environment_version_id=_seed_version_available(db, test_settings),
             import_policy_mode_snapshot="restricted",
             allowed_imports_snapshot=["numpy"],  # 白名单允许，但环境（basic 仅 pytest）未安装
             status="queued", grading_status="queued",
@@ -335,12 +384,15 @@ def test_import_not_installed_is_system_error_no_score(db_session_factory, test_
             docker_called.append(args)
             return ("", "", 0, 10)
 
-        with patch("app.worker.judge_worker._run_docker_pytest", side_effect=fake_run), \
-             patch("app.services.judge_queue.claim_job", return_value=True), \
-             patch("app.services.judge_queue.fail_job") as mock_fail:
+        token = grant_judge_claim(db, Submission, submission.id)
+        with patch("app.worker.judge_worker._run_docker_data_runner", side_effect=fake_run), \
+             patch("app.services.judge_queue.claim_job", return_value=token), \
+             patch("app.services.judge_queue.fail_job",
+                   wraps=judge_queue.fail_job) as mock_fail:
             process_submission(db, MagicMock(), test_settings, submission.id)
 
         assert docker_called == [], "IMPORT_NOT_INSTALLED 不应进入 Docker"
+        db.refresh(submission)
         assert submission.status == "system_error"
         assert submission.score is None, "平台配置问题不扣分"
         diag = (submission.result_details or {}).get("diagnostic", {})
@@ -381,8 +433,10 @@ def test_missing_digest_fails_closed_system_error(db_session_factory, test_setti
         db.add(question)
         db.commit()
         db.refresh(question)
+        grading_version_id = _activate_legacy_binary_version(db, question)
         submission = Submission(
             question_id=question.id, student_id=student.id, code="def add(a,b): return a+b",
+            grading_version_id=grading_version_id,
             environment_version_id=draft_version.id,  # draft 状态、无 digest
             import_policy_mode_snapshot="unrestricted",
             allowed_imports_snapshot=[],
@@ -397,11 +451,13 @@ def test_missing_digest_fails_closed_system_error(db_session_factory, test_setti
             docker_called.append(args)
             return ("", "", 0, 10)
 
-        with patch("app.worker.judge_worker._run_docker_pytest", side_effect=fake_run), \
-             patch("app.services.judge_queue.claim_job", return_value=True):
+        token = grant_judge_claim(db, Submission, submission.id)
+        with patch("app.worker.judge_worker._run_docker_data_runner", side_effect=fake_run), \
+             patch("app.services.judge_queue.claim_job", return_value=token):
             process_submission(db, MagicMock(), test_settings, submission.id)
 
         assert docker_called == [], "digest 缺失必须 fail closed"
+        db.refresh(submission)
         assert submission.status == "system_error"
         assert submission.score is None
         diag = (submission.result_details or {}).get("diagnostic", {})

@@ -17,6 +17,7 @@ import TaskAudiencePicker from '../../components/teacher/TaskAudiencePicker.vue'
 import QeMarkdownEditor from '../../components/teacher/question-editor/QeMarkdownEditor.vue'
 import QeCodeEditor from '../../components/teacher/question-editor/QeCodeEditor.vue'
 import QeTestCases from '../../components/teacher/question-editor/QeTestCases.vue'
+import GradingVersionPanel from '../../components/grading/GradingVersionPanel.vue'
 import { assignmentsAPI } from '../../api/assignments.js'
 import { environmentsAPI } from '../../api/environments.js'
 import { judgeAPI } from '../../api/judge.js'
@@ -809,6 +810,14 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
               @run-sample="runSample"
               @parse-failed="app.showToast('当前 pytest 代码无法解析为可视化用例，请使用 pytest 模式', 'error')"
             />
+          </section>
+
+          <!-- ④b 可信数据判题（评分版本）：转换预检 → 草稿 → 确认 → 启用 -->
+          <section v-if="editingId" id="grading-version-section" class="card qe-card">
+            <div class="qe-card-head">
+              <h2 class="qe-card-title">可信数据判题</h2>
+            </div>
+            <GradingVersionPanel :key="`gv-assignment-${editingId}`" :question-id="Number(editingId)" />
           </section>
 
           <!-- ⑤ AI 评分配置：位于题目编写区下方，先写题再配 AI -->

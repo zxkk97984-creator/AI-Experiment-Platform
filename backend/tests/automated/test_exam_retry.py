@@ -5,7 +5,7 @@ import pytest
 
 from app.models import (
     CodeGrade, ExamAnswer, ExamGrade, ExamQuestion, ExamSubmission,
-    QuestionRubric,
+    JudgeGradingVersion, QuestionRubric,
 )
 from app.services.exam_service import retry_exam_submission
 from conftest import grant_teaching_fixture, auth_header, create_user, login
@@ -34,7 +34,11 @@ def _seed_review_required_submission(db_session_factory, *, q1_mode="legacy", q2
         db.add_all([q1, q2]); db.flush()
         sub = ExamSubmission(exam_id=exam.id, student_id=student.id, status="review_required",
                              review_reason="存在系统错误答案",
-                             review_required_at=datetime.now(timezone.utc))
+                             review_required_at=datetime.now(timezone.utc),
+                             grading_version_map={
+                                 str(q1.id): {"version_id": None, "points": 10.0},
+                                 str(q2.id): {"version_id": None, "points": 20.0},
+                             })
         db.add(sub); db.flush()
         ans1 = ExamAnswer(submission_id=sub.id, question_id=q1.id,
                           code_answer="def a(): pass", grading_status="completed", score=10.0)
@@ -57,6 +61,59 @@ def _seed_review_required_submission(db_session_factory, *, q1_mode="legacy", q2
                 "teacher_id": teacher.id, "rubric_id": rubric_id}
 
 
+def _bind_isolated_version(db, ctx, *, mode="legacy", malformed=False):
+    """Bind a synthetic but schema-valid v2 version for explicit retry regressions."""
+    from app.services.grading_values import encode_value
+
+    submission = db.get(ExamSubmission, ctx["submission_id"])
+    answer = db.get(ExamAnswer, ctx["ans2_id"])
+    question = db.get(ExamQuestion, ctx["q2_id"])
+    rubric = None
+    if mode in ("active", "shadow"):
+        rubric = QuestionRubric(
+            exam_question_id=question.id, version=1, status="locked",
+            source_hash="r" * 64, source_snapshot={},
+            rubric_json={"algorithm_criteria": [{"id": "a1"}]},
+            model_name="test", locked_at=datetime.now(timezone.utc),
+        )
+        db.add(rubric)
+        db.flush()
+    payload = {"schema_version": 2, "execution_model": "isolated_case_v2",
+               "entry_function": "solve", "groups": [], "binary_cases": []}
+    if not malformed and mode == "legacy":
+        payload["binary_cases"] = [{
+            "id": "B1", "input": encode_value(([1],)),
+            "expected": encode_value(1), "compare": {"kind": "literal"},
+        }]
+    elif not malformed:
+        payload["groups"] = [
+            {"id": "F1", "name": "功能", "dimension": "F", "max_score": 60,
+             "cases": [{"id": "F1-1", "input": encode_value(([1],)),
+                        "expected": encode_value(1), "compare": {"kind": "literal"}}]},
+            {"id": "R1", "name": "边界", "dimension": "R", "max_score": 10,
+             "cases": [{"id": "R1-1", "input": encode_value(([],)),
+                        "expected": encode_value(0), "compare": {"kind": "literal"}}]},
+        ]
+    version = JudgeGradingVersion(
+        exam_question_id=question.id, version=1, status="active",
+        execution_mode="data_v1", grading_mode_snapshot=mode, entry_function="solve",
+        payload=payload, compare_rules={}, score_cap_rules=[],
+        context_snapshot={"rubric_snapshot": rubric.rubric_json if rubric else None,
+                          "rubric_version": rubric.version if rubric else None},
+        rubric_id=rubric.id if rubric else None,
+        source_kind="manual", source_digest="s" * 64, spec_digest="d" * 64,
+    )
+    db.add(version)
+    db.flush()
+    answer.grading_version_id = version.id
+    submission.grading_version_map = {
+        **(submission.grading_version_map or {}),
+        str(question.id): {"version_id": version.id, "points": 20.0},
+    }
+    db.commit()
+    return version.id
+
+
 def _make_actor(db_session_factory, username, role):
     from app.models import User
     with db_session_factory() as db:
@@ -76,7 +133,7 @@ class TestRetryPreconditions:
         with db_session_factory() as db:
             with pytest.raises(Exception) as exc:
                 retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
-            assert "隐藏测试" in str(exc.value) or "CONFIG" in str(exc.value)
+            assert getattr(exc.value, "detail", {}).get("code") == "GRADING_VERSION_REQUIRED"
 
             # 状态未被改动
             sub = db.get(ExamSubmission, ctx["submission_id"])
@@ -91,7 +148,7 @@ class TestRetryPreconditions:
         with db_session_factory() as db:
             with pytest.raises(Exception) as exc:
                 retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
-            assert "测试组" in str(exc.value) or "CONFIG" in str(exc.value)
+            assert getattr(exc.value, "detail", {}).get("code") == "GRADING_VERSION_REQUIRED"
 
     def test_shadow_active_missing_locked_rubric_rejected(self, db_session_factory):
         ctx = _seed_review_required_submission(db_session_factory, q1_mode="active", q2_mode="active")
@@ -105,7 +162,7 @@ class TestRetryPreconditions:
 
             with pytest.raises(Exception) as exc:
                 retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
-            assert "Rubric" in str(exc.value) or "CONFIG" in str(exc.value)
+            assert getattr(exc.value, "detail", {}).get("code") == "GRADING_VERSION_REQUIRED"
 
 
 class TestRetryStateGuard:
@@ -140,11 +197,7 @@ class TestRetryStateGuard:
         actor = _make_actor(db_session_factory, "rs3_t", "teacher")
 
         with db_session_factory() as db:
-            # 修复配置（历史数据场景：教师补上 hidden_tests）
-            q2 = db.get(ExamQuestion, ctx["q2_id"])
-            q2.hidden_tests = "assert True"
-            db.commit()
-
+            _bind_isolated_version(db, ctx)
             sub = retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
 
             assert sub.status == "grading"
@@ -174,8 +227,7 @@ class TestRetryStateGuard:
         actor = _make_actor(db_session_factory, "rs5_t", "teacher")
 
         with db_session_factory() as db:
-            q2 = db.get(ExamQuestion, ctx["q2_id"])
-            q2.hidden_tests = "assert True"
+            _bind_isolated_version(db, ctx)
             ans2 = db.get(ExamAnswer, ctx["ans2_id"])
             ans2.score = 15.0  # 历史数据残留旧分
             db.commit()
@@ -195,18 +247,12 @@ class TestRetryStateGuard:
 
         with db_session_factory() as db:
             q2 = db.get(ExamQuestion, ctx["q2_id"])
-            q2.test_groups = [{"id": "F1", "name": "F", "dimension": "F",
-                               "max_score": 60, "tests": ""}]  # 缺 tests 代码
-            # 先补 locked rubric，确保命中 tests 检查而非 rubric 检查
-            rub = QuestionRubric(exam_question_id=q2.id, version=1, status="locked",
-                                 source_hash="h", source_snapshot={}, rubric_json={},
-                                 model_name="m", locked_at=datetime.now(timezone.utc))
-            db.add(rub)
             db.commit()
+            _bind_isolated_version(db, ctx, mode="active", malformed=True)
 
             with pytest.raises(Exception) as exc:
                 retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
-            assert "测试代码" in str(exc.value) or "CONFIG" in str(exc.value)
+            assert getattr(exc.value, "detail", {}).get("code") == "GRADING_BASELINE_INVALID"
 
             # 状态未被重置：父仍 review_required、答案仍 system_error、attempt 不归零
             sub = db.get(ExamSubmission, ctx["submission_id"])
@@ -228,16 +274,14 @@ class TestRetryStateGuard:
         actor = _make_actor(db_session_factory, "rs4_t", "teacher")
 
         with db_session_factory() as db:
-            q2 = db.get(ExamQuestion, ctx["q2_id"])
-            q2.hidden_tests = "assert True"
-            db.commit()
+            _bind_isolated_version(db, ctx)
             retry_exam_submission(ctx["submission_id"], [ctx["ans2_id"]], actor, db)
 
         settings = get_settings()
         # retry 已自动入队（queued）；process_exam_answer 内部自行 claim 判题，
         # 完成后自动触发 finalize（legacy 路径）
         with db_session_factory() as db:
-            with patch_docker_accepted():
+            with patch_data_runner_accepted():
                 process_exam_answer(db, fakeredis.FakeStrictRedis(), settings, ctx["ans2_id"])
 
             sub = db.get(ExamSubmission, ctx["submission_id"])
@@ -356,9 +400,9 @@ class TestRetryApi:
             # administrator assigns the actual existing offering explicitly.
             from app.models.teaching import CourseOffering
             db.query(CourseOffering).filter_by(course_id=course.id).one().teacher_id = teacher.id
-            q2 = db.get(ExamQuestion, ctx["q2_id"])
-            q2.hidden_tests = "assert True"
             db.commit()
+        with db_session_factory() as db:
+            _bind_isolated_version(db, ctx)
 
         tok, _ = login(client, "ra_t")
 
@@ -424,9 +468,21 @@ class TestRetryApi:
 
 
 def patch_docker_accepted():
-    """mock Docker 判题返回 accepted"""
+    """历史 pytest helper 仅留给没有转到受限数据评分的调用者。"""
     from unittest.mock import patch
     return patch(
         "app.worker.judge_worker._run_docker_pytest",
         return_value=("1 passed", "", 0, 150),
     )
+
+
+def patch_data_runner_accepted():
+    """模拟 v2 runner 返回当前用例的值；评分仍由宿主真实比较。"""
+    import json
+    from unittest.mock import patch
+    from app.services.grading_runner import RESULT_PREFIX
+    from app.services.grading_values import encode_value
+
+    frame = {"id": "B1", "status": "ok", "value": encode_value(1)}
+    return patch("app.worker.judge_worker._run_docker_data_runner",
+                 return_value=("", RESULT_PREFIX + json.dumps(frame), 0, 150))

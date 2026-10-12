@@ -423,6 +423,20 @@ def populate_audience_cache(db: Session, *, task_type: str, tasks: list) -> None
         task.__dict__.update(grouped[task.id])
 
 
+# 作业/考试名单导入的业务上限：CSV 2 MiB（Nginx 侧放行 3 MiB 以覆盖 multipart 余量）
+MAX_AUDIENCE_CSV_BYTES = 2 * 1024 * 1024
+
+
+async def read_bounded_audience_csv(upload) -> bytes:
+    """有界读取上传文件：最多读 2 MiB + 1 字节即可判定超限，绝不无界读入内存。"""
+    from app.errors import api_error
+
+    content = await upload.read(MAX_AUDIENCE_CSV_BYTES + 1)
+    if len(content) > MAX_AUDIENCE_CSV_BYTES:
+        raise api_error(422, "CSV_TOO_LARGE", "CSV 文件不能超过 2 MB")
+    return content
+
+
 def parse_student_csv(content: bytes) -> tuple[list[dict], str | None]:
     """解析学生范围 CSV：UTF-8（含 BOM）或 GB18030；返回行列表或错误。"""
     for encoding in ("utf-8-sig", "gb18030"):

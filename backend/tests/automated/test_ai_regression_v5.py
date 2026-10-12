@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from conftest import grant_teaching_fixture, make_assignment, make_exam, make_student
+from conftest import grant_teaching_fixture, make_assignment, make_exam, make_student, grant_judge_claim
 
 
 def _create_course_and_exam(client, db_session_factory, username: str):
@@ -182,6 +182,8 @@ def test_shadow_assignment_docker_exception_does_not_award_zero(
         )
         db.add(submission)
         db.commit()
+        if hasattr(submission, "id"):
+            grant_judge_claim(db, Submission, submission.id)
 
         with patch(
             "app.worker.judge_worker.run_test_groups", return_value=deterministic
@@ -260,6 +262,8 @@ def test_shadow_assignment_docker_system_exit_does_not_award_zero(
         )
         db.add(submission)
         db.commit()
+        if hasattr(submission, "id"):
+            grant_judge_claim(db, Submission, submission.id)
 
         with patch(
             "app.worker.judge_worker.run_test_groups", return_value=deterministic

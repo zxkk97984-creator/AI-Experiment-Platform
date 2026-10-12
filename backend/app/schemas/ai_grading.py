@@ -255,6 +255,10 @@ class GradeOverrideCreate(BaseModel):
     algorithm_score: float | None = Field(default=None, ge=0, le=20)
     quality_score: float | None = Field(default=None, ge=0, le=10)
     final_score_100: float | None = Field(default=None, ge=0, le=100)
+    # 确定性分（功能/边界）：仅在评分记录里缺失时才需要教师显式给出——
+    # 不允许把"缺失"当成 0 参与合分（会把 60 分权重凭空抹掉）。
+    functional_score: float | None = Field(default=None, ge=0, le=60)
+    robustness_score: float | None = Field(default=None, ge=0, le=10)
     reason: str = Field(min_length=3, max_length=1000)
 
     @model_validator(mode="after")

@@ -130,19 +130,20 @@ def test_course_assignment_submission_and_worker_result(
     with db_session_factory() as db:
         settings = test_settings
         settings.judge_use_docker = True
-        # mock Docker 子进程调用为本地 pytest
-        with patch('app.worker.judge_worker._run_docker_pytest') as mock_docker:
-            # 真实 pytest 通过时必定打印汇总行；rc=0 无汇总行会被判为不可验证
-            mock_docker.return_value = ('1 passed in 0.01s', '', 0, 100)
+        # 未绑定可信评分版本时不得调用历史 pytest 正式评分器。
+        with patch('app.worker.judge_worker._run_docker_pytest',
+                   side_effect=AssertionError("unbound submission must go to manual review")) as mock_docker:
             process_submission(db, redis_client, settings, submission_id)
+        mock_docker.assert_not_called()
 
     result_response = client.get(
         f"/api/v1/judge/submissions/{submission_id}/result",
         headers=auth_header(student_token),
     )
     assert result_response.status_code == 200
-    assert result_response.json()["status"] == "accepted"
-    assert result_response.json()["score"] == 100
+    assert result_response.json()["status"] == "review_required"
+    assert result_response.json()["score"] is None
+    assert result_response.json()["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
 
 
 def test_worker_marks_wrong_answer(client, db_session_factory, redis_client, test_settings):
@@ -190,17 +191,19 @@ def test_worker_marks_wrong_answer(client, db_session_factory, redis_client, tes
     with db_session_factory() as db:
         settings = test_settings
         settings.judge_use_docker = True
-        with patch('app.worker.judge_worker._run_docker_pytest') as mock_docker:
-            mock_docker.return_value = ('...', 'assert error', 1, 50)
+        with patch('app.worker.judge_worker._run_docker_pytest',
+                   side_effect=AssertionError("unbound submission must go to manual review")) as mock_docker:
             process_submission(db, redis_client, settings, submission_id)
+        mock_docker.assert_not_called()
 
     response = client.get(
         f"/api/v1/judge/submissions/{submission_id}/result",
         headers=auth_header(student_token),
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "wrong_answer"
-    assert response.json()["score"] == 0
+    assert response.json()["status"] == "review_required"
+    assert response.json()["score"] is None
+    assert response.json()["diagnostic"]["code"] == "MISSING_GRADING_BASELINE"
 
 
 def test_assignment_list_returns_is_submitted_for_student(client, db_session_factory):

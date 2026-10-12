@@ -31,6 +31,7 @@ def _setup_stale_queued_submission(db_session_factory):
 
 def _setup_stale_running_ai_grade(db_session_factory):
     """创建 running 超时的 CodeGrade（作业路径）"""
+    from app.services.ai_grading_queue import STALE_RUNNING_SECONDS
     with db_session_factory() as db:
         from app.models import Assignment, Course, JudgeQuestion, QuestionRubric, User
         teacher = User(username="ca_t", real_name="CAT", role="teacher", status="active",
@@ -57,7 +58,10 @@ def _setup_stale_running_ai_grade(db_session_factory):
         db.add(sub); db.commit()
         cg = CodeGrade(submission_id=sub.id, rubric_id=rub.id, mode="active",
                        status="running", functional_score=60, robustness_score=10,
-                       started_at=datetime.now(timezone.utc) - timedelta(seconds=900))
+                       # 明确的过去时间：按实际阈值回拨（原先硬编码 900s 小于 1800s 阈值，
+                       # 根本没进入恢复分支），避免依赖"0 秒立即过期"的边界。
+                       started_at=datetime.now(timezone.utc)
+                       - timedelta(seconds=STALE_RUNNING_SECONDS + 600))
         db.add(cg); db.commit()
         return cg.id
 
@@ -143,9 +147,9 @@ class TestAIFinalizeOnReviewRequired:
 
     def test_fail_ai_grade_review_required_triggers_parent(self, db_session_factory):
         """fail_ai_grade 达上限转 review_required → 父级当场转 review_required"""
-        from app.services.ai_grading_queue import fail_ai_grade
+        from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
 
-        ctx = self._seed_active_exam_codegrade(db_session_factory)
+        ctx = self._seed_active_exam_codegrade(db_session_factory, cg_status="queued")
 
         with db_session_factory() as db:
             cg = db.get(CodeGrade, ctx["cg_id"])
@@ -153,6 +157,8 @@ class TestAIFinalizeOnReviewRequired:
             db.commit()
 
         with db_session_factory() as db:
+            # 失败写入受认领栅栏保护：必须先认领（真实 Worker 序列）
+            assert claim_ai_grade(db, ctx["cg_id"])
             fail_ai_grade(db, MagicMock(), ctx["cg_id"], "AI 服务超时",
                           retryable=True, max_attempts=3)
             db.expire_all()

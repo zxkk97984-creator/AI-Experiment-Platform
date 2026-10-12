@@ -570,6 +570,10 @@ class JudgeQuestion(TimestampMixin, Base):
         String(16), nullable=False, default="inherit"
     )  # inherit | unrestricted | restricted
     allowed_imports: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 评分版本绑定（批次三 3B） ──────────────────────────────
+    # 指向 judge_grading_versions.id；用整数而非外键，避免与版本表（反向引用题目）
+    # 形成循环外键，迁移在 SQLite/MySQL 上都能安全批量执行。
+    current_grading_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     assignment: Mapped[Assignment] = relationship(back_populates="questions")
 
@@ -579,6 +583,8 @@ class Submission(TimestampMixin, Base):
     __table_args__ = (
         Index("ix_submissions_gs_updated", "grading_status", "updated_at"),
         Index("ix_submissions_gs_finished", "grading_status", "finished_at"),
+        UniqueConstraint("student_id", "client_request_id",
+                         name="uq_submission_student_request"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -594,6 +600,16 @@ class Submission(TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 认领代次：每次 queued→running 由 claim_job 现生成的随机 token。
+    # 所有结果写入都必须带它做条件 UPDATE，使失去认领的旧 Worker 无法覆盖新结果。
+    # 只增不减、任何业务路径（含教师重试）都不重置——这是它不能复用 attempt_count 的原因。
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 结果修订号：任何产生或改变结果的写入（判题终态、AI 终态、人工改分、受控重评）
+    # 都在同一事务内原子 +1；人工评分/旧客户端据此拒绝过时写入。
+    result_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     # ── 判题结果 ──────────────────────────────────────────────
     stdout: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -612,6 +628,15 @@ class Submission(TimestampMixin, Base):
         String(16), nullable=False, default="unrestricted"
     )
     allowed_imports_snapshot: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 提交幂等（批次四） ─────────────────────────────────────
+    # 可选请求键：唯一范围是"学生 + 请求键"。同键同正文返回原提交；
+    # 同键不同正文 409 IDEMPOTENCY_KEY_REUSED；不同学生同键互不影响。
+    client_request_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # 正文摘要（固定 v1 规范 JSON：question_id + 原样 code，不含环境/截止等可变配置）
+    request_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 提交时绑定的评分版本（批次三 3B）：Worker 只读它，不得改用题目最新配置。
+    # NULL = 无版本基线（旧题/未启用数据型判题）→ 后续评分转人工，不静默绑定最新版本。
+    grading_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     question: Mapped[JudgeQuestion] = relationship()
     student: Mapped[User] = relationship()
@@ -737,6 +762,10 @@ class ExamSubmission(TimestampMixin, Base):
     review_reason: Mapped[str | None] = mapped_column(Text, nullable=True)  # 只存脱敏短摘要
     review_required_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # 考试开始时冻结的逐代码题评分版本映射：{question_id: grading_version_id}
+    # 创建/补建答案只能从这里复制，不得读取题目最新配置。
+    grading_version_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     exam: Mapped[Exam] = relationship()
     student: Mapped[User] = relationship()
     answers: Mapped[list["ExamAnswer"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
@@ -767,6 +796,7 @@ class ExamGrade(TimestampMixin, Base):
     exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id"), index=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     score: Mapped[float] = mapped_column(Float, default=0)
+
 
     exam: Mapped[Exam] = relationship()
     student: Mapped[User] = relationship()
@@ -801,6 +831,8 @@ class ExamQuestion(TimestampMixin, Base):
     reference_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
     test_groups: Mapped[list] = mapped_column(JSON, default=list)
     score_cap_rules: Mapped[list] = mapped_column(JSON, default=list)
+    # 当前启用的评分版本（同 JudgeQuestion.current_grading_version_id）
+    current_grading_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     exam: Mapped[Exam] = relationship(back_populates="questions")
 
@@ -831,6 +863,15 @@ class ExamAnswer(TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 认领代次（同 Submission.claim_token）：结果写入必须带它做条件 UPDATE
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 结果修订号（同 Submission.result_revision）：判题/AI/人工改分原子推进
+    result_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    # 考试开始时从父级冻结映射复制的评分版本（批次三 3B）
+    grading_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # ── 判题结果 ──────────────────────────────────────────────
     result_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     system_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1124,6 +1165,84 @@ class QuestionRubric(TimestampMixin, Base):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ManualScoreAudit(TimestampMixin, Base):
+    """人工评分审计（append-only）：每次人工给分都新增一行，永不修改或删除。
+
+    ``result_details.manual_review_history`` 只是展示用的最近若干条；
+    审计事实以本表为准（谁、何时、给了多少分、理由、写入后的结果修订号）。
+    """
+
+    __tablename__ = "manual_score_audits"
+    __table_args__ = (
+        Index("ix_manual_score_audits_target", "target_kind", "target_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # submission | exam_answer
+    target_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    actor_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 本次写入后的结果修订号（便于与 Submission.result_revision 对照）
+    result_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual_score")
+
+
+class JudgeGradingVersion(TimestampMixin, Base):
+    """不可变评分版本（批次三 3B）。
+
+    - ``judge_question_id`` 与 ``exam_question_id`` 严格二选一；
+    - ``draft`` 可编辑（新版本另存）；``confirmed`` 之后 payload 不可修改；
+      ``active`` 供新提交绑定；``retired`` 只禁止新绑定，不使历史绑定失效；
+    - 保存入口函数、数据用例、比较规则、F/R 权重、来源摘要与绑定的 Rubric，
+      以及会影响 AI 评审的评分上下文快照。
+    """
+
+    __tablename__ = "judge_grading_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "(judge_question_id IS NULL) != (exam_question_id IS NULL)",
+            name="ck_grading_version_xor_target",
+        ),
+        UniqueConstraint("judge_question_id", "version", name="uq_grading_version_judge"),
+        UniqueConstraint("exam_question_id", "version", name="uq_grading_version_exam"),
+        Index("ix_grading_versions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    judge_question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("judge_questions.id"), nullable=True, index=True
+    )
+    exam_question_id: Mapped[int | None] = mapped_column(
+        ForeignKey("exam_questions.id"), nullable=True, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    # draft / confirmed / active / retired
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    # 执行方式（与成绩采用策略 legacy/shadow/active 正交）
+    execution_mode: Mapped[str] = mapped_column(String(20), default="data_v1")
+    grading_mode_snapshot: Mapped[str] = mapped_column(String(20), default="active")
+    entry_function: Mapped[str] = mapped_column(String(120))
+    # 数据用例与比较规则（payload: schema_version/entry_function/execution_model/binary_cases/groups）
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    compare_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    score_cap_rules: Mapped[list] = mapped_column(JSON, default=list)
+    context_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    rubric_id: Mapped[int | None] = mapped_column(
+        ForeignKey("question_rubrics.id"), nullable=True
+    )
+    source_kind: Mapped[str] = mapped_column(String(30), default="manual")
+    source_digest: Mapped[str] = mapped_column(String(64))
+    spec_digest: Mapped[str] = mapped_column(String(64))
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CodeGrade(TimestampMixin, Base):
     """统一 AI 代码评分记录——XOR 外键关联 Submission 或 ExamAnswer"""
     __tablename__ = "code_grades"
@@ -1145,6 +1264,10 @@ class CodeGrade(TimestampMixin, Base):
     rubric_id: Mapped[int] = mapped_column(ForeignKey("question_rubrics.id"))
     mode: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    # 结果修订号（同 Submission.result_revision）：每次 AI 终态写入原子 +1
+    result_revision: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     functional_score: Mapped[float] = mapped_column(Float, default=0)
     algorithm_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     robustness_score: Mapped[float] = mapped_column(Float, default=0)
@@ -1164,6 +1287,8 @@ class CodeGrade(TimestampMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 认领代次（同 Submission.claim_token）：AI 评分写入必须带它做条件 UPDATE
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class GradeOverride(TimestampMixin, Base):

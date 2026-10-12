@@ -68,7 +68,7 @@ def test_enqueue_transitions_pending_to_queued(db_session_factory, redis_client)
         db.flush()
 
         ok = enqueue_ai_grade(db, redis_client, grade.id)
-        assert ok is True
+        assert ok
 
         db.refresh(grade)
         assert grade.status == "queued"
@@ -119,7 +119,7 @@ def test_claim_queued_to_running(db_session_factory, redis_client):
         enqueue_ai_grade(db, redis_client, grade.id)
 
         ok = claim_ai_grade(db, grade.id)
-        assert ok is True
+        assert ok
 
         db.refresh(grade)
         assert grade.status == "running"
@@ -129,17 +129,19 @@ def test_claim_queued_to_running(db_session_factory, redis_client):
 def test_fail_retryable_returns_to_queued(db_session_factory, redis_client):
     """可重试失败退回 queued（确保 claim_ai_grade 可领取）"""
     from app.models import CodeGrade
-    from app.services.ai_grading_queue import fail_ai_grade
+    from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
 
     submission_id = make_submission(db_session_factory)
     rubric_id = make_rubric(db_session_factory)
     with db_session_factory() as db:
         grade = CodeGrade(
-            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="running",
+            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="queued",
             attempt_count=1,
         )
         db.add(grade)
         db.flush()
+        # 失败写入受认领栅栏保护：必须先认领（真实 Worker 序列）
+        assert claim_ai_grade(db, grade.id)
 
         fail_ai_grade(db, redis_client, grade.id, "timeout", retryable=True, max_attempts=3)
 
@@ -150,17 +152,18 @@ def test_fail_retryable_returns_to_queued(db_session_factory, redis_client):
 def test_fail_non_retryable_goes_to_review(db_session_factory, redis_client):
     """不可重试失败进入 review_required"""
     from app.models import CodeGrade
-    from app.services.ai_grading_queue import fail_ai_grade
+    from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
 
     submission_id = make_submission(db_session_factory)
     rubric_id = make_rubric(db_session_factory)
     with db_session_factory() as db:
         grade = CodeGrade(
-            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="running",
+            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="queued",
             attempt_count=1,
         )
         db.add(grade)
         db.flush()
+        assert claim_ai_grade(db, grade.id)
 
         fail_ai_grade(db, redis_client, grade.id, "bad json", retryable=False)
 
@@ -172,18 +175,20 @@ def test_fail_non_retryable_goes_to_review(db_session_factory, redis_client):
 def test_complete_sets_status(db_session_factory, redis_client):
     """complete 设置 completed 状态"""
     from app.models import CodeGrade
-    from app.services.ai_grading_queue import complete_ai_grade
+    from app.services.ai_grading_queue import claim_ai_grade, complete_ai_grade
 
     submission_id = make_submission(db_session_factory)
     rubric_id = make_rubric(db_session_factory)
     with db_session_factory() as db:
         grade = CodeGrade(
-            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="running",
+            submission_id=submission_id, rubric_id=rubric_id, mode="shadow", status="queued",
         )
         db.add(grade)
         db.flush()
+        # 完成写入受认领栅栏保护：必须先认领（真实 Worker 序列）
+        assert claim_ai_grade(db, grade.id)
 
-        complete_ai_grade(db, grade.id)
+        assert complete_ai_grade(db, grade.id) is True
 
         db.refresh(grade)
         assert grade.status == "completed"
