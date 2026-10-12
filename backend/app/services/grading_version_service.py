@@ -208,8 +208,12 @@ def create_draft(db: Session, *, question_kind: str, question_id: int, payload: 
                  score_cap_rules: list | None = None, context_snapshot: dict | None = None,
                  rubric_id: int | None = None, source_kind: str = "manual",
                  execution_mode: str = "data_v1", grading_mode_snapshot: str | None = None,
-                 actor_id: int | None = None) -> JudgeGradingVersion:
-    """创建草稿版本（不激活、不绑定任何提交）。"""
+                 actor_id: int | None = None, commit: bool = False) -> JudgeGradingVersion:
+    """创建草稿版本（不激活、不绑定任何提交）。
+
+    ``commit`` 默认 False（与历史行为一致：只 flush，由调用方决定事务边界）；
+    「保存并启用」传 ``commit=False`` 与其余步骤共用同一事务。
+    """
     if question_kind not in ("assignment", "exam"):
         raise GradingVersionError("question_kind 必须是 assignment 或 exam")
     if execution_mode not in EXECUTION_MODES:
@@ -305,14 +309,21 @@ def create_draft(db: Session, *, question_kind: str, question_id: int, payload: 
         created_by_id=actor_id,
     )
     db.add(version)
-    db.flush()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return version
 
 
 def confirm_version(db: Session, version: JudgeGradingVersion, *, actor_id: int | None = None,
                     expected_spec_digest: str | None = None,
-                    confirm_isolated_case_v2: bool = False) -> JudgeGradingVersion:
-    """确认草稿：payload 冻结；摘要变化（被改动）时拒绝确认。"""
+                    confirm_isolated_case_v2: bool = False,
+                    commit: bool = False) -> JudgeGradingVersion:
+    """确认草稿：payload 冻结；摘要变化（被改动）时拒绝确认。
+
+    ``commit`` 默认 False（与历史行为一致：只 flush）。
+    """
     if version.status != "draft":
         raise GradingVersionError("只有 draft 版本可以确认")
     current = compute_spec_digest(version.payload, version.entry_function, version.compare_rules,
@@ -340,13 +351,20 @@ def confirm_version(db: Session, version: JudgeGradingVersion, *, actor_id: int 
     version.status = "confirmed"
     version.confirmed_by_id = actor_id
     version.confirmed_at = datetime.now(timezone.utc)
-    db.flush()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return version
 
 
 def activate_version(db: Session, version: JudgeGradingVersion, *,
-                     actor_id: int | None = None) -> JudgeGradingVersion:
-    """启用版本：同题目的旧 active 自动退役（只禁止新绑定，不影响历史绑定）。"""
+                     actor_id: int | None = None,
+                     commit: bool = False) -> JudgeGradingVersion:
+    """启用版本：同题目的旧 active 自动退役（只禁止新绑定，不影响历史绑定）。
+
+    ``commit`` 默认 False（与历史行为一致：只 flush）。
+    """
     if version.status not in ("confirmed", "retired"):
         raise GradingVersionError("只有 confirmed 版本可以启用")
     _validate_activation_strategy(db, version)
@@ -363,7 +381,10 @@ def activate_version(db: Session, version: JudgeGradingVersion, *,
     if version.confirmed_at is None:
         version.confirmed_by_id = actor_id
         version.confirmed_at = datetime.now(timezone.utc)
-    db.flush()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return version
 
 

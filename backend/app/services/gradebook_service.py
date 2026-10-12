@@ -404,9 +404,25 @@ def calculate(db, book, *, lock=False):
                      'adjustment': {'score': score_text(adjustment.score), 'reason': adjustment.reason} if adjustment else None})
     result = {'offering_id': book.offering_id, 'book_revision': book.revision, 'config': config_read(db, book, lock=lock),
               'rows': rows, 'blockers': blockers}
+    # 未决成绩异议只提示、不阻止发布（不进 blockers）：成绩册本身不提供异议入口，
+    # 教师看到计数后到 AI 评分复核页处理。
+    result['warnings'] = _appeal_warnings(db, book.offering_id)
     reviewed = {key: value for key, value in result.items() if key != 'book_revision'}
     result['preview_hash'] = hashlib.sha256(json.dumps(reviewed, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
     return result
+
+
+def _appeal_warnings(db, offering_id: int) -> list[dict]:
+    from app.services.appeal_service import count_offering_pending_appeals
+
+    pending = count_offering_pending_appeals(db, offering_id)
+    if not pending:
+        return []
+    return [{
+        'kind': 'PENDING_APPEALS',
+        'count': pending,
+        'message': f'有 {pending} 条成绩异议尚未处理，不影响总评发布，建议发布前先在 AI 评分复核页处理',
+    }]
 
 
 def snapshot_read(db, snapshot, actor):

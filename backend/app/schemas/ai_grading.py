@@ -308,3 +308,41 @@ class ActiveCodeGradeRead(BaseModel):
     strengths: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
+
+
+# ── 一键 AI 配置与草稿试判（批次 2） ────────────────────────────────
+
+
+class AISetupJobCreate(BaseModel):
+    """一键配置任务：填写参考解法与评分侧重后异步生成草稿。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    question_kind: Literal["assignment", "exam"]
+    question_id: int = Field(gt=0)
+    reference_solution: str | None = Field(default=None, max_length=50000)
+    teacher_constraints: dict[str, Any] | None = None
+    grading_mode: Literal["legacy", "shadow", "active"] | None = None
+
+
+class AISetupTrialRunCreate(BaseModel):
+    """草稿试判：样例代码只用于预览草稿规则，不生成任何正式提交。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(min_length=1, max_length=50000)
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class AISetupEnableRequest(BaseModel):
+    """保存并启用：可携带微调后的草稿正文、测试组与题目配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rubric: RubricDocument | None = None
+    test_groups: list[TestGroup] | None = None
+    teacher_constraints: dict[str, Any] | None = None
+    score_cap_rules: list[ScoreCapRule] | None = None
+    compare_rules: dict[str, Any] | None = None
+    entry_function: str | None = Field(default=None, min_length=1, max_length=120)
+    acknowledge_in_flight: bool = False

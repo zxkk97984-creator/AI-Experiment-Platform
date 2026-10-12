@@ -127,19 +127,23 @@ def generate_rubric(
 
 
 def update_draft_rubric(
-    db: Session, rubric_id: int, document: RubricDocument
+    db: Session, rubric_id: int, document: RubricDocument, *, commit: bool = True
 ) -> QuestionRubric:
+    """修改草稿正文；``commit=False`` 供「保存并启用」单事务收口（只 flush）。"""
     rubric = db.get(QuestionRubric, rubric_id)
     if rubric is None:
         raise ValueError(f"Rubric {rubric_id} 不存在")
     if rubric.status != "draft":
         raise ValueError(f"只有 draft 状态可修改，当前状态为 {rubric.status}")
     rubric.rubric_json = document.model_dump()
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return rubric
 
 
-def lock_rubric(db: Session, rubric_id: int) -> QuestionRubric:
+def lock_rubric(db: Session, rubric_id: int, *, commit: bool = True) -> QuestionRubric:
     rubric = db.get(QuestionRubric, rubric_id)
     if rubric is None:
         raise ValueError(f"Rubric {rubric_id} 不存在")
@@ -160,7 +164,10 @@ def lock_rubric(db: Session, rubric_id: int) -> QuestionRubric:
 
     rubric.status = "locked"
     rubric.locked_at = datetime.now(timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
     logger.info("rubric_locked", extra={"rubric_id": rubric_id, "kind": target_kind, "question_id": target_id, "version": rubric.version})
     return rubric

@@ -1671,11 +1671,15 @@ def _worker_queue_names(settings: Settings) -> tuple[str, ...]:
 
     The deterministic worker is deliberately the default.  An AI worker is
     opt-in and has no consumption queues at all while AI is disabled.
+    The AI worker additionally consumes the one-click AI setup queue
+    (rubric/test-group generation and draft trial runs).
     """
     if settings.worker_role == "judge":
         return settings.judge_queue_name, EXAM_JUDGE_QUEUE
     if settings.worker_role == "ai":
-        return (settings.ai_queue_name,) if settings.ai_enabled else ()
+        if not settings.ai_enabled:
+            return ()
+        return settings.ai_queue_name, settings.ai_setup_queue_name
     raise ValueError(f"unsupported worker role: {settings.worker_role}")
 
 
@@ -1735,9 +1739,13 @@ def run_worker_loop():
                 raise ValueError("queue message must be an object")
             msg_type = payload.get("type")
             job_id = payload.get("id")
-            expected_type = ("ai_grade" if worker_role == "ai" else
-                             "exam" if queue_name == EXAM_JUDGE_QUEUE else "assignment")
-            if (msg_type != expected_type or type(job_id) is not int or job_id <= 0
+            if queue_name == settings.ai_setup_queue_name:
+                expected_types = ("ai_setup", "ai_trial")
+            elif worker_role == "ai":
+                expected_types = ("ai_grade",)
+            else:
+                expected_types = ("exam",) if queue_name == EXAM_JUDGE_QUEUE else ("assignment",)
+            if (msg_type not in expected_types or type(job_id) is not int or job_id <= 0
                     or ("attempt" in payload and
                         (type(payload["attempt"]) is not int or payload["attempt"] < 0))):
                 raise ValueError("invalid queue message fields")
@@ -1747,7 +1755,18 @@ def run_worker_loop():
             logger.warning("无效判题消息，已忽略: queue=%s", queue_name)
             continue
 
-        if worker_role == "ai":
+        if queue_name == settings.ai_setup_queue_name:
+            from app.services import ai_grading_setup_service as setup_service
+
+            try:
+                with SessionLocal() as db:
+                    if msg_type == "ai_setup":
+                        setup_service.run_setup_job(db, redis_client, settings, job_id)
+                    else:
+                        setup_service.run_trial_run(db, redis_client, settings, job_id)
+            except Exception:
+                logger.exception("AI 配置任务异常: id=%s", job_id)
+        elif worker_role == "ai":
             try:
                 with SessionLocal() as db:
                     process_ai_grade(db, redis_client, settings, job_id)

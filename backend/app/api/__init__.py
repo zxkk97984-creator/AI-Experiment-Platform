@@ -26,6 +26,7 @@ from .statistics import router as statistics_router
 from .search import router as search_router
 from .submissions import router as submissions_router
 from .notifications import router as notifications_router
+from .appeals import router as appeals_router
 from .student_history import router as student_history_router
 from .users import router as users_router
 
@@ -56,6 +57,7 @@ api_router.include_router(statistics_router)
 api_router.include_router(search_router)
 api_router.include_router(submissions_router)
 api_router.include_router(notifications_router)
+api_router.include_router(appeals_router)
 api_router.include_router(admin_logs_router)
 
 api_router.include_router(account_management_router)
