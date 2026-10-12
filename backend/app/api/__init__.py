@@ -70,3 +70,9 @@ api_router.include_router(course_materials_router)
 
 from .gradebook import router as gradebook_router
 api_router.include_router(gradebook_router)
+
+from .practice import router as practice_router  # noqa: E402
+api_router.include_router(practice_router)
+
+from .admin_practice import router as admin_practice_router  # noqa: E402
+api_router.include_router(admin_practice_router)
