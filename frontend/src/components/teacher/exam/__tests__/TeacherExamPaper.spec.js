@@ -3,7 +3,10 @@ import { mount } from '@vue/test-utils'
 import TeacherExamPaper from '../TeacherExamPaper.vue'
 
 const routerPush = vi.hoisted(() => vi.fn())
-vi.mock('vue-router', () => ({ useRouter: () => ({ push: routerPush }) }))
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: routerPush }),
+  useRoute: () => ({ path: '/teacher/exams/9/grades/1' }),
+}))
 
 function question(overrides = {}) {
   return {

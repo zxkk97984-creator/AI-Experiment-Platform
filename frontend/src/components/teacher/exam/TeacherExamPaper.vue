@@ -5,9 +5,11 @@
  * 标准答案/参考答案，并允许在 0 ~ 本题满分 之间逐题修改得分。
  */
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { areaPathForRole } from '../../../router/roleHome.js'
 
 const router = useRouter()
+const route = useRoute()
 
 const props = defineProps({
   questions: { type: Array, default: () => [] },
@@ -233,7 +235,9 @@ function aiState(row) {
 }
 
 function goAiReview(gradeId) {
-  router.push(`/teacher/ai-grading/${gradeId}`)
+  // 共享页面：管理员必须在 /admin 前缀下打开，否则会被角色守卫重定向
+  router.push(areaPathForRole((route.path || '').startsWith('/admin') ? 'admin' : 'teacher',
+                              `/ai-grading/${gradeId}`))
 }
 
 function scoreKey(row) {

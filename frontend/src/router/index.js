@@ -68,6 +68,10 @@ const routes = [
 
   { path: '/admin/assignments/:id/edit', name: 'AdminAssignmentEdit', component: () => import('../views/teacher/QuestionEditView.vue'), meta: { role: 'admin' } },
   { path: '/admin/exams/:id/edit', name: 'AdminExamEdit', component: () => import('../views/teacher/ExamQuestionEditView.vue'), meta: { role: 'admin' } },
+  // 管理员复用教师考试页面：管理列表、成绩总览与逐份详情都走同一组件与同一 API 授权
+  { path: '/admin/exams', name: 'AdminExams', component: () => import('../views/teacher/ExamManageView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/exams/:id/grades', name: 'AdminGrades', component: () => import('../views/teacher/GradesView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/exams/:id/grades/:submissionId', name: 'AdminGradeDetail', component: () => import('../views/teacher/GradeDetailView.vue'), meta: { role: 'admin' } },
   // Admin
   { path: '/admin', name: 'AdminHome', component: () => import('../views/admin/DashboardView.vue'), meta: { role: 'admin' } },
   { path: '/admin/users', name: 'AdminUsers', component: () => import('../views/admin/UserListView.vue'), meta: { role: 'admin' } },

@@ -9,6 +9,8 @@ const showToastMock = vi.hoisted(() => vi.fn())
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ push: pushMock }),
+  // 页面按当前已鉴权路由计算 teacher/admin 链接前缀
+  useRoute: () => ({ path: '/teacher/exams', params: {} }),
   createRouter: vi.fn(() => ({
     beforeEach: vi.fn(),
     afterEach: vi.fn(),

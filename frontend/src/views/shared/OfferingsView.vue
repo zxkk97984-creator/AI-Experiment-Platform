@@ -19,6 +19,7 @@ const historyReview = ref({ items: [], tasks: [], total: 0 }), historyPage = ref
 const selected = ref(null), members = ref([]), templates = ref({ tasks: [], experiments: [] })
 const busy = ref(false), error = ref(''), notice = ref('')
 const createForm = ref({ course_id: '', academic_term_id: '', teaching_class_id: '', teacher_id: '' })
+const canCreate = computed(() => Object.values(createForm.value).every(Boolean))
 const assignmentTeacher = ref(''), reason = ref(''), memberIds = ref([]), transferTarget = ref('')
 const assessmentEditor = ref('')
 const selectedExperiment = computed(() => templates.value.experiments.find(e => `${e.kind}:${e.id}` === assessmentEditor.value))
@@ -164,18 +165,18 @@ onBeforeUnmount(() => { termGuard.invalidate(); selectionGuard.invalidate() })
 </script>
 
 <template>
-  <AppLayout>
+  <AppLayout content-mode="list">
     <main class="offering-page">
       <header><h1>{{ auth.isAdmin ? '授课安排' : '我的教学班' }}</h1><p>共享课程内容，按教学班管理任务、学生和成绩。</p></header>
       <p v-if="error" role="alert" class="error">{{ error }}</p><p v-if="notice" role="status" class="notice">{{ notice }}</p>
-      <form v-if="auth.isAdmin" class="panel grid" @submit.prevent="create">
-        <h2 class="wide">新增授课安排</h2>
-        <div class="candidate-field"><span>课程</span><button type="button" aria-label="选择课程" :disabled="busy" @click="openPicker('course')">{{ choiceText('course') }}</button></div>
-        <label>学期<select v-model="createForm.academic_term_id" required :disabled="termsLoading"><option value="">{{ termsLoading ? '正在加载学期…' : '请选择' }}</option><option v-for="t in terms" :key="t.id" :value="t.id" :disabled="t.status === 'closed'">{{ t.name }}{{ t.status === 'closed' ? '（已关闭）' : '' }}</option></select></label>
+      <form v-if="auth.isAdmin" class="panel grid offering-create" @submit.prevent="create">
+        <header class="wide create-heading"><div class="create-mark" aria-hidden="true">+</div><div><h2>新增授课安排</h2><p>选择课程、学期、教学班和授课教师，创建后自动加入班级名单。</p></div></header>
+        <div class="candidate-field"><span>课程</span><button class="create-picker" type="button" aria-label="选择课程" :disabled="busy" @click="openPicker('course')"><span>{{ choiceText('course') }}</span><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m5 3 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></button><small>可为不同教学班安排同一门课程</small></div>
+        <label class="create-field">学期<select v-model="createForm.academic_term_id" required :disabled="busy || termsLoading"><option value="">{{ termsLoading ? '正在加载学期…' : '请选择' }}</option><option v-for="t in terms" :key="t.id" :value="t.id" :disabled="t.status === 'closed'">{{ t.name }}{{ t.status === 'closed' ? '（已关闭）' : '' }}</option></select><small>已关闭的学期不接受新增安排</small></label>
         <p v-if="termsError" class="error wide" role="alert">{{ termsError }} <button type="button" @click="loadTerms">重试学期加载</button></p>
-        <div class="candidate-field"><span>教学班</span><button type="button" aria-label="选择教学班" :disabled="busy || !createForm.academic_term_id" @click="openPicker('class')">{{ choiceText('class', createForm.academic_term_id ? '请选择' : '请先选择学期') }}</button></div>
-        <div class="candidate-field"><span>授课教师</span><button type="button" aria-label="选择授课教师" :disabled="busy" @click="openPicker('teacher')">{{ choiceText('teacher') }}</button></div>
-        <button :disabled="busy || !createForm.course_id || !createForm.academic_term_id || !createForm.teaching_class_id || !createForm.teacher_id">创建并加入班级名单</button>
+        <div class="candidate-field"><span>教学班</span><button class="create-picker" type="button" aria-label="选择教学班" :disabled="busy || !createForm.academic_term_id" @click="openPicker('class')"><span>{{ choiceText('class', createForm.academic_term_id ? '请选择' : '请先选择学期') }}</span><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m5 3 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></button><small>仅显示所选学期的教学班</small></div>
+        <div class="candidate-field"><span>授课教师</span><button class="create-picker" type="button" aria-label="选择授课教师" :disabled="busy" @click="openPicker('teacher')"><span>{{ choiceText('teacher') }}</span><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m5 3 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg></button><small>负责本班任务、学生与成绩管理</small></div>
+        <footer class="wide create-footer"><span>{{ canCreate ? '已选齐，可创建授课安排' : '请选择全部四项后创建' }}</span><button class="create-submit" :disabled="busy || !canCreate">{{ busy ? '正在处理…' : '创建并加入班级名单' }}</button></footer>
       </form>
       <section class="cards" aria-label="教学班列表">
         <button v-for="row in rows" :key="row.id" class="class-card" :class="{ selected: selected?.id === row.id }" :disabled="busy" @click="select(row)"><strong>{{ row.course_title }}</strong><span>{{ row.term_name }} · {{ row.class_name }}</span><span>{{ row.teacher_name || '待分配教师' }} · {{ row.status === 'active' ? '教学中' : row.status === 'archived' ? '已归档' : '待确认' }}</span></button>
@@ -218,5 +219,25 @@ onBeforeUnmount(() => { termGuard.invalidate(); selectionGuard.invalidate() })
 
 <style scoped>
 .candidate-field{display:grid;gap:8px;min-width:0}.candidate-field button{text-align:left;overflow-wrap:anywhere}.chosen-students{list-style:none;padding:0;margin:0;display:flex;gap:8px;flex-wrap:wrap;max-height:120px;overflow:auto}.chosen-students li{border:1px solid var(--border);padding:4px 8px;overflow-wrap:anywhere;max-width:100%}
-.offering-page{max-width:1200px;margin:auto;padding:28px;display:grid;gap:24px}header p{color:var(--text-secondary,#64748b);margin-top:8px}.panel{background:var(--surface,#fff);border:1px solid var(--border,#e2e8f0);border-radius:14px;padding:24px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:end}.wide{grid-column:1/-1}.grid h2,.grid h3{margin:0}.grid label{display:grid;gap:8px;color:var(--text-secondary,#475569)}input,select{width:100%;min-width:0;padding:10px;border:1px solid var(--border,#cbd5e1);border-radius:8px;background:var(--surface,#fff)}button{padding:10px 16px;border:1px solid var(--border,#cbd5e1);border-radius:8px;background:var(--surface,#fff);cursor:pointer;color:var(--text-primary,#0f172a)}button:disabled{opacity:.55;cursor:default}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.class-card{display:grid;text-align:left;gap:10px;padding:20px}.class-card span{font-size:13px;color:var(--text-secondary,#64748b)}.selected{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var(--accent,#2563eb)}.actions{display:flex;flex-wrap:wrap;gap:16px;margin:16px 0}.history-review{margin:24px 0}.history-review p,.history-review small{color:var(--text-secondary,#64748b)}.history-review ul{padding:0;list-style:none}.history-review li{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}.history-review li span{flex:1;min-width:180px}.error{color:#b91c1c}.notice{color:#047857}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-bottom:24px}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--border,#e2e8f0)}@media(max-width:640px){.offering-page{padding:16px}.grid{grid-template-columns:1fr}.panel{padding:16px}}
+.offering-page{max-width:none;margin:0;padding:0;display:grid;gap:24px}header p{color:var(--text-secondary,#64748b);margin-top:8px}.panel{background:var(--surface,#fff);border:1px solid var(--border,#e2e8f0);border-radius:14px;padding:24px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:end}.wide{grid-column:1/-1}.grid h2,.grid h3{margin:0}.grid label{display:grid;gap:8px;color:var(--text-secondary,#475569)}input,select{width:100%;min-width:0;padding:10px;border:1px solid var(--border,#cbd5e1);border-radius:8px;background:var(--surface,#fff)}button{padding:10px 16px;border:1px solid var(--border,#cbd5e1);border-radius:8px;background:var(--surface,#fff);cursor:pointer;color:var(--text-primary,#0f172a)}button:disabled{opacity:.55;cursor:default}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}.class-card{display:grid;text-align:left;gap:10px;padding:20px}.class-card span{font-size:13px;color:var(--text-secondary,#64748b)}.selected{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var(--accent,#2563eb)}.actions{display:flex;flex-wrap:wrap;gap:16px;margin:16px 0}.history-review{margin:24px 0}.history-review p,.history-review small{color:var(--text-secondary,#64748b)}.history-review ul{padding:0;list-style:none}.history-review li{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}.history-review li span{flex:1;min-width:180px}.error{color:#b91c1c}.notice{color:#047857}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;margin-bottom:24px}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--border,#e2e8f0)}@media(max-width:640px){.offering-page{padding:0}.grid{grid-template-columns:1fr}.panel{padding:16px}}
+
+.offering-create { gap: 24px; align-items: start; border-radius: var(--radius-lg); }
+.create-heading { display: flex; align-items: flex-start; gap: 12px; }
+.create-mark { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent); font-size: 24px; }
+.create-heading h2 { font-size: 20px; line-height: 1.4; }
+.create-heading p { margin: 6px 0 0; color: var(--muted); font-size: var(--text-sm); }
+.offering-create .candidate-field, .offering-create .create-field { gap: 8px; color: var(--fg); font-weight: 500; }
+.offering-create .create-picker, .offering-create select { min-height: 44px; padding: 10px 12px; font-family: var(--font-body); font-size: var(--text-base); line-height: 1.5; border-radius: var(--radius-md); }
+.offering-create select { height: 44px; }
+.offering-create .create-picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.create-picker span { min-width: 0; overflow-wrap: anywhere; }
+.create-picker svg { flex-shrink: 0; color: var(--muted); }
+.offering-create .create-picker:disabled, .offering-create select:disabled { background: var(--surface-sunken); }
+.offering-create .create-picker:focus-visible, .offering-create select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.offering-create small { color: var(--muted); font-size: var(--text-sm); font-weight: 400; line-height: 1.5; }
+.create-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--border); padding-top: 20px; }
+.create-footer > span { color: var(--muted); font-size: var(--text-sm); }
+.offering-create .create-submit { min-height: 44px; background: var(--accent); border-color: var(--accent); color: var(--surface); font-family: var(--font-body); font-size: var(--text-base); font-weight: 600; }
+.offering-create .create-submit:disabled { background: var(--surface-subtle); border-color: var(--border); color: var(--muted); opacity: 1; }
+@media (max-width: 640px) { .create-footer { align-items: stretch; flex-direction: column; } .create-submit { width: 100%; } }
 </style>

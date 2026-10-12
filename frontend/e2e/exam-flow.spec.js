@@ -47,7 +47,8 @@ test.describe('成绩详情打印（教师）', () => {
 
     // 从考试管理页进入 E2E 测试考试的成绩总览（不依赖固定 id）
     await page.goto('/teacher/exams')
-    await expect(page.getByText('考试管理')).toBeVisible({ timeout: 15000 })
+    // 页面标题唯一，避免与侧栏/面包屑同名文本冲突（strict mode）
+    await expect(page.getByRole('heading', { name: '考试管理' })).toBeVisible({ timeout: 15000 })
     await page.locator('tr', { hasText: 'E2E 测试考试' }).getByRole('button', { name: '成绩分析' }).click()
     await expect(page.getByText(/成绩总览/)).toBeVisible({ timeout: 15000 })
 

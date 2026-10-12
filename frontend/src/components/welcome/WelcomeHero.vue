@@ -110,7 +110,7 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Score panel: also integrated into the dark theme -->
+        <!-- Score panel: light surface for clear contrast with the code window -->
         <div class="score-strip" :class="{ visible: showScore }">
           <div class="score-badge">AI</div>
           <div class="score-text">
@@ -359,10 +359,11 @@ onMounted(() => {
 .txt-accent { color: var(--info) !important; }
 .txt-success { color: var(--success) !important; }
 
-/* ====== Score Strip (below code window, dark themed) ====== */
+/* ====== Score Strip (light surface beneath the code window) ====== */
 .score-strip {
   margin-top: 10px;
-  background: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 14px 18px;
   display: flex;
@@ -402,12 +403,12 @@ onMounted(() => {
 .score-label {
   font-size: 14px;
   font-weight: 600;
-  color: var(--border);
+  color: var(--fg);
 }
 
 .score-comment {
   font-size: 12px;
-  color: oklch(0.99 0.001 95 / 0.45);
+  color: var(--muted);
   line-height: 1.4;
 }
 

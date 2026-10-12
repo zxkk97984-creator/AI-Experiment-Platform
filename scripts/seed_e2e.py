@@ -1,6 +1,10 @@
 """E2E 种子数据——直接通过模型插入，绕过 API 认证。
 
 幂等：按唯一标识（用户名/标题）检查，已存在则复用并跳过创建，可安全重复执行。
+
+自 2026-10-12 起同时建立**授课安排（CourseOffering）**并把课程内任务挂到该 offering：
+作业/考试列表与受众解析都以授课实例为范围，缺少 offering 的种子数据在真实全栈
+E2E 里看不到任何考试（历史上该脚本缺少这一步）。
 """
 import sys
 from pathlib import Path
@@ -13,10 +17,12 @@ from app.models import (
     User, Course, CourseEnrollment, Chapter, Lesson,
     Assignment, JudgeQuestion, Exam, ExamQuestion, ExamSubmission, ExamAnswer,
     ExperimentModule, ExperimentRecord, ExperimentSubmission,
-    NotebookTemplate, NotebookTemplateVersion,
+    NotebookTemplate, NotebookTemplateVersion, AcademicTerm, CourseOffering,
+    CourseTeachingClass, TeachingClass,
 )
 from app.security import hash_password
-from datetime import datetime, timezone
+from app.services.offering_service import enroll_student
+from datetime import date, datetime, timedelta, timezone
 
 db = SessionLocal()
 now = datetime.now(timezone.utc)
@@ -65,6 +71,37 @@ try:
         print(f"  [创建] 选课 course={cid} student={student.id}")
     else:
         print("  [跳过] 选课")
+
+    # ── 3b. 授课安排（offering）：任务列表与受众都以它为范围 ──
+    print("3b. 授课安排")
+    term = db.query(AcademicTerm).filter_by(code="e2e-term").first()
+    if not term:
+        term = AcademicTerm(code="e2e-term", name="E2E 学期",
+                            start_date=date.today(),
+                            end_date=date.today() + timedelta(days=180),
+                            status="active")
+        db.add(term)
+        db.flush()
+        print(f"  [创建] 学期 id={term.id}")
+    klass = db.query(TeachingClass).filter_by(code="e2e-class").first()
+    if not klass:
+        klass = TeachingClass(academic_term_id=term.id, code="e2e-class",
+                              name="E2E 教学班", status="active")
+        db.add(klass)
+        db.flush()
+        db.add(CourseTeachingClass(course_id=cid, teaching_class_id=klass.id))
+        print(f"  [创建] 教学班 id={klass.id}")
+    offering = db.query(CourseOffering).filter_by(course_id=cid, teacher_id=teacher.id,
+                                                  status="active").first()
+    if not offering:
+        offering = CourseOffering(course_id=cid, academic_term_id=term.id,
+                                  teaching_class_id=klass.id, teacher_id=teacher.id,
+                                  status="active")
+        db.add(offering)
+        db.flush()
+        print(f"  [创建] 授课实例 id={offering.id}")
+    enroll_student(db, offering, student.id, origin="class")
+    print(f"  [就绪] 学生已加入授课实例 offering={offering.id}")
 
     # ── 4. 章节 + 课时 ──
     print("4. 章节和课时")
@@ -178,6 +215,15 @@ try:
         print(f"  [创建] 实验记录 id={record.id}")
     else:
         print("  [跳过] 实验记录")
+
+    # ── 9. 任务挂到授课实例（受众/列表范围） ──
+    print("9. 任务归属授课实例")
+    bound = 0
+    for model in (Assignment, Exam):
+        for task in db.query(model).filter_by(course_id=cid, offering_id=None).all():
+            task.offering_id = offering.id
+            bound += 1
+    print(f"  [就绪] 已绑定 {bound} 个任务到 offering={offering.id}")
 
     db.commit()
     print("\n[创建] 种子数据就绪！")

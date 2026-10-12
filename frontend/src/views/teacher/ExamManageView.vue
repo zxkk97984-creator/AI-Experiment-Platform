@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import TeacherPageHeader from '../../components/teacher/TeacherPageHeader.vue'
@@ -10,11 +10,15 @@ import { examsAPI } from '../../api/exams.js'
 import { offeringsAPI } from '../../api/offerings.js'
 import { coursesAPI } from '../../api/courses.js'
 import { useAppStore } from '../../stores/app.js'
+import { areaPathForRole } from '../../router/roleHome.js'
 import { formatDateTime } from '../../utils/format.js'
 import { EXAM_STATUS_MAP, statusBadge } from '../../utils/status.js'
 
+const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
+// 教师与管理员复用同一页面：链接前缀取自当前已鉴权路由
+const area = (suffix) => areaPathForRole((route.path || '').startsWith('/admin') ? 'admin' : 'teacher', suffix)
 const exams = ref([])
 const courses = ref([])
 const offerings = ref([])
@@ -83,7 +87,7 @@ async function handleSave(payload) {
     app.showToast('创建成功', 'success')
     createOpen.value = false
     await fetchExams()
-    if (res?.data?.id) router.push(`/teacher/exams/${res.data.id}/edit`)
+    if (res?.data?.id) router.push(area(`/exams/${res.data.id}/edit`))
   } catch (error) { app.showToast(error.response?.data?.detail?.message || '创建失败', 'error') }
 }
 onMounted(() => { fetchExams(); fetchCourses(); fetchOfferings() })
@@ -118,9 +122,9 @@ onMounted(() => { fetchExams(); fetchCourses(); fetchOfferings() })
               <td data-label="参与人数">{{ exam.participant_count ?? 0 }}<span v-if="exam.expected_count"> / {{ exam.expected_count }}</span></td>
               <td data-label="最近更新" class="muted-cell">{{ formatDateTime(exam.updated_at || exam.created_at) }}</td>
               <td data-label="操作" class="row-actions">
-                <button class="text-action" @click="router.push(`/teacher/exams/${exam.id}/edit`)">编辑试卷</button>
-                <button class="text-action" @click="router.push(`/teacher/exams/${exam.id}/grades`)">成绩分析</button>
-                <button v-if="displayStatus(exam) === 'draft'" class="publish-action" @click="router.push(`/teacher/exams/${exam.id}/edit`)">发布检查</button>
+                <button class="text-action" @click="router.push(area(`/exams/${exam.id}/edit`))">编辑试卷</button>
+                <button class="text-action" @click="router.push(area(`/exams/${exam.id}/grades`))">成绩分析</button>
+                <button v-if="displayStatus(exam) === 'draft'" class="publish-action" @click="router.push(area(`/exams/${exam.id}/edit`))">发布检查</button>
               </td>
             </tr></tbody>
           </table>
