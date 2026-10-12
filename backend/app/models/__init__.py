@@ -953,6 +953,14 @@ class NotebookTemplate(TimestampMixin, Base):
         String(16), nullable=False, default="unrestricted"
     )  # unrestricted | restricted
     draft_allowed_imports: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 草稿运行配置（Q1：发布前配置、发布后锁定） ──────────────
+    # 发布时复制到新的 NotebookTemplateVersion，历史版本不更新
+    draft_cell_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default=text("120")
+    )
+    draft_kernel_idle_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=900, server_default=text("900")
+    )
 
     owner: Mapped[User] = relationship(foreign_keys=[owner_id])
     versions: Mapped[list["NotebookTemplateVersion"]] = relationship(
@@ -997,6 +1005,14 @@ class NotebookTemplateVersion(Base):
         String(16), nullable=False, default="unrestricted"
     )
     allowed_imports: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 发布运行配置快照（Q1） ────────────────────────────────
+    # 从草稿复制，发布后不可变；已开始实验的记录不随新版本自动升级
+    cell_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default=text("120")
+    )
+    kernel_idle_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=900, server_default=text("900")
+    )
 
     template: Mapped[NotebookTemplate] = relationship(
         back_populates="versions",
@@ -1839,6 +1855,8 @@ from .credential_delivery import CredentialDelivery  # noqa: E402,F401
 from .course_material import CourseMaterial, ChapterActivityLink  # noqa: E402,F401
 
 from .gradebook import Gradebook, GradebookCategory, GradebookColumn, GradebookEntry, GradebookAdjustment, GradebookSnapshot  # noqa: E402,F401
+
+from .kernel_exec import KernelExecution  # noqa: E402,F401
 
 from .ai_setup import AiGradingSetupJob, RubricTrialRun  # noqa: E402,F401
 from .appeal import GradeAppeal  # noqa: E402,F401

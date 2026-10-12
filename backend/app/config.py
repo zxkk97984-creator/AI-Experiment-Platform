@@ -72,7 +72,12 @@ class Settings(BaseSettings):
     # 存量兼容路径与开发环境。安全参数不在此处放松。
     kernel_image: str = "dai-kernel-python:latest"
     jupyter_enabled: bool = False
-    worker_role: Literal["judge", "ai"] = "judge"
+    # ── 交互内核运行配置（Q1） ────────────────────────────────
+    # 单格执行超时默认 120 秒（教师可设 10–1800 秒）；内核空闲回收默认 900 秒
+    # （教师可设 300–7200 秒）。发布后锁定在模板版本上，已有实验继续用原配置。
+    kernel_cell_timeout_seconds: int = Field(default=120, ge=10, le=1800)
+    kernel_idle_seconds: int = Field(default=900, ge=300, le=7200)
+    worker_role: Literal["judge", "ai", "kernel"] = "judge"
     studio_storage_dir: str = str(
         Path(__file__).resolve().parents[1] / "storage" / "studio"
     )
