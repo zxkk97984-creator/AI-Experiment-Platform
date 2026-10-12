@@ -50,6 +50,10 @@ const storeState = vi.hoisted(() => ({
   setCellHidden: vi.fn(),
   setEnvironment: vi.fn(),
   setImportPolicy: vi.fn(),
+  // Q1：运行配置（发布表单）
+  cellTimeoutSeconds: 120,
+  kernelIdleSeconds: 900,
+  setKernelConfig: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -231,6 +235,36 @@ describe('StudioEditor', () => {
       expect(wrapper.text()).toContain('运行环境：Python 基础 v1')
       expect(wrapper.text()).toContain('可用库：pytest')
       expect(wrapper.text()).not.toContain('本次将发布：Python 基础 v1')
+    })
+
+    it('requires the run configuration inside the publish form and refuses out-of-range values', async () => {
+      const wrapper = await mountEditor()
+      await wrapper.findAll('button').find((button) => button.text() === '发布').trigger('click')
+      await flushPromises()
+
+      const timeoutInput = wrapper.get('input[aria-label="单格执行超时秒数"]')
+      const idleInput = wrapper.get('input[aria-label="内核空闲回收分钟数"]')
+      expect(timeoutInput.element.value).toBe('120')
+      expect(idleInput.element.value).toBe('15')
+      expect(wrapper.text()).toContain('发布后锁定')
+
+      const modal = wrapper.get('.publish-modal')
+      const modalPublish = () => modal.findAll('button').find((button) => button.text() === '发布')
+
+      await timeoutInput.setValue('5')
+      await flushPromises()
+      expect(modalPublish().element.disabled).toBe(true)
+      expect(wrapper.text()).toContain('单格执行超时需在 10–1800 秒之间')
+
+      await timeoutInput.setValue('300')
+      await idleInput.setValue('60')
+      await flushPromises()
+      expect(modalPublish().element.disabled).toBe(false)
+      await modalPublish().trigger('click')
+      await flushPromises()
+
+      expect(storeState.setKernelConfig).toHaveBeenCalledWith({ cellTimeoutSeconds: 300, kernelIdleSeconds: 3600 })
+      expect(storeState.publish).toHaveBeenCalled()
     })
   })
 

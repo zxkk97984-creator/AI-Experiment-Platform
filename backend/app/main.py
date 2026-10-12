@@ -42,10 +42,19 @@ def _scan_expired_exams_once(owner_id: str):
         return scan_expired_exams(db, utc_now())
 
 
-def _cleanup_kernel_once():
+def _cleanup_kernel_once(owner_id: str):
+    from app.config import get_settings
     from app.services.kernel_manager import get_kernel_manager
+    from app.services.scheduler_lease import try_acquire_lease
 
-    get_kernel_manager().cleanup_idle(max_idle_seconds=900)
+    with SessionLocal() as db:
+        # 多 API 实例下同一时刻只有一个实例执行内核清理（本协程此前是唯一无租约的后台任务）
+        if not try_acquire_lease(db, "kernel-cleanup", owner_id, ttl_seconds=240):
+            return None
+        # 有在途执行的内核不会被回收（cleanup_idle 内部查 kernel_executions）
+        get_kernel_manager().cleanup_idle(
+            max_idle_seconds=get_settings().kernel_idle_seconds, db=db
+        )
 
 
 def _normalize_detail(detail):
@@ -92,11 +101,16 @@ async def _expiry_scanner():
 
 
 async def _kernel_cleanup():
-    """定期清理空闲 Kernel session"""
+    """定期清理空闲 Kernel session（多副本 DB 租约互斥）"""
+    import os
+    import socket
+    import uuid
+
+    owner_id = f"api:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     while True:
         try:
-            await asyncio.sleep(300)  # 每 5 分钟清理一次
-            await _run_sync_in_thread(_cleanup_kernel_once)  # 15 分钟无活动则销毁
+            await asyncio.sleep(300)  # 每 5 分钟扫描一次；空闲阈值由 kernel_idle_seconds 决定
+            await _run_sync_in_thread(_cleanup_kernel_once, owner_id)
         except Exception:
             logger.exception("Kernel 清理异常")
 

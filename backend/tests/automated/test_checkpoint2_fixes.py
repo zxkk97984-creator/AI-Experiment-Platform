@@ -14,6 +14,7 @@ from app import models
 from app.database import Base
 from app.services.kernel_manager import KernelManager
 from conftest import auth_header, create_course_db, create_user, login, seed_basic_environment
+from kernel_test_support import run_cell
 from teaching_test_support import grant_experiment
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -217,7 +218,8 @@ class FakeKernelManager:
 
     def execute(self, record_id, code):
         self.executed.append((record_id, code))
-        return {"outputs": [], "execution_time_ms": 10}
+        return {"outputs": [], "execution_time_ms": 10,
+                "outcome": "succeeded", "state_lost": False, "message": None}
 
     def destroy(self, record_id):
         self.destroyed.append(record_id)
@@ -252,8 +254,8 @@ def fake_km():
     return FakeKernelManager()
 
 
-def test_hidden_cells_executed_in_order_once_per_session(client, db_session_factory, fake_km):
-    """hidden cell 按 order 执行、同一 session 只初始化一次"""
+def test_hidden_cells_executed_in_order_once_per_session(client, db_session_factory, fake_km, test_settings):
+    """hidden cell 按 order 执行、同一 session 只初始化一次（异步执行同步跑完）"""
     _, s_tok, _, lid, _, _ = _setup_lesson_with_template(client, db_session_factory)
 
     with patch("app.api.experiments.get_kernel_manager", return_value=fake_km):
@@ -262,18 +264,14 @@ def test_hidden_cells_executed_in_order_once_per_session(client, db_session_fact
         assert r.status_code in (200, 201)
         rid = r.json()["id"]
 
-        r = client.post(f"/api/v1/experiments/records/{rid}/cells/c1/execute",
-                        headers=auth_header(s_tok), json={"code": "print(1)"})
-        assert r.status_code == 200, r.text
+        run_cell(client, db_session_factory, test_settings, fake_km, rid, "c1", "print(1)", auth_header(s_tok))
 
         # hidden cell c3 被执行过
         hidden_codes = [c for (rec, c) in fake_km.executed if c == "secret()"]
         assert len(hidden_codes) == 1, f"hidden cell 应执行一次 实际 {len(hidden_codes)}"
 
         # 第二次 execute 同一 session → hidden 不重复执行
-        r = client.post(f"/api/v1/experiments/records/{rid}/cells/c4/execute",
-                        headers=auth_header(s_tok), json={"code": "x=1"})
-        assert r.status_code == 200
+        run_cell(client, db_session_factory, test_settings, fake_km, rid, "c4", "x=1", auth_header(s_tok))
         hidden_codes_after = [c for (rec, c) in fake_km.executed if c == "secret()"]
         assert len(hidden_codes_after) == 1, "hidden 不应重复执行"
 
@@ -306,7 +304,7 @@ def test_hidden_cell_failure_destroys_kernel(client, db_session_factory):
         assert len(fkm.destroyed) == 1
 
 
-def test_hidden_cells_not_in_record_or_detail(client, db_session_factory, fake_km):
+def test_hidden_cells_not_in_record_or_detail(client, db_session_factory, fake_km, test_settings):
     """hidden cell ID/源码/输出/数量不出现 record 和 detail"""
     _, s_tok, _, lid, _, _ = _setup_lesson_with_template(client, db_session_factory)
 
@@ -317,9 +315,8 @@ def test_hidden_cells_not_in_record_or_detail(client, db_session_factory, fake_k
         # cells_sources 不应含 hidden cell
         assert "c3" not in r.json().get("cells_sources", {})
 
-        # 执行一个用户 cell
-        client.post(f"/api/v1/experiments/records/{rid}/cells/c1/execute",
-                    headers=auth_header(s_tok), json={"code": "print(1)"})
+        # 执行一个用户 cell（异步 + 同步跑完）
+        run_cell(client, db_session_factory, test_settings, fake_km, rid, "c1", "print(1)", auth_header(s_tok))
 
         # GET detail
         r = client.get(f"/api/v1/experiments/records/{rid}", headers=auth_header(s_tok))
@@ -388,8 +385,8 @@ def test_save_cells_rejects_readonly_markdown_hidden_unknown(client, db_session_
 # 问题 6: 可见执行序号
 # ═══════════════════════════════════════════════════════════════
 
-def test_execution_count_increments_per_visible_cell(client, db_session_factory, fake_km):
-    """同一 cell 连跑三次得到 1、2、3"""
+def test_execution_count_increments_per_visible_cell(client, db_session_factory, fake_km, test_settings):
+    """同一 cell 连跑三次得到 1、2、3（异步执行：POST 202 → 同步跑完 → 读执行状态）"""
     _, s_tok, _, lid, _, _ = _setup_lesson_with_template(client, db_session_factory)
 
     with patch("app.api.experiments.get_kernel_manager", return_value=fake_km):
@@ -397,9 +394,11 @@ def test_execution_count_increments_per_visible_cell(client, db_session_factory,
         rid = r.json()["id"]
 
         for expected_count in (1, 2, 3):
-            r = client.post(f"/api/v1/experiments/records/{rid}/cells/c1/execute",
-                            headers=auth_header(s_tok), json={"code": "print(1)"})
-            assert r.status_code == 200
+            execution_id = run_cell(client, db_session_factory, test_settings, fake_km,
+                                    rid, "c1", "print(1)", auth_header(s_tok))
+            r = client.get(f"/api/v1/experiments/records/{rid}/executions/{execution_id}",
+                           headers=auth_header(s_tok))
+            assert r.status_code == 200, r.text
             assert r.json()["execution_count"] == expected_count, (
                 f"执行第{expected_count}次 期望{expected_count} 实际{r.json()['execution_count']}"
             )
@@ -518,6 +517,7 @@ def test_migration_downgrade_one_step_then_upgrade_head(tmp_path):
     env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
     env["DAI_ALLOW_LAB_DOWNGRADE"] = "true"
     env["DAI_ALLOW_TEACHING_DOWNGRADE"] = "1"
+    env["DAI_ALLOW_EXAM_INTEGRITY_DOWNGRADE"] = "1"
 
     _upgrade_head_seeded(env)
 

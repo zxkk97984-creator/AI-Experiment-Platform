@@ -6,7 +6,9 @@ Kernel Session 管理器
 - 每次 execute 用 docker exec -i <container> python /.dai/kernel_runner.py
 - trusted runner 在容器内通过 jupyter_client.BlockingKernelClient 连接 ipykernel
 - 学生代码通过 stdin JSON 传入，不出现于 argv
-- 硬超时 30s → rm -f 旧容器 + 立即 create_session 重建
+- 单格超时来自模板版本/配置（10–1800s）：超时只中断当前执行，保留 kernel 与内存变量；
+  只有内核探测无响应才销毁重建，并在结果里标记 state_lost（「状态已丢失，请从头重跑」）
+- Redis 执行锁从「nx ex=60 无续期」改为租约 + 心跳续期，长执行不会被放行第二个执行者
 - Redis 持久化 session + hidden init marker
 """
 import json
@@ -15,6 +17,7 @@ import math
 import os
 import secrets
 import subprocess
+import threading
 import time
 from typing import Optional
 
@@ -22,9 +25,27 @@ from app.config import Settings, get_settings
 
 logger = logging.getLogger("kernel_manager")
 
+# 兼容回退值：生产调用方（学生执行 / 隐藏初始化 / 教师预览）必须显式传
+# timeout_seconds（模板版本或配置），只有未传的老调用点才落到这里。
 KERNEL_HARD_TIMEOUT = 30
+# 超时后探测内核是否还能响应（runner 会等 ipykernel 的 idle 状态）。
+KERNEL_PROBE_TIMEOUT = 8
+# 超时/取消后等 runner 自然收尾的宽限期：拿到部分输出并确认当前执行已结束。
+KERNEL_INTERRUPT_GRACE = 5
+# 执行锁租约：TTL 必须大于续期间隔（TTL/3），否则长执行中途锁会过期。
+EXEC_LOCK_TTL = 60
 RUNNER_PATH = "/opt/dai/kernel_runner.py"
 LEGACY_RUNNER_PATH = "/.dai/kernel_runner.py"
+
+# 超时只中断当前执行（保留变量）时的用户可见文案
+TIMEOUT_PRESERVED_MESSAGE = (
+    "单元格执行超过 {seconds} 秒，已中断本次执行：内核与内存变量已保留；"
+    "中断不撤销代码已经产生的修改"
+)
+# 内核无响应、必须销毁重建时的用户可见文案（状态确实丢失）
+STATE_LOST_MESSAGE = (
+    "内核无响应，已重建：内存中的变量、导入与模型状态已丢失，请从头重新运行全部单元格"
+)
 
 
 class KernelSession:
@@ -484,8 +505,17 @@ class KernelManager:
                                    lesson_storage_dir=lesson_storage_dir, memory_mb=memory_mb,
                                    cpus=cpus, resource_factory=resource_factory)
 
-    def execute(self, record_id: int, code: str) -> dict:
-        """通过 docker exec + trusted runner 在持久 ipykernel 中执行代码"""
+    def execute(self, record_id: int, code: str, *, timeout_seconds: int | None = None,
+                interrupt_event=None) -> dict:
+        """通过 docker exec + trusted runner 在持久 ipykernel 中执行代码。
+
+        timeout_seconds：本次执行的超时（模板版本/配置，10–1800s）。
+        interrupt_event：worker 的取消信号（threading.Event），置位时中断当前执行。
+
+        超时语义（规格）：先只中断当前执行、保留 kernel 与变量；只有探测确认内核
+        无响应才销毁重建，且返回 state_lost=True + 明确文案。
+        返回 outcome ∈ succeeded | timeout | cancelled；异常仍抛 RuntimeError。
+        """
         from app.services.lab_node import require_interactive_node
         require_interactive_node(self.settings)
         session = self._sessions.get(record_id)
@@ -493,13 +523,17 @@ class KernelManager:
             raise RuntimeError(f"Kernel session {record_id} 不可用")
         self._touch_resources(record_id, session)
 
-        # Redis 互斥锁（fail closed）
+        timeout = int(timeout_seconds or KERNEL_HARD_TIMEOUT)
+        if timeout <= 0:
+            raise RuntimeError("执行超时配置无效")
+
+        # Redis 互斥锁（fail closed）：nx + TTL 租约，运行期间由心跳线程续期
         import redis
         lock_key = f"kernel:lock:{record_id}"
         lock_token = self._make_lock_token()
         try:
             r = redis.from_url(self.settings.redis_url)
-            acquired = r.set(lock_key, lock_token, nx=True, ex=60)
+            acquired = r.set(lock_key, lock_token, nx=True, ex=EXEC_LOCK_TTL)
             if not acquired:
                 raise RuntimeError("Kernel 正忙，请等待当前代码执行完成")
         except RuntimeError:
@@ -507,6 +541,15 @@ class KernelManager:
         except Exception as e:
             raise RuntimeError(f"Redis 不可用，无法获取执行锁: {e}") from e
 
+        renew_stop = threading.Event()
+        renew_thread = threading.Thread(
+            target=self._renew_exec_lock, args=(r, lock_key, lock_token, renew_stop),
+            kwargs={"ttl": EXEC_LOCK_TTL},
+            daemon=True, name=f"kernel-exec-lock-{record_id}",
+        )
+        renew_thread.start()
+        started = time.perf_counter()
+        interrupted = False
         try:
             # docker exec 运行 trusted runner，代码通过 stdin JSON 传入
             runner_path = session.runner_path or (
@@ -517,58 +560,66 @@ class KernelManager:
                 "docker", "exec", "-i", session.container_name,
                 "python", runner_path,
             ]
-            start = time.perf_counter()
             try:
-                result = subprocess.run(
-                    exec_cmd,
-                    input=json.dumps({"code": code}),
-                    capture_output=True, text=True,
-                    timeout=KERNEL_HARD_TIMEOUT,
+                proc = subprocess.Popen(
+                    exec_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True,
                 )
-                elapsed_ms = int((time.perf_counter() - start) * 1000)
-            except subprocess.TimeoutExpired:
-                elapsed_ms = int((time.perf_counter() - start) * 1000)
-                # 保存旧 session 信息
-                old_storage = session.lesson_storage_dir
-                # 销毁旧容器
-                self.destroy(record_id)
-                # 立即重建
+            except OSError as exc:
+                raise RuntimeError(f"Kernel runner 启动失败: {exc}") from exc
+
+            deadline = started + timeout
+            payload = json.dumps({"code": code})
+            stdout = stderr = None
+            timed_out = False
+            first_call = True
+            while True:
+                if interrupt_event is not None and interrupt_event.is_set() and not interrupted:
+                    interrupted = True
+                    self._send_interrupt(session)
+                remaining = deadline - time.perf_counter()
                 try:
-                    self.create_session(record_id, old_storage, image_ref=session.image_ref,
-                        environment_version_id=session.environment_version_id,
-                        memory_mb=session.memory_mb, cpus=session.cpus)
-                except Exception as rebuild_err:
-                    raise RuntimeError(
-                        f"代码执行超时（>{KERNEL_HARD_TIMEOUT}s），重建 kernel 失败: {rebuild_err}"
-                    ) from rebuild_err
-                raise RuntimeError(
-                    f"代码执行超时（>{KERNEL_HARD_TIMEOUT}s），kernel 已重建"
-                )
+                    # 轮询式等待：既能及时响应取消，也能在超时后先中断再判断。
+                    # 代码只在首次 communicate(input=...) 写入 stdin —— 不能手动 close()
+                    # 后再 communicate()（CPython 3.12 会 flush 已关闭的 stdin 抛 ValueError）。
+                    if first_call:
+                        stdout, stderr = proc.communicate(
+                            input=payload, timeout=min(0.5, max(0.05, remaining)))
+                    else:
+                        stdout, stderr = proc.communicate(
+                            timeout=min(0.5, max(0.05, remaining)))
+                    break
+                except subprocess.TimeoutExpired:
+                    if time.perf_counter() >= deadline:
+                        timed_out = True
+                        self._send_interrupt(session)
+                        stdout, stderr = self._collect_after_interrupt(proc)
+                        break
+                finally:
+                    first_call = False
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-            if result.returncode != 0:
-                runner_error = (result.stderr or result.stdout or "unknown runner error").strip()
+            if timed_out:
+                return self._timeout_outcome(session, record_id, stdout, stderr,
+                                            elapsed_ms, timeout)
+            if interrupted:
+                # 取消：交回已产生的输出与耗时，是否落库由 worker 的终态判定决定
+                return {"outputs": self._parse_runner_output(stdout, stderr),
+                        "execution_time_ms": elapsed_ms, "outcome": "cancelled",
+                        "state_lost": False, "timeout_seconds": timeout,
+                        "message": "已中断本次执行"}
+            if proc.returncode != 0:
+                runner_error = (stderr or stdout or "unknown runner error").strip()
                 raise RuntimeError(f"Kernel runner 执行失败: {runner_error}")
-
-            # 解析 runner 输出
-            outputs = []
-            try:
-                data = json.loads(result.stdout.strip() or "{}")
-                if data.get("error"):
-                    outputs.append({"msg_type": "error", "content": {"text": data["error"]}})
-                for o in data.get("outputs", []):
-                    outputs.append(o)
-            except json.JSONDecodeError:
-                if result.stdout:
-                    outputs.append({"msg_type": "stream", "content": {"name": "stdout", "text": result.stdout}})
-                if result.stderr:
-                    outputs.append({"msg_type": "stream", "content": {"name": "stderr", "text": result.stderr}})
-
-            return {"outputs": outputs, "execution_time_ms": elapsed_ms}
+            return {"outputs": self._parse_runner_output(stdout, stderr),
+                    "execution_time_ms": elapsed_ms, "outcome": "succeeded",
+                    "state_lost": False, "timeout_seconds": timeout, "message": None}
 
         finally:
+            renew_stop.set()
+            renew_thread.join(timeout=5)
             # token-safe unlock
             try:
-                r = redis.from_url(self.settings.redis_url)
                 r.eval(
                     "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
                     1, lock_key, lock_token,
@@ -577,16 +628,107 @@ class KernelManager:
                 logger.debug("锁释放失败或已过期 record_id=%d", record_id, exc_info=True)
             session.last_active_at = time.time()
 
+    @staticmethod
+    def _renew_exec_lock(r, lock_key, lock_token, stop_event, *, ttl=EXEC_LOCK_TTL,
+                         interval=None):
+        """执行锁心跳：只有仍持有该 token 时才续期（CAS），避免续到别人的锁。"""
+        wait = interval if interval is not None else max(0.05, ttl / 3)
+        script = ("if redis.call('get', KEYS[1]) == ARGV[1] "
+                  "then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end")
+        while not stop_event.wait(wait):
+            try:
+                if not r.eval(script, 1, lock_key, lock_token, ttl):
+                    return
+            except Exception:
+                # Redis 抖动：下个周期再试。锁 TTL 仍在，不会放行第二个执行者。
+                logger.debug("执行锁续期失败 %s", lock_key, exc_info=True)
+
+    @staticmethod
+    def _send_interrupt(session):
+        """只中断容器内当前执行（SIGINT 给 ipykernel），不动容器、不丢变量。"""
+        try:
+            subprocess.run(
+                ["docker", "exec", session.container_name, "kill", "-INT", "1"],
+                capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("中断 kernel 当前执行失败 record=%s: %s", session.record_id, exc)
+
+    @classmethod
+    def _collect_after_interrupt(cls, proc, *, grace=KERNEL_INTERRUPT_GRACE):
+        """中断后等 runner 收尾以取回部分输出；超宽限期则杀掉 runner 进程。"""
+        try:
+            return proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                return proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                return None, None
+
+    @staticmethod
+    def _parse_runner_output(stdout, stderr) -> list[dict]:
+        outputs = []
+        try:
+            data = json.loads((stdout or "").strip() or "{}")
+            if data.get("error"):
+                outputs.append({"msg_type": "error", "content": {"text": data["error"]}})
+            for o in data.get("outputs", []):
+                outputs.append(o)
+        except json.JSONDecodeError:
+            if stdout:
+                outputs.append({"msg_type": "stream", "content": {"name": "stdout", "text": stdout}})
+            if stderr:
+                outputs.append({"msg_type": "stream", "content": {"name": "stderr", "text": stderr}})
+        return outputs
+
+    def _probe_kernel(self, session, *, timeout=KERNEL_PROBE_TIMEOUT) -> bool:
+        """内核是否还能响应：跑一次最小 runner（等 ipykernel idle），失败即无响应。"""
+        runner_path = session.runner_path or (
+            RUNNER_PATH if session.environment_version_id is not None
+            else LEGACY_RUNNER_PATH
+        )
+        try:
+            probe = subprocess.run(
+                ["docker", "exec", "-i", session.container_name, "python", runner_path],
+                input=json.dumps({"code": "pass"}),
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return probe.returncode == 0
+
+    def _timeout_outcome(self, session, record_id, stdout, stderr, elapsed_ms, timeout) -> dict:
+        """超时结果：能恢复 → 保留变量；不能恢复 → 销毁重建并明确提示状态丢失。"""
+        outputs = self._parse_runner_output(stdout, stderr)
+        if self._probe_kernel(session):
+            return {"outputs": outputs, "execution_time_ms": elapsed_ms, "outcome": "timeout",
+                    "state_lost": False, "timeout_seconds": timeout,
+                    "message": TIMEOUT_PRESERVED_MESSAGE.format(seconds=timeout)}
+        # 内核无响应：销毁重建（内存状态确实丢失）
+        rebuild_error = None
+        old_storage = session.lesson_storage_dir
+        try:
+            self.destroy(record_id)
+            self.create_session(record_id, old_storage, image_ref=session.image_ref,
+                                environment_version_id=session.environment_version_id,
+                                memory_mb=session.memory_mb, cpus=session.cpus)
+        except Exception as exc:  # noqa: BLE001 - 重建失败也要给出明确状态丢失结论
+            rebuild_error = exc
+            logger.warning("Kernel %d 超时后重建失败: %s", record_id, exc, exc_info=True)
+        message = STATE_LOST_MESSAGE if rebuild_error is None else (
+            f"{STATE_LOST_MESSAGE}（重建失败：{rebuild_error}）"
+        )
+        return {"outputs": outputs, "execution_time_ms": elapsed_ms, "outcome": "failed",
+                "state_lost": True, "timeout_seconds": timeout, "message": message}
+
     def interrupt(self, record_id: int, *, resource_factory=None):
         session = self._sessions.get(record_id) or self._read_session_redis(record_id)
         if session and session.is_alive:
             self._adopt_resources(session, resource_factory)
             self._sessions[record_id] = session
             self._touch_resources(record_id, session)
-            subprocess.run(
-                ["docker", "exec", session.container_name, "kill", "-INT", "1"],
-                capture_output=True,
-            )
+            self._send_interrupt(session)
 
     def restart(self, record_id: int,
                 lesson_storage_dir: str = "",
@@ -641,14 +783,42 @@ class KernelManager:
         except Exception:
             logger.warning("Redis 删除 kernel 记录 %d 失败", record_id, exc_info=True)
 
-    def cleanup_idle(self, max_idle_seconds: int = 900):
+    def cleanup_idle(self, max_idle_seconds: int = 900, *, db=None):
+        """回收空闲 kernel session。
+
+        正在执行（queued/running）的内核不算空闲：回收会丢掉学生内存状态，
+        因此先查 kernel_executions 是否有在途执行；查不到就 fail-closed 保留。
+        """
         now = time.time()
         for rid, session in list(self._sessions.items()):
-            if now - session.last_active_at > max_idle_seconds:
-                try:
-                    self.destroy(rid)
-                except RuntimeError:
-                    logger.warning("空闲内核 %s 暂时无法停止，保留其资源租约", rid, exc_info=True)
+            if now - session.last_active_at <= max_idle_seconds:
+                continue
+            if self._has_in_flight_execution(rid, db):
+                logger.info("内核 %s 有在途执行，跳过空闲回收", rid)
+                continue
+            try:
+                self.destroy(rid)
+            except RuntimeError:
+                logger.warning("空闲内核 %s 暂时无法停止，保留其资源租约", rid, exc_info=True)
+
+    def _has_in_flight_execution(self, record_id: int, db=None) -> bool:
+        from app.services.kernel_queue import has_in_flight_execution
+        if db is not None:
+            try:
+                return has_in_flight_execution(db, record_id)
+            except Exception:
+                logger.warning("在途执行检查失败 record=%s，保留内核", record_id, exc_info=True)
+                return True
+        factory = self._resource_factories.get(record_id)
+        if factory is None:
+            # 未绑定数据库的存量调用点（教师预览/单元测试）：保持原有回收语义
+            return False
+        try:
+            with factory() as own:
+                return has_in_flight_execution(own, record_id)
+        except Exception:
+            logger.warning("在途执行检查失败 record=%s，保留内核", record_id, exc_info=True)
+            return True
 
     def recover_from_docker(self):
         """从 Docker label dai.record_id 恢复所有未记录的 session，重建 Redis 元数据"""

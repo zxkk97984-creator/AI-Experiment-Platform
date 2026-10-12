@@ -9,6 +9,11 @@ import sys
 
 from jupyter_client import BlockingKernelClient
 
+# 单元格最长 30 分钟（教师可配 10–1800 秒），期间可能长时间没有输出。
+# 30 秒的 iopub 等待会让「安静超过 30 秒」的单元格被误判为执行完毕（输出丢失），
+# 真正的硬边界由外层 docker exec 的 timeout 决定，所以这里等到会话最长时限。
+IOPUB_WAIT_SECONDS = 1800
+
 
 def main():
     try:
@@ -39,7 +44,7 @@ def main():
         outputs = []
         while True:
             try:
-                msg = kc.get_iopub_msg(timeout=30)
+                msg = kc.get_iopub_msg(timeout=IOPUB_WAIT_SECONDS)
             except Exception:
                 break
             mt = msg.get("msg_type", "")

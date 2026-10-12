@@ -25,9 +25,11 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    ExperimentActiveExecutionRead,
     ExperimentCellExecuteRequest,
+    ExperimentCellExecutionAccepted,
+    ExperimentCellExecutionRead,
     ExperimentCellMetadata,
-    ExperimentCellExecuteResponse,
     ExperimentCellOut,
     ExperimentCellsSaveRequest,
     ExperimentModuleCreate,
@@ -571,6 +573,10 @@ def get_record_detail(
         raise api_error(500, "VERSION_MISSING", "模板版本丢失")
 
     cells_out = []
+    from app.services import kernel_queue
+
+    active = kernel_queue.active_execution(db, record.id)
+    running_cell_id = active.cell_id if active else None
     for cell in version.cells:
         if cell.get("source_hidden"):
             continue
@@ -583,7 +589,7 @@ def get_record_detail(
             order=cell.get("order", 0),
             student_editable=cell.get("student_editable", cell.get("type", "code") == "code"),
             outputs=outputs,
-            is_running=False,
+            is_running=(cell_id == running_cell_id),
         ))
 
     entry_name = ""
@@ -702,14 +708,24 @@ def _visible_execution_count(record: ExperimentRecord, version) -> int:
     return max_count
 
 
-@router.post("/records/{record_id}/cells/{cell_id}/execute", response_model=ExperimentCellExecuteResponse)
+@router.post(
+    "/records/{record_id}/cells/{cell_id}/execute",
+    response_model=ExperimentCellExecutionAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def execute_cell(
     record_id: int,
     cell_id: str,
     payload: ExperimentCellExecuteRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
 ):
+    """受理一次异步单元格执行（202 + execution_id），由 kernel worker 执行。
+
+    准入校验、环境解析与隐藏初始化 cell 仍在请求内完成（失败要立即反馈）；
+    真正执行落库为 kernel_executions 任务，页面轮询状态、支持中断与刷新恢复。
+    """
     record = db.get(ExperimentRecord, record_id)
     if not record:
         raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
@@ -731,6 +747,10 @@ def execute_cell(
 
     if len(payload.code) > 50000:
         raise api_error(400, "CODE_TOO_LONG", "代码过长，最多 50000 字符")
+
+    # 单格超时：发布后锁定的模板版本配置优先，未绑定版本时用平台默认（10–1800s）
+    timeout_seconds = (version.cell_timeout_seconds if version
+                       else settings.kernel_cell_timeout_seconds)
 
     # Phase 5（计划 9.3/9.4）：解析实验运行环境（记录快照 digest + 模板版本 import 策略）
     env_id = getattr(record, "environment_version_id", None)
@@ -769,25 +789,27 @@ def execute_cell(
     execution_revision = record.record_revision
     execution_context = (record.offering_id, record.student_id, record.template_version_id,
                          record.environment_version_id)
+    context = {"offering_id": execution_context[0], "student_id": execution_context[1],
+               "template_version_id": execution_context[2],
+               "environment_version_id": execution_context[3],
+               "record_revision": execution_revision}
     # Admission metadata was checked with current locks. Release every policy,
     # account and teaching lock before workspace copying or Docker execution.
     db.commit()
-    _init_hidden_cells_once(record, version, db)
+    _init_hidden_cells_once(record, version, db, timeout_seconds=timeout_seconds)
 
     try:
         km = get_kernel_manager()
         from app.services.lab_workspace import ensure_record_kernel
         ensure_record_kernel(km, record, version, db, image_ref=image_ref,
                              environment_version_id=env_id)
-        result = km.execute(record_id, payload.code)
     except RuntimeError as e:
         raise api_error(409, "KERNEL_BUSY", str(e))
     except Exception as e:
         raise api_error(500, "KERNEL_ERROR", f"执行失败：{e}")
 
-    # Workspace preparation may have opened a read snapshot. Completion starts
-    # a new short metadata transaction and rechecks current account and class
-    # authority before storing or returning the execution's feedback.
+    # Workspace preparation may have opened a read snapshot. Enqueue starts a new
+    # short metadata transaction and rechecks account/class authority first.
     db.rollback()
     _require_record_accessible(record, current_user, db)
     if (record.record_revision != execution_revision
@@ -795,91 +817,133 @@ def execute_cell(
                 record.environment_version_id) != execution_context):
         raise api_error(409, "REVISION_CONFLICT", "作答或授课归属在运行期间发生变化，请刷新后重试")
 
-    # Kernel 输出中的 ModuleNotFoundError 兜底归类（计划 9.4）：不把裸 traceback 当策略错误
-    kernel_diagnostic = _classify_kernel_module_not_found(result["outputs"], policy, installed)
+    from app.services import kernel_queue
 
-    outputs = record.cells_outputs.copy()
-    execution_count = _visible_execution_count(record, version) + 1
-    final_outputs = result["outputs"]
-    if kernel_diagnostic is not None:
-        final_outputs = _replace_error_output(final_outputs, kernel_diagnostic.message)
-    outputs[cell_id] = {
-        "execution_count": execution_count,
-        "outputs": final_outputs,
-        "execution_time_ms": result["execution_time_ms"],
-    }
-    record.cells_outputs = outputs
-    db.commit()
-
-    return ExperimentCellExecuteResponse(
-        outputs=final_outputs,
-        execution_time_ms=result["execution_time_ms"],
-        execution_count=execution_count,
-        diagnostic=kernel_diagnostic,
+    execution, created = kernel_queue.enqueue_execution(
+        db,
+        record_id=record_id,
+        cell_id=cell_id,
+        code=payload.code,
+        timeout_seconds=timeout_seconds,
+        client_request_id=payload.client_request_id,
+        context=context,
+        node_id=None,
     )
+    if created:
+        kernel_queue.publish_wakeup(settings, execution.id)
+    return ExperimentCellExecutionAccepted(
+        execution_id=execution.id,
+        cell_id=execution.cell_id,
+        status=execution.status,
+        timeout_seconds=execution.timeout_seconds,
+        queue_position=kernel_queue.queue_position(db, execution),
+    )
+
+
+@router.get("/records/{record_id}/executions/active", response_model=ExperimentActiveExecutionRead)
+def get_active_execution(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """刷新恢复：返回该记录当前最新的一条在途执行（无则 execution=null）。"""
+    record = db.get(ExperimentRecord, record_id)
+    if not record:
+        raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
+    _require_record_accessible(record, current_user, db)
+
+    from app.services import kernel_queue
+
+    execution = kernel_queue.active_execution(db, record_id)
+    return ExperimentActiveExecutionRead(
+        execution=kernel_queue.execution_read(db, execution) if execution else None
+    )
+
+
+def _get_owned_execution(db: Session, record_id: int, execution_id: int):
+    from app.models.kernel_exec import KernelExecution
+
+    execution = db.get(KernelExecution, execution_id)
+    if not execution or execution.record_id != record_id:
+        raise api_error(404, "EXECUTION_NOT_FOUND", "执行任务不存在")
+    return execution
+
+
+@router.get("/records/{record_id}/executions/{execution_id}", response_model=ExperimentCellExecutionRead)
+def get_execution(
+    record_id: int,
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """轮询/刷新恢复：读取执行状态与输出。"""
+    record = db.get(ExperimentRecord, record_id)
+    if not record:
+        raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
+    _require_record_accessible(record, current_user, db)
+    execution = _get_owned_execution(db, record_id, execution_id)
+
+    from app.services import kernel_queue
+
+    return kernel_queue.execution_read(db, execution)
+
+
+@router.post("/records/{record_id}/executions/{execution_id}/cancel",
+             response_model=ExperimentCellExecutionRead)
+def cancel_execution(
+    record_id: int,
+    execution_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """中断一次执行：排队中直接取消；运行中标记后由 worker 中断当前执行。
+
+    中断不承诺撤销代码已经产生的修改；已终态的任务原样返回（幂等）。
+    """
+    record = db.get(ExperimentRecord, record_id)
+    if not record:
+        raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
+    _require_record_accessible(record, current_user, db)
+    execution = _get_owned_execution(db, record_id, execution_id)
+
+    from app.services import kernel_queue
+
+    if execution.status in kernel_queue.TERMINAL_STATUSES:
+        return kernel_queue.execution_read(db, execution)
+    execution = kernel_queue.request_cancel(db, execution_id)
+    if execution is not None and execution.status == "running":
+        kernel_queue.publish_wakeup(settings, execution_id)
+    return kernel_queue.execution_read(db, execution)
 
 
 def _classify_kernel_module_not_found(outputs: list[dict], policy, installed: set[str]):
-    """Kernel 输出中的 ModuleNotFoundError 兜底归类（计划 9.4）。
+    """兼容旧调用点：实现见 services/kernel_result.py（worker 也使用同一实现）。"""
+    from app.services.kernel_result import classify_kernel_module_not_found
 
-    预检已拦截策略错误；若代码绕过静态分析（动态拼接 import 名等）在 Kernel 内触发
-    ModuleNotFoundError，则按白名单/安装清单归为 IMPORT_NOT_ALLOWED 或
-    IMPORT_NOT_INSTALLED，不把裸 traceback 作为策略错误直接返回。
-    """
-    from app.schemas.environments import ImportDiagnosticRead
-    import re as _re
-
-    if not policy.restricted:
-        return None
-    for out in outputs:
-        if out.get("msg_type") != "error":
-            continue
-        text = (out.get("content") or {}).get("text", "") or ""
-        match = _re.search(r"No module named '([^']+)'", text)
-        if not match:
-            continue
-        module = match.group(1).split(".")[0]
-        if module not in policy.allowed_imports:
-            return ImportDiagnosticRead(
-                code="IMPORT_NOT_ALLOWED",
-                module=module,
-                message=f"导入限制：{module} 未在本实验允许范围内",
-            )
-        if module not in installed:
-            return ImportDiagnosticRead(
-                code="IMPORT_NOT_INSTALLED",
-                module=module,
-                message=f"环境配置错误：本实验允许 {module}，但当前环境未安装",
-            )
-    return None
+    return classify_kernel_module_not_found(outputs, policy, installed)
 
 
 def _replace_error_output(outputs: list[dict], message: str) -> list[dict]:
-    """把第一个 error 输出替换为无 traceback 的合成中文诊断输出。"""
-    replaced = False
-    result = []
-    for out in outputs:
-        if not replaced and out.get("msg_type") == "error":
-            result.append({"msg_type": "error", "content": {"text": message}})
-            replaced = True
-        else:
-            result.append(out)
-    if not replaced:
-        result.append({"msg_type": "error", "content": {"text": message}})
-    return result
+    """兼容旧调用点：实现见 services/kernel_result.py。"""
+    from app.services.kernel_result import replace_error_output
+
+    return replace_error_output(outputs, message)
 
 
-def _init_hidden_cells_once(record: ExperimentRecord, version, db: Session) -> None:
-    """仅在 kernel 首次创建时按 order 执行 hidden cells。成功后在 Redis + session 标记。"""
+def _init_hidden_cells_once(record: ExperimentRecord, version, db: Session,
+                            *, timeout_seconds: int | None = None) -> None:
+    """仅在 kernel 首次创建时按 order 执行 hidden cells；失败立即 KERNEL_INIT_FAILED。
+
+    隐藏单元格只承载脚手架——答案、私有测试与评分逻辑留在独立评测环境。
+    没有隐藏 cell 时不做任何数据库读取（保持「执行前已释放全部锁」的边界）。
+    """
     if not version:
         return
-    hidden_cells = sorted(
-        [c for c in version.cells if c.get("source_hidden") and c.get("type") == "code"],
-        key=lambda c: c.get("order", 0),
-    )
+    hidden_cells = [c for c in version.cells
+                    if c.get("source_hidden") and c.get("type") == "code"]
     if not hidden_cells:
         return
-
     km = get_kernel_manager()
     env_id = getattr(record, "environment_version_id", None)
     image_ref = None
@@ -890,34 +954,14 @@ def _init_hidden_cells_once(record: ExperimentRecord, version, db: Session) -> N
             image_ref = resolve_run_image_ref(db, env_id)
         except Exception:
             raise api_error(503, "ENVIRONMENT_IMAGE_MISSING", "运行环境暂不可用，请稍后重试")
-    try:
-        from app.services.lab_workspace import ensure_record_kernel
-        ensure_record_kernel(km, record, version, db, image_ref=image_ref,
-                             environment_version_id=env_id)
-    except Exception as e:
-        raise api_error(500, "KERNEL_INIT_FAILED", f"Kernel 创建失败：{e}")
-
-    version_id = record.template_version_id
-    if km.is_template_initialized(record.id, version_id):
-        return
-
-    for cell in hidden_cells:
-        try:
-            km.execute(record.id, cell["source"])
-        except Exception:
-            km.destroy(record.id)
-            raise api_error(500, "KERNEL_INIT_FAILED",
-                            f"隐藏初始化 cell {cell['id']} 执行失败，Kernel 已销毁")
+    from app.services.lab_workspace import initialize_hidden_cells
 
     try:
-        km.mark_template_initialized(record.id, version_id)
+        initialize_hidden_cells(km, record, version, db, image_ref=image_ref,
+                                environment_version_id=env_id,
+                                timeout_seconds=timeout_seconds)
     except Exception as e:
-        km.destroy(record.id)
-        raise api_error(
-            500,
-            "KERNEL_INIT_FAILED",
-            f"Kernel 初始化状态保存失败，Kernel 已销毁：{e}",
-        )
+        raise api_error(500, "KERNEL_INIT_FAILED", str(e))
 
 
 @router.post("/records/{record_id}/interrupt")
@@ -953,11 +997,19 @@ def restart_kernel(
     record_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
 ):
     record = db.get(ExperimentRecord, record_id)
     if not record:
         raise api_error(404, "RECORD_NOT_FOUND", "实验记录不存在")
     _require_record_accessible(record, current_user, db)
+
+    # 重启会销毁并重建内核：在途/排队执行必须先取消，否则排队任务会在新内核上重放
+    from app.services import kernel_queue
+
+    cancelled = kernel_queue.cancel_record_executions(db, record_id)
+    if cancelled:
+        kernel_queue.publish_wakeup(settings, None)
 
     record.cells_outputs = {}
     db.commit()

@@ -156,8 +156,8 @@ function handleUpdateSource(cellId, source) {
             <button class="menu-item" role="menuitem" @click="store.executeAllCells(); showMenu = false" :disabled="store.executingCellId !== null">
               ▶ 全部运行
             </button>
-            <button class="menu-item" role="menuitem" @click="store.interruptKernel(); showMenu = false" :disabled="!store.executingCellId">
-              ⏹ 中断 Kernel
+            <button class="menu-item" role="menuitem" @click="store.cancelExecution(); showMenu = false" :disabled="!store.executingCellId">
+              ⏹ 中断运行
             </button>
             <button class="menu-item" role="menuitem" @click="store.restartKernel(); showMenu = false">
               ↻ 重启 Kernel
@@ -177,6 +177,14 @@ function handleUpdateSource(cellId, source) {
     </div>
 
     <p v-if="store.entryDescription" class="player-desc">{{ store.entryDescription }}</p>
+
+    <!-- 异步执行状态：运行中 / 内核状态丢失必须显式提示（不把未完成当成完整结果） -->
+    <div v-if="store.kernelStateLost" class="player-exec-alert error" role="alert">
+      内核状态已丢失，请从头重新运行全部单元格
+    </div>
+    <div v-else-if="store.executingCellId" class="player-exec-alert running" role="status">
+      正在运行单元格…可随时中断；中断不撤销代码已经产生的修改
+    </div>
 
     <!-- Phase 5：环境提示（学生无需选择/切换/确认，只读展示） -->
     <div v-if="store.environmentSummary" class="player-env">
@@ -221,8 +229,9 @@ function handleUpdateSource(cellId, source) {
         :execution-count="cell.outputs?.execution_count ?? null"
         :disabled="store.executingCellId !== null && store.executingCellId !== cell.id"
         :readonly="!cell.student_editable"
-        :is-executing="store.executingCellId === cell.id"
+        :is-executing="store.executingCellId === cell.id || cell.isRunning === true"
         :check-result="(store.cellCheckResults || {})[cell.id]"
+        :notice="(store.executionNotices || {})[cell.id]"
         @execute="handleRun"
         @update:source="handleUpdateSource"
       />
@@ -313,6 +322,14 @@ function handleUpdateSource(cellId, source) {
 .submit-history-hint { opacity: 0.7; }
 
 .player-desc { font-size: var(--text-sm); color: var(--muted); margin-bottom: var(--space-4); }
+
+/* 异步执行状态条 */
+.player-exec-alert {
+  padding: 10px 14px; margin-bottom: var(--space-3);
+  border-radius: var(--radius-md); font-size: var(--text-sm);
+}
+.player-exec-alert.running { color: var(--accent); background: var(--accent-soft); }
+.player-exec-alert.error { color: var(--danger); background: var(--danger-bg); font-weight: 600; }
 
 /* Phase 5：学生端环境提示条 */
 .player-env {

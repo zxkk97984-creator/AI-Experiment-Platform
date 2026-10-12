@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir \
 
 # kernel runner（容器内连接 ipykernel 的可信脚本）
 COPY kernel_runner.py /opt/dai/kernel_runner.py
-RUN mkdir -p /.dai && ln -s /opt/dai/kernel_runner.py /.dai/kernel_runner.py
+# 旧路径 /.dai/kernel_runner.py 仍被未绑定环境版本的存量 session 使用（LEGACY_RUNNER_PATH）。
+# 用 cp 而不是 ln -s：基础镜像里可能已存在该文件，ln 会因「File exists」直接构建失败，
+# 导致镜像里留着旧 runner（30s iopub 等待 → 长单元格输出丢失）。
+RUN mkdir -p /.dai && cp /opt/dai/kernel_runner.py /.dai/kernel_runner.py
 
 # 创建非 root 用户用于执行
 RUN useradd --create-home --shell /bin/bash student

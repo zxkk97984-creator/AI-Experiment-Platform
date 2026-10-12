@@ -1133,6 +1133,8 @@ class ExperimentCellsSaveRequest(BaseModel):
 
 class ExperimentCellExecuteRequest(BaseModel):
     code: str
+    # 重复点击幂等：同一 (record_id, client_request_id) 只创建一个执行任务
+    client_request_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("code")
     @classmethod
@@ -1146,6 +1148,41 @@ class ExperimentCellExecuteResponse(BaseModel):
     execution_count: int = 0
     # Phase 5：Kernel 输出中的 ModuleNotFoundError 兜底归类诊断（无裸 traceback）
     diagnostic: ImportDiagnosticRead | None = None
+
+
+class ExperimentCellExecutionAccepted(BaseModel):
+    """异步执行受理响应（202）：页面据此轮询状态。"""
+    execution_id: int
+    cell_id: str
+    status: str = "queued"
+    timeout_seconds: int
+    queue_position: int = 1
+
+
+class ExperimentCellExecutionRead(BaseModel):
+    """单元格执行任务状态（刷新恢复与轮询共用）。"""
+    id: int
+    record_id: int
+    cell_id: str
+    status: str
+    outputs: list[dict] = Field(default_factory=list)
+    execution_time_ms: int | None = None
+    execution_count: int | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    # 内核无响应被销毁重建 → 内存状态已丢失，前端必须提示「请从头重跑」
+    state_lost: bool = False
+    timed_out: bool = False
+    timeout_seconds: int = 120
+    attempts: int = 0
+    cancel_requested: bool = False
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ExperimentActiveExecutionRead(BaseModel):
+    execution: ExperimentCellExecutionRead | None = None
 
 
 class ExperimentCellOut(BaseModel):
