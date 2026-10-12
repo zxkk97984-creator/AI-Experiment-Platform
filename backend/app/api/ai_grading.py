@@ -88,6 +88,39 @@ def _lock_retry_target_and_validate_source(db: Session, cg: CodeGrade):
     return target_kind, target_id, target, version
 
 
+def _lock_override_target(db: Session, cg: CodeGrade):
+    """人工覆盖前锁定评分目标：与 AI 终态写入同序（target → CodeGrade）。
+
+    不加这把行锁，"检查不在途"与"写入覆盖"之间 worker 可以完成认领，
+    教师改分随后被 AI 终态写入静默覆盖（栅栏条件依旧满足）。
+
+    与 retry 的区别：**不要求**评分版本基线匹配——覆盖恰恰是版本失配、
+    AI 结果不可用时教师的兜底通道，加上该约束会让它在最需要时不可用。
+    """
+    if cg.submission_id:
+        target = db.scalar(select(Submission).where(Submission.id == cg.submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        manual = (target.result_details or {}).get("manual_review") if target is not None else None
+        manual_final = isinstance(manual, dict) and manual.get("score") is not None
+    elif cg.exam_answer_id:
+        target = db.scalar(select(ExamAnswer).where(ExamAnswer.id == cg.exam_answer_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        manual_final = target is not None and (target.manual_score_at is not None
+                                               or target.manual_score_reason is not None)
+    else:
+        raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
+
+    if target is None:
+        raise api_error(404, "NOT_FOUND", "关联的提交或答案不存在")
+    # 在途主判题持有认领，会晚于本次覆盖写回并覆盖教师改分
+    if target.grading_status in ("queued", "running"):
+        raise api_error(409, "GRADING_IN_PROGRESS", "判题仍在进行，请稍后重试")
+    # 人工最终分是权威结果，只能走 manual-score 通道修改（有 CAS 与 append-only 审计）
+    if manual_final:
+        raise api_error(409, "MANUAL_SCORE_FINAL", "人工最终分已生效，请改用人工评分通道修改")
+    return target
+
+
 @router.get("/status", response_model=AIServiceStatus)
 def ai_service_status(
     settings: Settings = Depends(get_settings),
@@ -864,14 +897,31 @@ def override_grade(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """教师覆盖 AI 评分维度分。
+
+    拒绝条件（与 judge.py 人工最终分保持同一套不变量）：
+    * 主判题在途（``grading_status in queued/running``）→ 409 GRADING_IN_PROGRESS；
+    * AI 评分在途（``CodeGrade.status in pending/queued/running``）→ 409 AI_GRADING_IN_PROGRESS；
+    * 人工最终分已生效 → 409 MANUAL_SCORE_FINAL（只能走 manual-score 通道修改）。
+    """
     _teacher_or_admin(current_user)
-    cg = db.get(CodeGrade, grade_id)
-    if cg is None:
+    cg_ref = db.get(CodeGrade, grade_id)
+    if cg_ref is None:
         raise api_error(404, "NOT_FOUND", "评分记录不存在")
 
     # 权限
     if current_user.role != "admin":
-        _check_grade_permission(db, cg, current_user)
+        _check_grade_permission(db, cg_ref, current_user)
+
+    # 先锁 target 再锁 CodeGrade：AI 终态写入遵循同一顺序，本次覆盖不会被抢插
+    target = _lock_override_target(db, cg_ref)
+    cg = db.scalar(select(CodeGrade).where(CodeGrade.id == grade_id).with_for_update()
+                   .execution_options(populate_existing=True))
+    if cg is None:
+        raise api_error(404, "NOT_FOUND", "评分记录不存在")
+    # 锁等待期间可能已转为在途；此时它持有有效认领，晚到的终态写入会覆盖本次改分
+    if cg.status in ("pending", "queued", "running"):
+        raise api_error(409, "AI_GRADING_IN_PROGRESS", "AI 评分仍在进行，请稍后重试")
 
     original = {
         "algorithm_score": cg.algorithm_score,
@@ -918,11 +968,9 @@ def override_grade(
 
     # 考试 CodeGrade：始终按题目分值重算 scaled_score（无论教师改 A/Q 还是总分）
     if cg.exam_answer_id:
-        ans = db.get(ExamAnswer, cg.exam_answer_id)
-        if ans:
-            eq = db.get(ExamQuestion, ans.question_id)
-            if eq:
-                cg.scaled_score = round((cg.final_score_100 or 0) / 100 * eq.points, 4)
+        eq = db.get(ExamQuestion, target.question_id)
+        if eq:
+            cg.scaled_score = round((cg.final_score_100 or 0) / 100 * eq.points, 4)
 
     if cg.needs_teacher_review:
         cg.needs_teacher_review = False
@@ -946,20 +994,22 @@ def override_grade(
         cg.status = "completed"
         cg.finished_at = datetime.now(timezone.utc)
         if cg.submission_id:
-            sub = db.get(Submission, cg.submission_id)
-            if sub:
-                sub.score = cg.final_score_100
-                sub.status = "graded"
-        elif cg.exam_answer_id:
-            ans = db.get(ExamAnswer, cg.exam_answer_id)
-            if ans and cg.scaled_score is not None:
-                ans.score = cg.scaled_score
-                ans.grading_status = "completed"
-                from app.services.exam_grading import finalize_if_ready, promote_review_required_if_complete
-                db.flush()  # 确保 ans 更新对 finalize 可见
-                finalize_if_ready(ans.submission_id, db)
-                # 教师覆盖确认是显式受控动作：失败原因已消除则收口
-                promote_review_required_if_complete(ans.submission_id, db)
+            target.score = cg.final_score_100
+            target.status = "graded"
+        elif cg.exam_answer_id and cg.scaled_score is not None:
+            target.score = cg.scaled_score
+            target.grading_status = "completed"
+            from app.services.exam_grading import finalize_if_ready, promote_review_required_if_complete
+            db.flush()  # 确保 target 更新对 finalize 可见
+            finalize_if_ready(target.submission_id, db)
+            # 教师覆盖确认是显式受控动作：失败原因已消除则收口
+            promote_review_required_if_complete(target.submission_id, db)
+
+    # 使任何滞留认领失效：ai_claim_guard 要求 status=='running' 且 claim_token 匹配，
+    # 清空后晚到的 AI 终态写入必然被栅栏拒绝，不会静默回退本次覆盖。
+    # result_revision 同步 +1，客户端据此识别手中结果已过时。
+    cg.claim_token = None
+    cg.result_revision = (cg.result_revision or 0) + 1
 
     db.commit()
     return {"ok": True, "grade_id": grade_id, "original": original, "replacement": replacement}

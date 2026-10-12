@@ -92,7 +92,7 @@ def grading_world(db_session_factory, test_settings):
 
 
 def _seed_ai_grade(db_session_factory, world, *, code="def solve(x): return 0",
-                   mode="active") -> int:
+                   mode="active", rubric_json=None) -> int:
     with db_session_factory() as db:
         question = JudgeQuestion(
             assignment_id=world["assignment_id"], title="term-q", function_name="solve",
@@ -108,7 +108,9 @@ def _seed_ai_grade(db_session_factory, world, *, code="def solve(x): return 0",
         db.flush()
         rubric = QuestionRubric(judge_question_id=question.id, status="locked", version=1,
                                 source_hash="a" * 64, source_snapshot={},
-                                rubric_json={"algorithm_criteria": []}, model_name="fake")
+                                rubric_json=(rubric_json if rubric_json is not None
+                                             else {"algorithm_criteria": []}),
+                                model_name="fake")
         db.add(rubric)
         db.flush()
         version = JudgeGradingVersion(
@@ -239,6 +241,109 @@ def test_ai_review_required_terminal_state(db_session_factory, test_settings,
         assert grade.claim_token is None
         assert grade.needs_teacher_review is True
         assert submission.score is None, "需复核时不得写正式分"
+
+
+# ─────────────────────────────────────────────────────────────
+# S-1：AI 分数上界——注入载荷不得换来满分
+# ─────────────────────────────────────────────────────────────
+
+# 真实 rubric（A 合计 20、Q1-Q4 合计 10，与 RubricDocument.validate_totals 一致），
+# 这样注入载荷能通过全部既有校验（criterion 白名单、行号、分项和），
+# 只有新增的分数上界检查能拦住它。
+_REAL_RUBRIC = {
+    "rubric_version": 1,
+    "algorithm_criteria": [
+        {"id": "A1", "name": "核心功能实现", "points": 10},
+        {"id": "A2", "name": "算法思路与实现", "points": 10},
+    ],
+    "quality_criteria": [
+        {"id": "Q1", "name": "可读性与命名", "points": 3},
+        {"id": "Q2", "name": "代码结构", "points": 3},
+        {"id": "Q3", "name": "重复与冗余", "points": 2},
+        {"id": "Q4", "name": "接口、规范与安全", "points": 2},
+    ],
+}
+
+
+def _item(cid, name, score, max_score):
+    return {"criterion_id": cid, "criterion": name, "level": "complete",
+            "score": score, "max_score": max_score, "code_lines": [1], "evidence": "ok"}
+
+
+def _injection_payload() -> dict:
+    """学生在代码里写注入指令后，AI 可能返回的完全自洽的超范围分数。
+
+    criterion_id 在白名单内、行号真实存在、level 合法、分项和恰等于 dimension_score，
+    因此 Pydantic 与既有的 criterion/行号校验全部通过。修复前它会经
+    min(F+A+R+Q, cap) = min(0+100+0+10, 100) 直接换来满分。
+    """
+    return {
+        "rubric_version": 1,
+        "algorithm": {
+            "dimension_score": 100, "dimension_max": 100,
+            "items": [_item("A1", "核心功能实现", 100, 100)],
+        },
+        "code_quality": {
+            "dimension_score": 10, "dimension_max": 10,
+            "items": [_item("Q1", "可读性与命名", 10, 10)],
+        },
+        "student_feedback": {"strengths": [], "issues": [], "suggestions": []},
+        "needs_teacher_review": False,
+    }
+
+
+def test_inflated_ai_scores_go_to_review_not_full_mark(
+        db_session_factory, test_settings, redis_client, grading_world):
+    """S-1 回归：越界 AI 分数必须转人工复核，且正式分不得写入。"""
+    grade_id = _seed_ai_grade(db_session_factory, grading_world, rubric_json=_REAL_RUBRIC)
+    with db_session_factory() as db, \
+            patch("app.services.ai_client.DeepSeekClient",
+                  return_value=_FakeAIClient(_injection_payload())), \
+            patch("app.services.ai_grading_service.analyze_python",
+                  return_value={"diagnostics": [], "complexity": {}}):
+        worker.process_ai_grade(db, redis_client, test_settings, grade_id)
+
+    with db_session_factory() as db:
+        grade = db.get(CodeGrade, grade_id)
+        submission = db.get(Submission, grade.submission_id)
+        assert grade.status == "review_required", f"越界分数必须转人工: {grade.status}"
+        assert grade.needs_teacher_review is True
+        assert submission.score is None, "越界分数不得写入正式分"
+        assert submission.status != "graded"
+        assert "超过满分" in (grade.review_reason or ""), grade.review_reason
+
+
+def test_legitimate_full_score_with_real_rubric_still_completes(
+        db_session_factory, test_settings, redis_client, grading_world):
+    """防误报：同一 rubric 下的合法满分必须正常收口为 100。"""
+    payload = {
+        "rubric_version": 1,
+        "algorithm": {
+            "dimension_score": 20, "dimension_max": 20,
+            "items": [_item("A1", "核心功能实现", 10, 10), _item("A2", "算法思路与实现", 10, 10)],
+        },
+        "code_quality": {
+            "dimension_score": 10, "dimension_max": 10,
+            "items": [_item("Q1", "可读性与命名", 3, 3), _item("Q2", "代码结构", 3, 3),
+                      _item("Q3", "重复与冗余", 2, 2), _item("Q4", "接口、规范与安全", 2, 2)],
+        },
+        "student_feedback": {"strengths": [], "issues": [], "suggestions": []},
+        "needs_teacher_review": False,
+    }
+    grade_id = _seed_ai_grade(db_session_factory, grading_world, rubric_json=_REAL_RUBRIC)
+    with db_session_factory() as db, \
+            patch("app.services.ai_client.DeepSeekClient",
+                  return_value=_FakeAIClient(payload)), \
+            patch("app.services.ai_grading_service.analyze_python",
+                  return_value={"diagnostics": [], "complexity": {}}):
+        worker.process_ai_grade(db, redis_client, test_settings, grade_id)
+
+    with db_session_factory() as db:
+        grade = db.get(CodeGrade, grade_id)
+        submission = db.get(Submission, grade.submission_id)
+        assert grade.status == "completed", f"合法满分不应被拦: {grade.review_reason}"
+        assert grade.final_score_100 == 100
+        assert submission.score == 100
 
 
 def test_ai_exam_success_finalizes_parent_as_graded(

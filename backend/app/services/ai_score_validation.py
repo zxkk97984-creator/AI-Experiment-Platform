@@ -1,7 +1,91 @@
-"""AI 输出业务校验——版本、criterion、行号、防重复扣分"""
+"""AI 输出业务校验——版本、criterion、行号、分数上界、防重复扣分"""
 from __future__ import annotations
 
 from typing import Any
+
+from app.services.score_merger import ALGORITHM_DIMENSION_MAX, QUALITY_DIMENSION_MAX
+
+_TOLERANCE = 1e-6
+
+
+def _as_float(value: Any) -> float | None:
+    """容错转 float；非数值返回 None，避免校验自身抛异常变成 500。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _points_by_criterion(criteria: Any) -> dict[str, float]:
+    """从 rubric 评分项列表建立 criterion_id -> 满分 的映射。"""
+    if not isinstance(criteria, list):
+        return {}
+    points: dict[str, float] = {}
+    for entry in criteria:
+        if not isinstance(entry, dict):
+            continue
+        cid = entry.get("id")
+        value = _as_float(entry.get("points"))
+        if cid is not None and value is not None:
+            points[str(cid)] = value
+    return points
+
+
+def _validate_dimension_bounds(
+    *,
+    label: str,
+    dimension: Any,
+    criteria_points: dict[str, float],
+    fallback_max: float,
+    errors: list[str],
+) -> None:
+    """校验维度满分与分项上界——AI 自报的 dimension_max / max_score 一律不可信。
+
+    缺这层校验时，被 prompt 注入或幻觉的模型可以返回完全自洽的超范围分数
+    （"分项和 == dimension_score" 的 Pydantic 校验依然通过），再经
+    merge_scores 的 min(raw, cap) 钳制后直接拿到满分，而确定性测试可能一个都没过。
+    """
+    if not isinstance(dimension, dict):
+        errors.append(f"{label}维度评分结果缺失或格式非法")
+        return
+
+    # 以 rubric 实际评分项之和为权威上界；rubric 未提供时回退固定公式常量。
+    expected_max = (
+        round(sum(criteria_points.values()), 6) if criteria_points else fallback_max
+    )
+
+    dimension_max = _as_float(dimension.get("dimension_max"))
+    if dimension_max is None or abs(dimension_max - expected_max) > _TOLERANCE:
+        errors.append(
+            f"{label}维度满分无效：期望 {expected_max}，实际 {dimension.get('dimension_max')}"
+        )
+
+    dimension_score = _as_float(dimension.get("dimension_score"))
+    if dimension_score is not None and dimension_score > expected_max + _TOLERANCE:
+        errors.append(
+            f"{label}维度得分 {dimension_score} 超过满分 {expected_max}"
+        )
+
+    for item in dimension.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        cid = item.get("criterion_id")
+        score = _as_float(item.get("score"))
+        max_score = _as_float(item.get("max_score"))
+        rubric_points = criteria_points.get(str(cid)) if cid is not None else None
+
+        if rubric_points is not None and max_score is not None \
+                and abs(max_score - rubric_points) > _TOLERANCE:
+            errors.append(
+                f"{label}评分项 {cid} 满分与 Rubric 不一致：期望 {rubric_points}，实际 {max_score}"
+            )
+
+        # 优先用 rubric 满分作为天花板：即使 AI 谎报 max_score 也拦得住。
+        ceiling = rubric_points if rubric_points is not None else max_score
+        if score is not None and ceiling is not None and score > ceiling + _TOLERANCE:
+            errors.append(f"{label}评分项 {cid} 得分 {score} 超过满分 {ceiling}")
 
 
 def validate_ai_output(
@@ -65,6 +149,22 @@ def validate_ai_output(
                 f"跨维度重复扣分：A 的 {dup['a_criterion']} 与 Q 的 {dup['q_criterion']} "
                 f"使用相同 reason_code={dup['reason_code']} 且代码行重叠"
             )
+
+    # 4. 分数上界——维度满分与每个分项都不得超过 Rubric 规定的天花板
+    _validate_dimension_bounds(
+        label="算法",
+        dimension=algorithm,
+        criteria_points=_points_by_criterion(rubric.get("algorithm_criteria")),
+        fallback_max=ALGORITHM_DIMENSION_MAX,
+        errors=errors,
+    )
+    _validate_dimension_bounds(
+        label="代码质量",
+        dimension=code_quality,
+        criteria_points=_points_by_criterion(rubric.get("quality_criteria")),
+        fallback_max=QUALITY_DIMENSION_MAX,
+        errors=errors,
+    )
 
     return errors
 

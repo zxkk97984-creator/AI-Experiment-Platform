@@ -187,9 +187,11 @@ def grade_code_submission(
         db.expire_all()
         return grade
     live_title = question.title if hasattr(question, "title") else question.prompt
+    # 冻结版本存在时以快照为准，否则读实时 rubric；两处消费共用同一份文档。
+    rubric_document = (frozen.get("rubric") if frozen and frozen.get("rubric") is not None
+                       else rubric.rubric_json)
     messages = build_grading_messages(
-        rubric=(frozen.get("rubric") if frozen and frozen.get("rubric") is not None
-                else rubric.rubric_json),
+        rubric=rubric_document,
         question={
             "title": frozen["title"] if frozen else live_title,
             "description": frozen["description"] if frozen else getattr(
@@ -216,8 +218,8 @@ def grade_code_submission(
     validation_errors = validate_ai_output(
         rubric={
             "rubric_version": (frozen.get("rubric_version") if frozen else None) or rubric.version,
-            "algorithm_criteria": (frozen.get("rubric") if frozen and frozen.get("rubric") is not None
-                                   else rubric.rubric_json).get("algorithm_criteria", []),
+            "algorithm_criteria": rubric_document.get("algorithm_criteria", []),
+            "quality_criteria": rubric_document.get("quality_criteria", []),
         },
         ai_result=ai_result.model_dump(),
         code_lines=code_lines,
