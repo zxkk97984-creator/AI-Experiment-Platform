@@ -24,7 +24,17 @@ def zip_bytes(members, *, compression=zipfile.ZIP_DEFLATED):
     result = BytesIO()
     with zipfile.ZipFile(result, 'w', compression=compression) as archive:
         for name, contents in members:
-            archive.writestr(name, contents)
+            # 调用方自带 ZipInfo（如 symlink 条目）时原样透传：其 date_time 默认
+            # 即 1980-01-01，本就确定，且 compress_type 由调用方掌控。
+            if isinstance(name, zipfile.ZipInfo):
+                archive.writestr(name, contents)
+                continue
+            # writestr(str) 会把当前本地时间写进条目头，导致字节随进程启动时刻变化。
+            # 这些字节被用作 parametrize 参数，测试 ID 因此在各 xdist worker 间不一致，
+            # 并行收集直接失败。固定为 ZIP 纪元，产物可复现。
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = compression
+            archive.writestr(info, contents)
     return result.getvalue()
 
 
