@@ -20,6 +20,8 @@ def spreadsheet(kind, rows=None):
     headers = ['班级编码', '班级名称'] if kind == 'classes' else ['学号', '姓名', '院系', '班级编码']
     if kind == 'class_students':
         headers = headers[:3]
+    elif kind == 'password_reset':
+        headers = ['学号', '姓名']
     if rows is not None:
         headers = ['行号', '状态', '说明', '学号', '姓名', '班级编码']
     wb = Workbook()
@@ -73,9 +75,9 @@ def parse_xlsx(content, filename, kind):
             headers = [str(c.value or '').strip() for c in first]
             while headers and not headers[-1]:
                 headers.pop()
-            if len(headers) != len(set(headers)) or any(h not in HEADERS for h in headers):
+            if len(headers) != len(set(headers)) or any(h not in ({'学号', '姓名'} if kind == 'password_reset' else HEADERS) for h in headers):
                 raise ValueError('请使用模板表头，不允许重复列或额外列')
-            required = {'班级编码', '班级名称'} if kind == 'classes' else {'学号', '姓名'}
+            required = {'学号'} if kind == 'password_reset' else {'班级编码', '班级名称'} if kind == 'classes' else {'学号', '姓名'}
             if not required.issubset(headers):
                 raise ValueError('缺少必填表头')
             output = []

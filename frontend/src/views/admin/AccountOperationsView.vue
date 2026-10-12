@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
@@ -20,6 +20,10 @@ const busy = ref(false)
 const error = ref('')
 const resetScope = ref('class')
 const resetQuery = ref('')
+const resetMode = ref('file')
+const resetFile = ref(null)
+const resetClassId = ref(route.query.class_id || '')
+const resetReady = computed(() => resetScope.value === 'class' ? !!resetClassId.value : resetMode.value === 'file' ? !!resetFile.value : true)
 async function allPages(fetcher) {
   const rows = []; let current = 1
   while (true) { const { data } = await fetcher({ page: current++, page_size: 100 }); rows.push(...data.items); if (rows.length >= data.total || !data.items.length) return rows }
@@ -48,13 +52,25 @@ async function preview() {
   } catch (e) { error.value = e.response?.status === 413 ? '名单文件最大 5 MiB，请检查文件大小或代理限制' : errorMessage(e) }
   finally { busy.value = false }
 }
+async function resetTemplate() {
+  try { downloadBlob((await accountAPI.resetTemplate()).data, '学生密码重置名单.xlsx') }
+  catch (e) { error.value = errorMessage(e) }
+}
 async function previewReset() {
+  if (!resetReady.value) { error.value = resetScope.value === 'class' ? '请选择教学班' : '请选择重置名单文件'; return }
   busy.value = true; error.value = ''
   try {
-    const selection = resetScope.value === 'class' ? { class_id: Number(classId.value) } : { all_matching: true, q: resetQuery.value || null }
-    const { data } = await accountAPI.previewReset(selection)
+    let result
+    if (resetScope.value === 'filter' && resetMode.value === 'file') {
+      const form = new FormData(); form.append('file', resetFile.value)
+      result = await accountAPI.previewResetFile(form)
+    } else {
+      const selection = resetScope.value === 'class' ? { class_id: Number(resetClassId.value) } : { all_matching: true, q: resetQuery.value.trim() || null }
+      result = await accountAPI.previewReset(selection)
+    }
+    const { data } = result
     await router.push(`/admin/batches/${data.id}`)
-  } catch (e) { error.value = errorMessage(e) }
+  } catch (e) { error.value = e.response?.status === 413 ? '重置名单最大 5 MiB，请检查文件大小或代理限制' : errorMessage(e) }
   finally { busy.value = false }
 }
 </script>
@@ -62,8 +78,9 @@ async function previewReset() {
   <AppLayout content-mode="list"><div class="account-page">
     <header><h1>名单与批次</h1><p class="account-muted">先预检，再确认。导入只追加名单，不移除未出现在文件中的学生。</p></header>
     <p v-if="error" role="alert" class="account-error">{{ error }}</p>
-    <div class="account-grid">
-      <section class="account-panel"><h2>Excel 名单导入</h2>
+    <div class="account-grid account-grid--operations">
+      <section class="account-panel account-panel--operation">
+        <header class="operation-heading"><h2>Excel 名单导入</h2><p class="account-muted">批量创建学生账号或追加班级名单。已有账号的密码不会被覆盖。</p></header>
         <form class="account-form" @submit.prevent="preview">
           <label>导入类型<DsSelect v-model="kind"><option value="students">学生账号及多班名单</option><option value="class_students">某班学生名单</option><option value="classes">教学班名单</option></DsSelect></label>
           <label v-if="kind !== 'class_students'">目标学期<DsSelect v-model="term" :required="kind === 'classes'"><option value="">{{ kind === 'classes' ? '请选择目标学期' : '仅学生账号，不关联班级' }}</option><option v-for="t in terms.filter(t => t.status !== 'closed')" :key="t.id" :value="t.id">{{ t.name }}</option></DsSelect></label>
@@ -71,16 +88,30 @@ async function previewReset() {
           <button type="button" class="btn-ghost" @click="template">下载 Excel 模板</button>
           <label>名单文件<input type="file" accept=".xlsx" required @change="file = $event.target.files[0]" /></label>
           <small class="account-muted">单表，最多 5000 行 / 5 MiB。学号与班级编码请使用文本格式。</small>
-          <button class="btn-primary" :disabled="busy">{{ busy ? '正在预检…' : '上传并预检' }}</button>
+          <button class="btn-primary operation-submit" :disabled="busy">{{ busy ? '正在预检…' : '上传并预检' }}</button>
         </form>
       </section>
-      <section class="account-panel"><h2>批量重置学生密码</h2>
+      <section class="account-panel account-panel--operation">
+        <header class="operation-heading"><h2>批量重置学生密码</h2><p class="account-muted">每人生成独立随机临时密码。禁用或正在考试的学生会跳过；执行后旧登录失效，请下载凭据发放。</p></header>
         <form class="account-form" @submit.prevent="previewReset">
-          <p class="account-muted">每人生成独立随机临时密码，成功后旧登录失效。禁用或正在考试的学生会跳过。完成后请下载凭据发放。</p>
-          <label>选择范围<DsSelect v-model="resetScope"><option value="class">整个教学班</option><option value="filter">全部匹配学生</option></DsSelect></label>
-          <label v-if="resetScope === 'class'">教学班<DsSelect v-model="classId" required><option value="">请选择</option><option v-for="c in classes" :key="c.id" :value="c.id">{{ c.name }} · {{ c.code }}</option></DsSelect></label>
-          <label v-else>精确匹配姓名、账号或学号<input v-model="resetQuery" placeholder="留空表示所有学生，下一步核对人数" /></label>
-          <button class="btn-primary" :disabled="busy">预览重置名单</button>
+          <label>选择范围<DsSelect v-model="resetScope" :disabled="busy"><option value="class">整个教学班</option><option value="filter">全部匹配学生</option></DsSelect></label>
+          <label v-if="resetScope === 'class'">教学班<DsSelect v-model="resetClassId" required :disabled="busy"><option value="">请选择</option><option v-for="c in classes" :key="c.id" :value="c.id">{{ c.name }} · {{ c.code }}</option></DsSelect></label>
+          <template v-else>
+            <fieldset class="reset-method"><legend>匹配方式</legend><div class="reset-method-options">
+              <label><input v-model="resetMode" type="radio" value="file" :disabled="busy" /> Excel 名单匹配</label>
+              <label><input v-model="resetMode" type="radio" value="query" :disabled="busy" /> 条件筛选</label>
+            </div></fieldset>
+            <template v-if="resetMode === 'file'">
+              <button type="button" class="btn-ghost reset-template" :disabled="busy" @click="resetTemplate">下载重置名单模板</button>
+              <label>重置名单文件<input type="file" accept=".xlsx" required :disabled="busy" @change="resetFile = $event.target.files[0] || null" /></label>
+              <small class="account-muted">按学号匹配现有学生；姓名可选，填写后会核对。单表，最多 5000 行 / 5 MiB，学号须为文本格式。</small>
+            </template>
+            <template v-else>
+              <label>精确匹配姓名、账号或学号<input v-model="resetQuery" :disabled="busy" placeholder="输入完整姓名、账号或学号" /></label>
+              <p class="account-notice reset-scope-note">留空将选择全部学生，请在下一步仔细核对人数。</p>
+            </template>
+          </template>
+          <button class="btn-primary operation-submit" :disabled="busy || !resetReady">{{ busy ? '正在预览…' : '预览重置名单' }}</button>
         </form>
       </section>
     </div>

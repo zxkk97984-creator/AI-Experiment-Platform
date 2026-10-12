@@ -82,3 +82,11 @@ PYTHONPATH=backend backend/.venv/bin/python scripts/verify_account_capacity.py
 旧身份只读核对：在后端运行 `python -m app.cli audit-student-identities`，输出缺失学号或登录名不一致的账号ID/学号/登录名，不修改数据。
 
 生产account-worker使用公共配置，但关闭环境编辑器和AI功能，不挂载Registry秘密或Docker socket；`DAI_ENV_BASE_IMAGE`仍应按生产配置约定填写digest引用。
+
+## 按 Excel 名单重置学生密码
+
+在「名单与批次 → 批量重置学生密码」选择「全部匹配学生 → Excel 名单匹配」，下载重置模板并上传 `.xlsx`。单表最多 5000 行，文件不超过 5 MiB；学号必填且须为文本，姓名可选，填写后必须与现有学生一致。此入口只匹配已有账号，不创建学生或修改名单。
+
+上传后跳转批次详情，逐行显示匹配、重复、禁用、正在考试和错误信息。重复学号只处理一次，禁用及正在考试的学生跳过；未知学号、姓名不符、公式、数字型学号等错误阻止整批确认。预览不修改密码；确认仍需填写原因、复核管理员当前密码并勾选范围，执行继续使用原凭据版本检查、独立随机临时密码和后台 Worker。完成后下载凭据，学生首次登录须改密。
+
+接口：`GET /api/v1/admin/password-resets/template` 下载模板，`POST /api/v1/admin/password-resets/preview-file` 以 multipart `file` 创建预览；后续沿用原批次详情、确认和凭据导出接口。代理请求上限 6 MiB，后端文件上限 5 MiB。原班级范围和显式条件筛选入口继续可用。

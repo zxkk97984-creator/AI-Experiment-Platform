@@ -34,3 +34,24 @@
 .account-code { max-height: 420px; overflow: auto; }
 .account-actions label { display: flex; align-items: center; gap: 8px; }
 .account-grid { align-items: start; }
+
+/* Keep both operation panels and their form actions aligned. */
+.account-grid--operations { align-items: stretch; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-panel--operation { display: flex; flex-direction: column; gap: 20px; }
+.operation-heading { display: grid; align-content: start; gap: 8px; min-height: 96px; }
+.account-page .operation-heading h2, .account-page .operation-heading p { margin: 0; }
+.account-panel--operation .account-form { display: flex; flex-direction: column; flex: 1; max-width: none; }
+.account-panel--operation .btn-ghost { align-self: flex-start; }
+.account-panel--operation .operation-submit { margin-top: auto; align-self: flex-start; }
+.account-panel--operation input[type=file] { padding: 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); background: var(--surface-sunken); font-weight: 400; }
+.reset-method { border: 0; padding: 0; margin: 0; min-width: 0; }
+.reset-method legend { margin-bottom: 8px; font-weight: 500; }
+.reset-method-options { display: flex; flex-wrap: wrap; gap: 12px 20px; }
+.account-form .reset-method-options label { display: flex; align-items: center; gap: 6px; }
+.account-form input[type=radio] { width: auto; margin: 0; }
+.reset-template { align-self: flex-start; }
+.account-page .reset-scope-note { margin: 0; font-size: var(--text-sm); }
+@media (max-width: 900px) {
+  .account-grid--operations { grid-template-columns: minmax(0, 1fr); }
+  .operation-heading { min-height: 0; }
+}

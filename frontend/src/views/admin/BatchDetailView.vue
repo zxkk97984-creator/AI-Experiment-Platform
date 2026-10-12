@@ -60,7 +60,7 @@ function explanation(row) {
     <p v-if="error" role="alert" class="account-error">{{ error }}</p>
     <template v-if="batch">
       <header><h1>{{ batchKinds[batch.kind] }}</h1><p role="status">{{ batchStatuses[batch.status] }} <span v-if="batch.status === 'preparing'"> · 已准备 {{ batch.prepared }} 份凭据，尚未代表账号已创建</span></p></header>
-      <div class="account-tags"><span v-for="[key, value] in summary" :key="key">{{ names[key] }}：{{ value }}</span></div>
+      <div class="account-tags"><span v-for="[key, value] in summary" :key="key">{{ key === 'selected' && batch.scope?.selection === 'excel' ? '名单行' : names[key] }}：{{ value }}</span></div>
       <p v-if="batch.error_code" class="account-error">{{ batchErrors[batch.error_code] || '任务未完成，请核对结果并联系系统维护人员' }}。</p>
       <CredentialExportPanel v-if="['succeeded', 'partially_succeeded'].includes(batch.status) && batch.kind !== 'classes'" :batch-id="batch.id" :deliveries="batch.credentials || []" />
       <section v-if="batch.status === 'preview' && batch.actor_id === auth.user?.id" class="account-panel">

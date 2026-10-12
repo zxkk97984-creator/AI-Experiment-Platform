@@ -145,6 +145,22 @@ def preview_import(file: UploadFile = File(...), kind: Literal['classes', 'stude
     return batch_read(batch)
 
 
+@router.get('/password-resets/template')
+def reset_template(actor: User = Depends(require_roles('admin'))):
+    return Response(spreadsheet('password_reset'),
+                    media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': 'attachment; filename="password-reset-students.xlsx"'})
+
+
+@router.post('/password-resets/preview-file')
+def preview_reset_file(file: UploadFile = File(...), db: Session = Depends(get_db),
+                       settings: Settings = Depends(get_settings),
+                       actor: User = Depends(require_roles('admin'))):
+    from app.services.password_reset_import_service import create_preview
+    inputs = parse_xlsx(file.file.read(5 * 1024 * 1024 + 1), file.filename, 'password_reset')
+    return batch_read(create_preview(db, actor, inputs, settings))
+
+
 @router.post('/password-resets/preview')
 def preview_reset(payload: ResetSelection, db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
                   actor: User = Depends(require_roles('admin'))):
