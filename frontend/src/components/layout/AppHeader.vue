@@ -298,7 +298,7 @@ onBeforeUnmount(() => {
       :class="{ 'workspace-control': isWorkspace }"
       aria-label="通知"
       title="通知"
-      @click="router.push(auth.role === 'student' ? '/student' : auth.role === 'admin' ? '/admin' : '/teacher/notifications')"
+      @click="router.push(auth.role === 'student' ? '/student/notifications' : auth.role === 'admin' ? '/admin' : '/teacher/notifications')"
     >
       <AppIcon name="notification" :size="17" />
       <span v-if="unreadCount > 0" class="notify-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>

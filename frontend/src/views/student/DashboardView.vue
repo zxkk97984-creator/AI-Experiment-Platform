@@ -521,7 +521,7 @@ onMounted(loadDashboard)
                   <p class="section-eyebrow">课程动态</p>
                   <h2>通知公告</h2>
                 </div>
-                <button type="button" class="text-btn" @click="router.push('/student')">查看全部</button>
+                <button type="button" class="text-btn" @click="router.push('/student/notifications')">通知中心</button>
               </header>
               <DashboardAsyncState
                 :loading="loading"

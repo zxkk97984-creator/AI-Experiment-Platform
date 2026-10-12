@@ -49,6 +49,7 @@ const menuItems = computed(() => {
     { path: '/student/assignments', label: '作业',     sub: 'Assignments', icon: 'assignment', key: 'assignments' },
     { path: '/student/exams',       label: '考试',     sub: 'Exams',       icon: 'exam',       key: 'exams' },
     { path: '/student/experiments', label: '实验',     sub: 'Lab',         icon: 'experiment', key: 'experiments' },
+    { path: '/student/notifications', label: '通知中心', sub: 'Notifications', icon: 'notification', key: 'notifications' },
   ]
   if (auth.isTeacher) return [
     { path: '/teacher',                label: '工作台',     sub: 'Workbench',     icon: 'home',        key: 'home' },

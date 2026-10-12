@@ -37,6 +37,7 @@ const routes = [
   { path: '/student/experiments', name: 'StudentExperiments', component: () => import('../views/student/ExperimentView.vue'), meta: { role: 'student' } },
   { path: '/student/experiments/:id', name: 'StudentExperimentDetail', component: () => import('../views/student/ExperimentDetailView.vue'), meta: { role: 'student' } },
   { path: '/student/courses/:id/notebook/:lid', name: 'StudentNotebook', component: () => import('../views/student/NotebookView.vue'), meta: { role: 'student' } },
+  { path: '/student/notifications', name: 'StudentNotifications', component: () => import('../views/student/StudentNotificationsView.vue'), meta: { role: 'student' } },
 
   // Teacher
   { path: '/teacher', name: 'TeacherHome', component: () => import('../views/teacher/DashboardView.vue'), meta: { role: 'teacher' } },
