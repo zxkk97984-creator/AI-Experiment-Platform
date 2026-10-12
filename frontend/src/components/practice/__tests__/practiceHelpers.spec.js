@@ -1,7 +1,7 @@
 // 练习域展示逻辑：六态判定、额度与权限错误映射、AI 未完成判定
 import { describe, expect, it } from 'vitest'
 import {
-  aiIncomplete, aiStatusText, difficultyMeta, formatScore, gradingModeMeta, gradingStatusMeta,
+  aiIncomplete, aiStatusText, difficultyMeta, formatScore, gradingModeMeta, gradingStatusMeta, missingRequirementsText,
   isActiveStatus, isPermissionError, isQuotaError, isTerminalStatus, listOf, newClientRequestId,
   practiceErrorMessage, problemStatusMeta, queuePositionText, scoreText, testSummary,
 } from '../practiceHelpers.js'
@@ -85,6 +85,13 @@ describe('practiceHelpers AI 未完成与得分展示', () => {
     expect(testSummary({ deterministic: { passed_count: 3, total_count: 5 } })).toBe('3 / 5 组测试通过')
     expect(testSummary({ deterministic: { groups: [] } })).toBe('')
     expect(testSummary({})).toBe('')
+  })
+
+  it('AI 预检未就绪原因代码翻成中文，未知代码原样保留', () => {
+    expect(missingRequirementsText(['locked_rubric', 'active_version'])).toBe('评分标准未锁定、缺少已启用的评分版本')
+    expect(missingRequirementsText(['unknown_reason'])).toBe('unknown_reason')
+    expect(missingRequirementsText([])).toBe('')
+    expect(missingRequirementsText(undefined)).toBe('')
   })
 
   it('client_request_id 每次生成都不同（幂等键不能复用）', () => {

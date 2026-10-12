@@ -11,7 +11,7 @@ import AppIcon from '../../components/ui/AppIcon.vue'
 import UiStatusPill from '../../components/ui/UiStatusPill.vue'
 import AISetupPanel from '../../components/ai/AISetupPanel.vue'
 import PracticeNotice from '../../components/practice/PracticeNotice.vue'
-import { isPermissionError, isQuotaError, practiceErrorMessage, problemStatusMeta } from '../../components/practice/practiceHelpers.js'
+import { isPermissionError, isQuotaError, missingRequirementsText, practiceErrorMessage, problemStatusMeta } from '../../components/practice/practiceHelpers.js'
 import { adminPracticeAPI } from '../../api/practice.js'
 import { useAppStore } from '../../stores/app.js'
 
@@ -291,7 +291,7 @@ onMounted(load)
             title="AI 评分标准未就绪"
             assertive
           >
-            缺少：{{ aiMissing.length ? aiMissing.join('、') : '评分标准或评分版本' }}。切换到 AI 综合判题前必须补齐，否则全局切换会被拒绝。
+            缺少：{{ missingRequirementsText(aiMissing) || '评分标准或评分版本' }}。切换到 AI 综合判题前必须补齐，否则全局切换会被拒绝。
           </PracticeNotice>
 
           <div class="edit-grid">

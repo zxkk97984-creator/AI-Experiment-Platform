@@ -7,7 +7,7 @@ import DashboardAsyncState from '../../components/dashboard/DashboardAsyncState.
 import AppIcon from '../../components/ui/AppIcon.vue'
 import UiStatusPill from '../../components/ui/UiStatusPill.vue'
 import PracticeNotice from '../../components/practice/PracticeNotice.vue'
-import { gradingModeMeta, practiceErrorMessage } from '../../components/practice/practiceHelpers.js'
+import { gradingModeMeta, missingRequirementsText, practiceErrorMessage } from '../../components/practice/practiceHelpers.js'
 import { adminPracticeAPI } from '../../api/practice.js'
 import { formatDateTime } from '../../utils/format.js'
 import { useAppStore } from '../../stores/app.js'
@@ -76,7 +76,8 @@ async function switchMode(mode) {
   } catch (e) {
     const detail = e.response?.data?.detail
     if (detail?.code === 'AI_PREFLIGHT_FAILED') {
-      blocked.value = detail.problems || detail.fields?.problems || []
+      // 全局错误信封只保留 {code, message, fields}（app/main.py _normalize_detail）
+      blocked.value = detail.fields?.problems || []
       app.showToast('AI 预检未通过，请先补齐未就绪题目', 'error')
     } else {
       app.showToast(practiceErrorMessage(e, '切换失败，请稍后重试'), 'error')
@@ -178,7 +179,7 @@ onMounted(load)
               <ul class="blocked-list">
                 <li v-for="item in blocked" :key="item.id">
                   <strong>{{ item.title }}</strong>
-                  <span class="blocked-reason">{{ (item.missing || []).join('、') || '评分标准未锁定或未启用' }}</span>
+                  <span class="blocked-reason">{{ missingRequirementsText(item.missing) || '评分标准未锁定或未启用' }}</span>
                 </li>
               </ul>
             </div>
@@ -222,7 +223,7 @@ onMounted(load)
               <li v-for="item in notReady" :key="item.id" class="ready-item">
                 <div class="ready-main">
                   <strong>{{ item.title }}</strong>
-                  <span class="ready-missing">缺少：{{ (item.missing || []).join('、') || '评分标准或评分版本' }}</span>
+                  <span class="ready-missing">缺少：{{ missingRequirementsText(item.missing) || '评分标准或评分版本' }}</span>
                 </div>
                 <span class="badge badge-warning">{{ item.status === 'published' ? '已发布' : item.status }}</span>
                 <router-link class="btn btn-secondary btn-sm" :to="`/admin/practice/problems/${item.id}/edit`">去补齐</router-link>

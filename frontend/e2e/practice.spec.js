@@ -250,7 +250,8 @@ test.describe('管理员：题库 / 设置 / 用量 / 复核', () => {
 
     await page.getByRole('button', { name: 'AI 综合判题' }).click()
     await expect(page.locator('.blocked-box')).toContainText('切换被拒绝')
-    await expect(page.locator('.blocked-box')).toContainText('锁定评分标准')
+    await expect(page.locator('.blocked-box')).toContainText('评分标准未锁定')
+    await expect(page.locator('.blocked-box')).toContainText('缺少已启用的评分版本')
     await expect.poll(() => state.settingsPatches.at(-1)).toMatchObject({ grading_mode: 'ai' })
     await shot(page, 'admin-practice-settings-preflight-blocked')
 

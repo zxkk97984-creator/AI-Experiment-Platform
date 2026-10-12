@@ -291,8 +291,9 @@ export async function practiceFixture(page, role, options = {}) {
           return reply(route, {
             detail: {
               code: 'AI_PREFLIGHT_FAILED',
-              message: 'AI 预检未通过',
-              problems: [{ id: 1, title: longTitle, status: 'published', missing: ['锁定评分标准', '启用评分版本'] }],
+              message: '有已发布题目的评分标准尚未准备完成，请补齐或下架后再开启 AI',
+              // 全局错误信封只保留 {code, message, fields}（backend/app/main.py _normalize_detail）
+              fields: { problems: [{ id: 1, title: longTitle, status: 'published', missing: ['locked_rubric', 'active_version'] }] },
             },
           }, 409)
         }
@@ -304,7 +305,7 @@ export async function practiceFixture(page, role, options = {}) {
       return reply(route, options.preflight || {
         ready: !options.preflightFailed,
         problems: options.preflightFailed
-          ? [{ id: 1, title: longTitle, status: 'published', missing: ['锁定评分标准', '启用评分版本'] }]
+          ? [{ id: 1, title: longTitle, status: 'published', missing: ['locked_rubric', 'active_version'] }]
           : [],
         queue: options.queue || { queued: 0, running: 0, max_concurrent: 4 },
         ai_budget: { exhausted: !!options.quotaExhausted, tokens_used: 1000, tokens_budget: 100000 },

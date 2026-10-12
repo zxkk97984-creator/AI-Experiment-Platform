@@ -34,7 +34,7 @@ const settings = {
 const preflightReady = { ready: true, problems: [], checked_at: '2026-10-13T02:00:00Z' }
 const preflightBlocked = {
   ready: false,
-  problems: [{ id: 4, title: '统计列表中所有正数的和', status: 'published', missing: ['锁定评分标准', '启用评分版本'] }],
+  problems: [{ id: 4, title: '统计列表中所有正数的和', status: 'published', missing: ['locked_rubric', 'active_version'] }],
   checked_at: '2026-10-13T02:00:00Z',
 }
 
@@ -70,7 +70,7 @@ describe('PracticeSettingsView', () => {
     const wrapper = await mountView()
     await flushPromises()
     expect(wrapper.text()).toContain('AI 预检有 1 道题未就绪')
-    expect(wrapper.text()).toContain('锁定评分标准')
+    expect(wrapper.text()).toContain('评分标准未锁定')
   })
 
   it('切到 AI 判题走 PATCH，并提示只影响新提交', async () => {
@@ -87,7 +87,8 @@ describe('PracticeSettingsView', () => {
     api.updateSettings.mockRejectedValue({
       response: {
         status: 409,
-        data: { detail: { code: 'AI_PREFLIGHT_FAILED', message: 'AI 预检未通过', problems: preflightBlocked.problems } },
+        // 后端全局错误信封：{code, message, fields}
+        data: { detail: { code: 'AI_PREFLIGHT_FAILED', message: 'AI 预检未通过', fields: { problems: preflightBlocked.problems } } },
       },
     })
     const wrapper = await mountView()
@@ -97,6 +98,8 @@ describe('PracticeSettingsView', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('切换被拒绝，以下题目尚未准备完成')
     expect(wrapper.text()).toContain('统计列表中所有正数的和')
+    expect(wrapper.text()).toContain('评分标准未锁定')
+    expect(wrapper.text()).toContain('缺少已启用的评分版本')
   })
 
   it('权限不足时不展示设置表单', async () => {

@@ -173,6 +173,20 @@ export const BOARD_OPTIONS = [
   { value: 'ai', label: 'AI 综合榜' },
 ]
 
+// AI 预检未就绪原因：后端 missing 取值是稳定代码，前端统一翻成中文再展示
+export const MISSING_REQUIREMENT_LABELS = {
+  locked_rubric: '评分标准未锁定',
+  frozen_rubric: '评分标准未随发布冻结',
+  active_version: '缺少已启用的评分版本',
+  test_groups: '缺少测试组',
+}
+
+export function missingRequirementsText(missing) {
+  const list = Array.isArray(missing) ? missing : []
+  if (!list.length) return ''
+  return list.map((item) => MISSING_REQUIREMENT_LABELS[item] || String(item)).join('、')
+}
+
 export function newClientRequestId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   return `practice-${Date.now()}-${Math.random().toString(16).slice(2)}`
