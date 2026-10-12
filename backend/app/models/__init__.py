@@ -305,6 +305,8 @@ class Course(TimestampMixin, Base):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     visibility: Mapped[str] = mapped_column(String(20), default="class", server_default="class", nullable=False)
     default_score: Mapped[float] = mapped_column(Float, default=100.0, server_default="100")
+    # 课程级成绩册模板：只存分类与规则，不存任务 ID；首次开班时复制到教学班成绩册。
+    default_gradebook_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     teacher: Mapped[User | None] = relationship()
     cover_object: Mapped[StorageObject | None] = relationship(foreign_keys=[cover_object_id])
