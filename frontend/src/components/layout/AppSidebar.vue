@@ -50,6 +50,8 @@ const menuItems = computed(() => {
     { path: '/student/exams',       label: '考试',     sub: 'Exams',       icon: 'exam',       key: 'exams' },
     { path: '/student/experiments', label: '实验',     sub: 'Lab',         icon: 'experiment', key: 'experiments' },
     { path: '/student/notifications', label: '通知中心', sub: 'Notifications', icon: 'notification', key: 'notifications' },
+    { path: '/student/practice',      label: '自主练习', sub: 'Practice',      icon: 'code',         key: 'practice' },
+    { path: '/student/practice/mine', label: '我的练习', sub: 'My Practice',   icon: 'clipboard',    key: 'practice-mine' },
   ]
   if (auth.isTeacher) return [
     { path: '/teacher',                label: '工作台',     sub: 'Workbench',     icon: 'home',        key: 'home' },
@@ -63,6 +65,7 @@ const menuItems = computed(() => {
     { path: '/teacher/classes',        label: '班级与学员', sub: 'Classes',       icon: 'user',        key: 'classes' },
     { path: '/teacher/submissions/unified', label: '提交与评分', sub: 'Submissions', icon: 'clipboard', key: 'submissions' },
     { path: '/teacher/ai-grading',     label: 'AI 评分复核', sub: 'AI Grading',   icon: 'brain',       key: 'ai-grading' },
+    { path: '/teacher/practice/leaderboard', label: '练习排行榜', sub: 'Practice Board', icon: 'trophy', key: 'practice-board' },
     { path: '/teacher/grades',         label: '成绩统计',   sub: 'Grades',        icon: 'chart',       key: 'grades' },
     { path: '/teacher/environments',   label: '运行环境',   sub: 'Environments',  icon: 'cube',        key: 'environments' },
     { path: '/teacher/settings',       label: '设置',       sub: 'Settings',      icon: 'settings',    key: 'settings' },
@@ -79,6 +82,10 @@ const menuItems = computed(() => {
     { path: '/admin/experiments',   label: '实验管理', sub: 'Experiments', icon: 'experiment', key: 'experiments' },
     { path: '/admin/environments',  label: '环境档位', sub: 'Environments', icon: 'experiment', key: 'environments' },
     { path: '/admin/ai-grading',    label: 'AI 评分复核', sub: 'AI Grading', icon: 'brain',      key: 'ai-grading' },
+    { path: '/admin/practice/problems', label: '练习题库', sub: 'Practice',          icon: 'code',     key: 'practice-problems' },
+    { path: '/admin/practice/appeals',  label: '练习复核', sub: 'Practice Review',   icon: 'clipboard', key: 'practice-appeals' },
+    { path: '/admin/practice/settings', label: '练习设置', sub: 'Practice Settings', icon: 'settings', key: 'practice-settings' },
+    { path: '/admin/practice/usage',    label: '练习用量', sub: 'Practice Usage',    icon: 'chart',    key: 'practice-usage' },
     { path: '/admin/logs',          label: '系统日志',     sub: 'System Logs', icon: 'clipboard',  key: 'logs' },
   ]
   return [home('/student'), ...base]
@@ -91,15 +98,15 @@ const navGroups = computed(() => {
   if (auth.isTeacher) {
     return [
       { label: '教学', items: pick(['home', 'courses', 'materials', 'offerings', 'assignments', 'experiments', 'exams', 'classes']) },
-      { label: '评分', items: pick(['submissions', 'ai-grading', 'gradebook', 'grades']) },
+      { label: '评分', items: pick(['submissions', 'ai-grading', 'gradebook', 'grades', 'practice-board']) },
       { label: '系统', items: pick(['environments', 'settings']) },
     ]
   }
   if (auth.isAdmin) {
     return [
       { label: '教务', items: pick(['users', 'academics', 'offerings', 'courses', 'materials', 'experiments']) },
-      { label: '评分', items: pick(['ai-grading', 'gradebook']) },
-      { label: '系统', items: pick(['environments', 'logs', 'accounts', 'security']) },
+      { label: '评分', items: pick(['ai-grading', 'gradebook', 'practice-problems', 'practice-appeals']) },
+      { label: '系统', items: pick(['environments', 'logs', 'accounts', 'security', 'practice-settings', 'practice-usage']) },
     ]
   }
   return [{ label: '学习', items }]

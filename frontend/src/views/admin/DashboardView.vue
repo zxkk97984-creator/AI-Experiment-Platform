@@ -29,6 +29,7 @@ const sections = [
   { num: '03', label: '课程维护',   sub: 'Courses',      desc: '审视与维护全部课程资源',              path: '/admin/courses',      icon: 'book', color: 'green' },
   { num: '04', label: '实验配置',   sub: 'Experiments',  desc: '配置与维护实验模块、镜像与数据集',    path: '/admin/experiments',  icon: 'experiment', color: 'orange' },
   { num: '05', label: '环境档位',   sub: 'Environments', desc: '维护受控包目录与不可变判题/实验环境',  path: '/admin/environments', icon: 'settings', color: 'purple' },
+  { num: '06', label: '练习题库',   sub: 'Practice',     desc: '维护全平台练习题、判题方式与 AI 额度', path: '/admin/practice/problems', icon: 'code', color: 'green' },
 ]
 
 function go(p) { router.push(p) }
