@@ -8,8 +8,8 @@ MySQL 与 SQLite 都不支持带条件的部分唯一索引，NULL 在两边都�
 from datetime import datetime
 
 from sqlalchemy import (
-    CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text,
-    UniqueConstraint,
+    Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String,
+    Text, UniqueConstraint, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,6 +53,10 @@ class AiGradingSetupJob(TimestampMixin, Base):
     requested_reference_solution: Mapped[str | None] = mapped_column(Text, nullable=True)
     requested_teacher_constraints: Mapped[dict] = mapped_column(JSON, default=dict)
     requested_grading_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 教师可只生成评分标准：关闭时草稿阶段直接到 draft_ready，测试组由现有高级面板配置
+    generate_test_groups: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1"), nullable=False
+    )
 
     draft_rubric_id: Mapped[int | None] = mapped_column(
         ForeignKey("question_rubrics.id"), nullable=True

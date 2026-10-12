@@ -115,6 +115,7 @@ def create_or_get_job(
     reference_solution: str | None = None,
     teacher_constraints: dict | None = None,
     grading_mode: str | None = None,
+    generate_test_groups: bool = True,
 ) -> tuple[AiGradingSetupJob, bool]:
     """幂等创建：同一 (question_kind, question_id) 的活跃任务唯一，重复点击返回既有任务。"""
     key = active_key_for(question_kind, question_id)
@@ -133,6 +134,7 @@ def create_or_get_job(
         requested_reference_solution=reference_solution,
         requested_teacher_constraints=dict(teacher_constraints or {}),
         requested_grading_mode=grading_mode,
+        generate_test_groups=generate_test_groups,
     )
     db.add(job)
     try:
@@ -320,6 +322,13 @@ def run_setup_job(db: Session, redis_client: Redis, settings: Settings, job_id: 
                            progress=JOB_STAGE_PROGRESS["generating_test_groups"]):
             return
         job = _fresh_job(db, job_id)
+
+    if not job.generate_test_groups and job.stage in GENERATING_STAGES:
+        # 教师选择只生成评分标准：Rubric 草稿已完成，不再调用测试组生成，直接进入待确认启用
+        _update_job(db, job_id, token, stage="draft_ready",
+                    progress=JOB_STAGE_PROGRESS["draft_ready"],
+                    lease_token=None, lease_until=None)
+        return
 
     if job.stage == "generating_test_groups" and not (job.draft_test_groups or []):
         try:
@@ -601,7 +610,11 @@ def _resolve_groups(
 ) -> list[dict]:
     raw_groups = groups if groups is not None else (job.draft_test_groups or [])
     if not raw_groups:
-        raise SetupJobError("没有可用的测试组草稿，请先生成测试组")
+        # 关闭了自动生成测试组的任务：回落到题目上已有的测试组（高级面板维护）
+        question = _question(db, job.question_kind, job.question_id)
+        raw_groups = list(getattr(question, "test_groups", []) or []) if question else []
+    if not raw_groups:
+        raise SetupJobError("没有可用的测试组，请先生成测试组或手工配置")
     resolved = []
     for group in raw_groups:
         if isinstance(group, TestGroup):

@@ -1,7 +1,7 @@
 <script setup>
 // 一键 AI 配置（批次 2）：异步生成草稿 → 可试判 → 保存并启用。
 // 生成阶段只产出草稿；教师点「保存并启用」才会锁定标准并启用评分版本。
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from '../ui/AppIcon.vue'
 import UiProgress from '../ui/UiProgress.vue'
 import { aiGradingAPI } from '../../api/aiGrading.js'
@@ -13,6 +13,10 @@ const props = defineProps({
   referenceSolution: { type: String, default: '' },
   teacherConstraints: { type: Object, default: () => ({}) },
   gradingMode: { type: String, default: 'active' },
+  /** 是否同时用 AI 生成 F/R 测试组（关闭时只用评分标准草稿） */
+  generateTestGroups: { type: Boolean, default: true },
+  /** 弹窗流程里父组件已收集完输入，挂载即开始生成 */
+  autoStart: { type: Boolean, default: false },
 })
 const emit = defineEmits(['enabled'])
 
@@ -46,6 +50,13 @@ const isRunning = computed(() => ['queued', 'generating_rubric', 'generating_tes
 const isReady = computed(() => job.value?.stage === 'draft_ready')
 const isFailed = computed(() => job.value?.stage === 'failed')
 const progress = computed(() => (job.value?.progress ?? 0))
+const rubricPreview = computed(() => {
+  const doc = job.value?.draft_rubric || {}
+  return {
+    algorithm: (doc.algorithm_criteria || []).slice(0, 8),
+    quality: (doc.quality_criteria || []).slice(0, 8),
+  }
+})
 const rubricStatusText = computed(() => (job.value?.draft_rubric_status === 'locked' ? '已锁定' : '草稿'))
 
 function stopPolling() {
@@ -86,6 +97,7 @@ async function start() {
       reference_solution: props.referenceSolution || null,
       teacher_constraints: props.teacherConstraints || {},
       grading_mode: props.gradingMode || null,
+      generate_test_groups: props.generateTestGroups,
     })
     job.value = res.data
     if (res.data.stage !== 'draft_ready' && res.data.stage !== 'enabled') pollJob()
@@ -156,6 +168,7 @@ async function enable() {
   }
 }
 
+onMounted(() => { if (props.autoStart) start() })
 onBeforeUnmount(stopPolling)
 </script>
 
@@ -193,6 +206,26 @@ onBeforeUnmount(stopPolling)
     <p v-if="stageError" class="setup-error" role="alert">{{ stageError }}</p>
 
     <template v-if="isReady">
+      <div class="setup-block">
+        <h3>预览草稿（尚未锁定）</h3>
+        <div class="preview-grid">
+          <div>
+            <h4 class="preview-title">评分标准</h4>
+            <ul class="preview-list">
+              <li v-for="item in rubricPreview.algorithm" :key="item.id">A · {{ item.name }}（{{ item.points }} 分）</li>
+              <li v-for="item in rubricPreview.quality" :key="item.id">Q · {{ item.name }}（{{ item.points }} 分）</li>
+            </ul>
+          </div>
+          <div>
+            <h4 class="preview-title">测试组（F/R）</h4>
+            <ul class="preview-list">
+              <li v-for="group in job.draft_test_groups" :key="group.id">{{ group.dimension }} · {{ group.name }}（{{ group.max_score }} 分）</li>
+              <li v-if="!job.draft_test_groups || !job.draft_test_groups.length">未生成测试组——保存并启用需先用高级面板配置 F/R 测试组</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       <div class="setup-block">
         <h3>可选：草稿试判</h3>
         <p class="setup-hint">用当前草稿规则试跑一段样例代码。试判不生成正式提交、不消耗学生提交次数，也不包含 F/R 确定性分。</p>
@@ -240,5 +273,8 @@ onBeforeUnmount(stopPolling)
 .setup-hint { margin: 0; color: var(--muted); font-size: var(--text-sm); }
 .setup-code { width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); resize: vertical; }
 .trial-result { color: var(--muted); font-size: var(--text-sm); }
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-3); }
+.preview-title { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--muted); }
+.preview-list { margin: 0; padding-left: var(--space-4); color: var(--fg); font-size: var(--text-sm); }
 .trial-result p { margin: 0; }
 </style>

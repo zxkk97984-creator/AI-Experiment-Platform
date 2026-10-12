@@ -323,6 +323,8 @@ class AISetupJobCreate(BaseModel):
     reference_solution: str | None = Field(default=None, max_length=50000)
     teacher_constraints: dict[str, Any] | None = None
     grading_mode: Literal["legacy", "shadow", "active"] | None = None
+    # 是否同时用 AI 生成 F/R 测试组；关闭时只用评分标准草稿（测试组走现有高级配置）
+    generate_test_groups: bool = True
 
 
 class AISetupTrialRunCreate(BaseModel):

@@ -492,3 +492,35 @@ def test_validate_enable_scores_flags_over_limit_dimensions():
     legal_document = {"algorithm_criteria": [{"id": "A1", "points": 20}],
                       "quality_criteria": [{"id": "Q1", "points": 10}]}
     assert setup.validate_enable_scores(legal_document, payload) == []
+
+
+# ── 关闭「同时生成测试用例」：只出评分标准草稿，enable 回落到题目已有测试组 ──
+
+
+def test_setup_job_can_skip_test_group_generation(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world, generate_test_groups=False)["id"]
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+
+    detail = client.get(f"{API}/setup-jobs/{job_id}", headers=headers).json()
+    assert detail["stage"] == "draft_ready"
+    assert detail["generate_test_groups"] is False
+    assert detail["draft_test_groups"] == [], "关闭时不得调用测试组生成"
+    assert detail["draft_rubric_status"] == "draft"
+
+    # enable 回落到题目上已有的测试组（高级面板维护），仍然单事务生效
+    response = client.post(f"{API}/setup-jobs/{job_id}/enable", headers=headers, json={})
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "active"
+
+    # 对照组：默认开启时草稿测试组非空
+    monkeypatch.setattr(setup, "generate_test_groups",
+                        lambda client_, snapshot, settings_, **kw: SimpleNamespace(
+                            test_groups=list(TEST_GROUPS), warnings=[], generation_id="gen-2"))
+    second_job = _create_job(client, headers, world, question_id=world.question_id)["id"]
+    _run_job(db_session_factory, test_settings, redis_client, second_job)
+    second_detail = client.get(f"{API}/setup-jobs/{second_job}", headers=headers).json()
+    assert len(second_detail["draft_test_groups"]) == 2

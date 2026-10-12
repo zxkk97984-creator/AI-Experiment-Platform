@@ -10,6 +10,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import AIQuestionConfig from '../../components/ai/AIQuestionConfig.vue'
+import AISetupDialog from '../../components/ai/AISetupDialog.vue'
 import AiConfigForm from '../../components/ai/AiConfigForm.vue'
 import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
 import GradebookBindingField from '../../components/gradebook/GradebookBindingField.vue'
@@ -34,6 +35,8 @@ const app = useAppStore()
 const assignment = ref(null)
 const returnNavigation = computed(() => taskEditorReturn({ role: route.meta?.role, kind: 'assignment', task: assignment.value, query: route.query }))
 const questions = ref([])
+// 一键 AI 判题对话框的默认值来源：当前编辑中的题目（列表已带 grading_mode 等字段）
+const editingSetupQuestion = computed(() => questions.value.find((q) => q.id === editingId.value) || {})
 const loading = ref(true)
 
 // ── 编辑状态：null = 未选择题目；'new' = 新建；数字 = 编辑已有题目 ──
@@ -470,6 +473,12 @@ function openAiConfig(q) {
  })
 }
 
+// 一键 AI 判题（批次 2）：对话框保存并启用成功后刷新题目列表（grading_mode 变为 active）
+async function onAiSetupEnabled() {
+  await fetch()
+  app.showToast('AI 判题已启用，题目已切换为正式评分', 'success')
+}
+
 // AI 配置保存成功：刷新上方题目列表，并清空下方编辑区进入下一题空白表单
 async function onQuestionAiSaved() {
  await fetch()
@@ -827,6 +836,21 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
 
           <!-- ⑤ AI 评分配置：位于题目编写区下方，先写题再配 AI -->
           <section id="ai-config-section" class="card qe-card qe-ai-main">
+            <!-- 一键 AI 判题（主路径）：填参考解法与评分侧重 → 生成草稿 → 试判 → 保存并启用 -->
+            <div v-if="editingId" class="qe-ai-setup-bar">
+              <div class="qe-ai-setup-text">
+                <h2 class="qe-card-title">一键 AI 判题</h2>
+                <p class="qe-side-sub">填写参考解法与评分侧重，自动生成评分标准（可选同时生成测试组），可先试判再一次性保存并启用。</p>
+              </div>
+              <AISetupDialog
+                kind="assignment"
+                :question-id="Number(editingId)"
+                :default-reference-solution="editingSetupQuestion.reference_solution || ''"
+                :default-constraints-text="editingSetupQuestion.teacher_constraints?.requirements_text || ''"
+                :default-grading-mode="editingSetupQuestion.grading_mode || 'active'"
+                @enabled="onAiSetupEnabled"
+              />
+            </div>
             <!-- 已有题目 → 持久化容器（GET/PUT/Rubric），保存后刷新列表并进入下一题 -->
             <AIQuestionConfig
               v-if="editingId"
@@ -1379,6 +1403,11 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
  max-height: calc(100vh - 150px);
  overflow-y: auto;
 }
+
+/* 一键 AI 判题入口条（批次 2）：位于 AI 评分配置区顶部，高级面板保持原样 */
+.qe-ai-setup-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-sunken); }
+.qe-ai-setup-text { min-width: 0; }
+.qe-ai-setup-text .qe-side-sub { margin: var(--space-1) 0 0; }
 
 /* AIQuestionConfig 默认自带 12px 顶部外边距与不可换行的上限行，窄栏内收拢 */
 .qe-side-body--scroll :deep(.ai-config) { margin-top: 0; }

@@ -1218,6 +1218,7 @@ def _setup_job_read(db: Session, job) -> dict:
         "draft_rubric": rubric.rubric_json if rubric is not None else None,
         "draft_rubric_status": rubric.status if rubric is not None else None,
         "draft_test_groups": job.draft_test_groups or [],
+        "generate_test_groups": bool(job.generate_test_groups),
         "error_code": job.error_code, "error_message": job.error_message,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
@@ -1248,6 +1249,7 @@ def create_setup_job(
         db, question_kind=data.question_kind, question_id=data.question_id,
         teacher_id=current_user.id, reference_solution=data.reference_solution,
         teacher_constraints=data.teacher_constraints, grading_mode=data.grading_mode,
+        generate_test_groups=data.generate_test_groups,
     )
     if job.stage == "queued":
         setup.enqueue_setup_job(db, redis_client, job.id)

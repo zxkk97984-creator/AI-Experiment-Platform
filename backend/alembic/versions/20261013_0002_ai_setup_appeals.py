@@ -31,6 +31,7 @@ def upgrade() -> None:
         sa.Column("requested_reference_solution", sa.Text(), nullable=True),
         sa.Column("requested_teacher_constraints", sa.JSON(), nullable=False),
         sa.Column("requested_grading_mode", sa.String(length=20), nullable=True),
+        sa.Column("generate_test_groups", sa.Boolean(), nullable=False, server_default=sa.text("1")),
         sa.Column("draft_rubric_id", sa.Integer(), sa.ForeignKey("question_rubrics.id"), nullable=True),
         sa.Column("draft_test_groups", sa.JSON(), nullable=False),
         sa.Column("failed_stage", sa.String(length=30), nullable=True),

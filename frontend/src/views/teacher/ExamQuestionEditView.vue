@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import AIQuestionConfig from '../../components/ai/AIQuestionConfig.vue'
+import AISetupDialog from '../../components/ai/AISetupDialog.vue'
 import GradingVersionPanel from '../../components/grading/GradingVersionPanel.vue'
 import ChoiceOptionsEditor from '../../components/teacher/exam/ChoiceOptionsEditor.vue'
 import FillBlankEditor from '../../components/teacher/exam/FillBlankEditor.vue'
@@ -113,6 +114,19 @@ const functionName = computed(() => {
   const match = /^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/m.exec(form.value.starter_code || '')
   return match?.[1] || 'solution'
 })
+
+// 一键 AI 判题（批次 2）：考试编程题与作业题同一流程，启用后刷新题目列表
+async function onAiSetupEnabled() {
+  await load()
+  app.showToast('AI 判题已启用，题目已切换为正式评分', 'success')
+}
+
+function constraintsTextOf(q) {
+  const constraints = q.teacher_constraints
+  return constraints && typeof constraints === 'object' && typeof constraints.requirements_text === 'string'
+    ? constraints.requirements_text
+    : ''
+}
 
 function configStatus(q) {
   if (q.question_type !== 'code') return { ok: true, text: '' }
@@ -327,6 +341,16 @@ onMounted(load)
                     <AppIcon name="brain" :size="15" />
                     {{ aiConfigQid === q.id ? '收起配置' : 'AI 配置' }}
                   </button>
+                  <AISetupDialog
+                    v-if="q.question_type === 'code'"
+                    kind="exam"
+                    :question-id="q.id"
+                    :default-reference-solution="q.reference_solution || ''"
+                    :default-constraints-text="constraintsTextOf(q)"
+                    :default-grading-mode="q.grading_mode || 'active'"
+                    :disabled="exam?.status !== 'draft'"
+                    @enabled="onAiSetupEnabled"
+                  />
                   <button class="icon-action" :disabled="exam?.status !== 'draft'" aria-label="编辑题目" title="编辑题目" @click="openEdit(q)">
                     <AppIcon name="edit" :size="16" />
                   </button>
