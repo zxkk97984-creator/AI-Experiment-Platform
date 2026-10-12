@@ -13,6 +13,7 @@ from app.errors import api_error
 from app.models import (AcademicTerm, Assignment, Chapter, Course, CourseTeachingClass, Exam,
     ExperimentModule, ExperimentRecord, Lesson, NotebookTemplate, TeachingClass, TeachingClassStudent, User)
 from app.models.teaching import CourseOffering, OfferingEnrollment, OfferingExperiment
+from app.schemas.gradebook import GradebookBinding
 from app.services import offering_service as scope
 from app.services.account_service import audit, lock_policy
 from app.services.teaching_query_policy import lock_current_actor
@@ -107,6 +108,8 @@ class ExperimentRelease(BaseModel):
     opens_at: datetime | None = None
     deadline: datetime | None = None
     status: Literal['draft', 'published'] = 'published'
+    # 班级级发布实验时默认计入课程总评（分类：labs）。
+    gradebook_binding: GradebookBinding | None = None
 
     @field_validator('opens_at', 'deadline')
     @classmethod
@@ -341,14 +344,25 @@ def release_experiment(offering_id: int, payload: ExperimentRelease, db=Depends(
         .limit(1).with_for_update()):
         if row.template_version_id != template.current_version_id or row.assessment_id != payload.assessment_id:
             raise api_error(409, 'EXPERIMENT_VERSION_LOCKED', '已有学生记录，变更评分版本请使用显式重评流程')
+    values = payload.model_dump(exclude={'gradebook_binding'})
     if not row:
-        row = OfferingExperiment(offering_id=offering_id, template_version_id=template.current_version_id, **payload.model_dump())
+        row = OfferingExperiment(offering_id=offering_id, template_version_id=template.current_version_id, **values)
         db.add(row)
     else:
-        for key, value in payload.model_dump().items():
+        for key, value in values.items():
             setattr(row, key, value)
         row.template_version_id = template.current_version_id
+    db.flush()
     audit(db, user.id, 'offering.experiment.release', 'course_offering', offering_id, changes=payload.model_dump(mode='json'))
+    # 班级级发布实验默认计入课程总评；同一实验重复发布不会产生第二个分项。
+    binding = payload.gradebook_binding
+    if payload.status == 'published' and (binding is None or binding.enabled):
+        from app.services import gradebook_service as grades
+
+        grades.bind_task_column(db, offering_id, user.id, source_kind='experiment', source_id=row.id,
+                                title=entry.title if payload.entry_kind == 'lesson' else entry.name,
+                                category_key=(binding.category_key if binding and binding.category_key
+                                              else grades.TASK_CATEGORY_BY_KIND['experiment']))
     db.commit()
     return {'id': row.id, 'offering_id': row.offering_id, 'assessment_id': row.assessment_id, 'status': row.status}
 

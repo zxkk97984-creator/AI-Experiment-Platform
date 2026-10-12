@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import AppLayout from '../components/layout/AppLayout.vue'
+import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
 import { useAuthStore } from '../stores/auth.js'
 import { gradebookAPI } from '../api/gradebook.js'
 import { downloadBlob, errorMessage } from '../api/accountManagement.js'
@@ -38,6 +39,11 @@ const columns = computed(() => shownConfig.value.flatMap(group => group.columns)
 const rows = computed(() => viewing.value || isStudent.value ? currentSnapshot.value?.payload.rows || [] : data.value?.draft?.rows || [])
 const weightTotal = computed(() => config.value.reduce((sum, item) => sum + Number(item.weight || 0), 0))
 const blockers = computed(() => data.value?.draft?.blockers || [])
+// 自定义比例栏目里新自动关联的分项：未分配比例，暂不参与总评，也不能发布。
+const pendingColumns = computed(() => (isStudent.value || viewing.value ? [] : config.value
+  .flatMap(category => category.columns).filter(column => column.allocation_status === 'pending')))
+const restoreReason = ref('')
+const restoreConfirm = ref(false)
 const sourceKinds = { manual: '人工录入', assignment: '作业', exam: '考试', experiment: '实验' }
 const states = { scored: '已评分', pending: '待评分', missing: '确认缺交', missing_pending: '缺交待确认', exempt: '免修', auto: '来源成绩' }
 const createKey = (prefix) => `${prefix}-${crypto.randomUUID()}`
@@ -106,7 +112,29 @@ function addCategory() {
   config.value.push({ key, title: '新栏目', weight: '0', columns: [{ key: createKey('column'), title: '新分项', weight: '100', source_kind: 'manual', source_id: null, selection: 'highest' }] })
 }
 function addColumn(category) { category.columns.push({ key: createKey('column'), title: '新分项', weight: '0', source_kind: 'manual', source_id: null, selection: 'highest' }) }
-function saveConfig() { return mutate(() => gradebookAPI.configure(offeringId.value, { expected_revision: data.value.revision, categories: config.value }), '栏目与比例已保存。成绩仍需审核后发布。') }
+function isCustomMode(category) { return category.weight_mode === 'custom' }
+function changeMode(category, mode) {
+  category.weight_mode = mode
+  // 等权栏目由分项数量决定比例：清掉旧的显式比例，避免切换后仍按旧比例计算。
+  if (mode !== 'custom') for (const column of category.columns) column.weight = null
+}
+function saveConfig() {
+  // 输入框清空得到 ''，与「未分配」null 同义；统一按 null 提交，避免 422。
+  const categories = config.value.map(category => ({
+    ...category,
+    columns: category.columns.map(column => column.weight === '' ? { ...column, weight: null } : column),
+  }))
+  return mutate(() => gradebookAPI.configure(offeringId.value, { expected_revision: data.value.revision, categories }), '栏目与比例已保存。成绩仍需审核后发布。')
+}
+function restoreDefault() {
+  return mutate(() => gradebookAPI.restoreDefault(offeringId.value,
+    { expected_revision: data.value.revision, reason: restoreReason.value }),
+  '已按课程默认模板重建本班栏目与比例，请重新核对分项。').then(saved => {
+    restoreConfirm.value = false
+    if (saved) restoreReason.value = ''
+    return saved
+  })
+}
 function editStudent(student) {
   selectedStudent.value = student
   entryForm.value = columns.value.map(column => {
@@ -185,19 +213,24 @@ function cellLabel(cell) { return cell?.score ?? states[cell?.state] ?? '—' }
         <p class="account-muted">一级栏目比例合计 100%；各栏目内二级分项比例也合计 100%。分项统一按百分制计算。同一来源只能计入一次。</p>
         <form @submit.prevent="saveConfig">
           <section v-for="(category, index) in config" :key="category.key" class="category-editor">
-            <div class="category-heading"><label>一级栏目名称<input v-model="category.title" required maxlength="120" /></label><label>总成绩占比 %<input v-model="category.weight" type="number" min="0" max="100" step="0.0001" required /></label><button type="button" class="btn-ghost" :disabled="config.length === 1" @click="config.splice(index, 1)">删除栏目</button></div>
+            <div class="category-heading"><label>一级栏目名称<input v-model="category.title" required maxlength="120" /></label><label>总成绩占比 %<input v-model="category.weight" type="number" min="0" max="100" step="0.0001" required /></label><label>同类任务计分<DsSelect :model-value="category.weight_mode || 'equal'" aria-label="同类任务计分方式" @update:model-value="changeMode(category, $event)"><option value="equal">默认等权（按分项数均分）</option><option value="custom">自定义比例</option></DsSelect></label><button type="button" class="btn-ghost" :disabled="config.length === 1" @click="config.splice(index, 1)">删除栏目</button></div>
             <div v-for="(col, colIndex) in category.columns" :key="col.key" class="column-editor">
-              <label>二级分项<input v-model="col.title" required maxlength="120" /></label><label>栏目内占比 %<input v-model="col.weight" type="number" min="0" max="100" step="0.0001" required /></label>
+              <label>二级分项<input v-model="col.title" required maxlength="120" /></label><label v-if="isCustomMode(category)">栏目内占比 %<input v-model="col.weight" type="number" min="0" max="100" step="0.0001" :required="col.allocation_status !== 'pending'" :placeholder="col.allocation_status === 'pending' ? '待分配' : ''" /></label>
+              <span v-else class="equal-note" :title="`${col.title} 与该栏目其它分项等权`">等权分项</span>
               <label>成绩来源<DsSelect v-model="col.source_kind" @change="col.source_id = null"><option v-for="(label, kind) in sourceKinds" :key="kind" :value="kind">{{ label }}</option></DsSelect></label>
               <label v-if="col.source_kind !== 'manual'">本班教学活动<DsSelect v-model.number="col.source_id" required><option :value="null">请选择来源</option><option v-for="source in data.sources.filter(source => source.kind === col.source_kind)" :key="`${source.kind}-${source.id}`" :value="source.id">{{ source.title }}</option></DsSelect></label>
               <label v-if="['assignment', 'experiment'].includes(col.source_kind)">取分规则<DsSelect v-model="col.selection"><option value="highest">最高已发布分</option><option value="latest">最新已发布分</option></DsSelect></label>
               <button type="button" class="btn-ghost" :disabled="category.columns.length === 1" @click="category.columns.splice(colIndex, 1)">删除分项</button>
+              <small v-if="col.allocation_status === 'pending'" class="pending-note">待分配：该自动关联分项暂不计入总评，发布正式总评前必须为它确认栏目内比例。</small>
               <small v-if="col.source_kind === 'experiment'" class="account-muted">实验平台已有选定成绩时，始终使用平台选定的已发布版本。</small>
             </div>
-            <div class="account-actions"><span>二级比例合计 {{ columnWeight(category) }}%</span><button type="button" class="btn-ghost" @click="addColumn(category)">添加二级分项</button></div>
+            <div class="account-actions"><span v-if="isCustomMode(category)">二级比例合计 {{ columnWeight(category) }}%</span><span v-else class="account-muted">该栏目按分项数量等权计分</span><button type="button" class="btn-ghost" @click="addColumn(category)">添加二级分项</button></div>
           </section>
           <p class="account-muted">改变分项的成绩来源或删除分项，会清理该分项的未发布录入；已有官方版本保留。</p>
+          <p v-if="pendingColumns.length" class="account-notice" role="status">有 {{ pendingColumns.length }} 个自动关联分项尚未分配栏目内比例（{{ pendingColumns.map(column => column.title).join('、') }}），确认分配前不能发布正式总评。</p>
           <div class="account-actions"><span>一级比例合计 {{ weightTotal }}%</span><button type="button" class="btn-ghost" @click="addCategory">添加一级栏目</button><button class="btn-primary" :disabled="busy">保存栏目与比例</button></div>
+          <div class="account-actions restore-actions"><label>恢复为课程默认的原因<input v-model="restoreReason" maxlength="500" placeholder="说明为什么改用课程模板覆盖本班栏目" /></label><button type="button" class="btn-ghost" :disabled="busy || !restoreReason.trim()" @click="restoreConfirm = true">恢复为课程默认</button></div>
+          <p class="account-muted">恢复为课程默认会用课程模板重建本班栏目与比例：本班自动关联的任务分项会被移除，未发布的人工分项草稿一并清除。已发布的官方版本与归档不受影响。</p>
         </form>
       </details>
       <section v-if="rows.length || (!isStudent && data.draft)" class="account-panel">
@@ -228,6 +261,10 @@ function cellLabel(cell) { return cell?.score ?? states[cell?.state] ?? '—' }
         <ul class="snapshot-list"><li v-for="snapshot in history" :key="snapshot.id"><button class="btn-ghost" @click="viewSnapshot(snapshot.id)">版本 {{ snapshot.revision }} · {{ snapshot.kind === 'archive' ? '归档' : '已发布' }} · {{ formatDateTime(snapshot.created_at) }}</button><span>{{ snapshot.reason }}</span></li></ul>
       </section>
     </template>
+    <ConfirmDialog v-if="restoreConfirm" title="恢复为课程默认？"
+      message="将用课程模板重建本班栏目与比例：本班自动关联的任务分项会被移除，未发布的人工分项草稿一并清除。已发布的官方版本与归档不受影响。"
+      confirm-text="确认恢复" cancel-text="取消" :danger="true" :busy="busy"
+      @confirm="restoreDefault()" @cancel="restoreConfirm = false" />
   </div></AppLayout>
 </template>
 
@@ -254,5 +291,9 @@ function cellLabel(cell) { return cell?.score ?? states[cell?.state] ?? '—' }
 .snapshot-list { padding: 0; list-style: none; display: grid; gap: 8px; }
 .snapshot-list li { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .snapshot-list span { color: var(--muted); }
+.equal-note { align-self: end; padding: 8px 10px; border-radius: 6px; background: var(--surface-subtle, #eef1ee); color: var(--muted); font-size: 13px; }
+.pending-note { flex-basis: 100%; color: var(--warning, #8a5b00); }
+.restore-actions { border-top: 1px dashed var(--border); padding-top: 12px; }
+.restore-actions label { max-width: 420px; }
 @media (max-width: 700px) { .gradebook-page label { flex-basis: 100%; } .category-heading, .column-editor { align-items: stretch; } .offering-picker { max-width: 100%; } }
 </style>

@@ -3,16 +3,46 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 
+from app.api.courses import ensure_course_manager, require_course
 from app.dependencies import get_current_user, get_db, require_roles
 from app.errors import api_error
 from app.models import AcademicTerm, Course, TeachingClass
 from app.models.gradebook import GradebookSnapshot
 from app.models.teaching import CourseOffering, OfferingEnrollment
-from app.schemas.gradebook import AdjustmentUpdate, ConfigUpdate, EntriesUpdate, RevisionAction
+from app.schemas.gradebook import AdjustmentUpdate, ConfigUpdate, CourseTemplateUpdate, EntriesUpdate, RevisionAction
 from app.services import gradebook_service as grades
+from app.services.account_service import audit, lock_policy
 from app.services.offering_service import require_offering
 
 router = APIRouter(prefix='/gradebooks', tags=['gradebooks'])
+
+
+def template_payload(course):
+    return {'course_id': course.id, 'customized': course.default_gradebook_config is not None,
+            'categories': grades.course_template(course)}
+
+
+@router.get('/courses/{course_id}/default-config')
+def read_course_template(course_id: int, db=Depends(get_db), user=Depends(require_roles('teacher', 'admin'))):
+    course = require_course(course_id, db)
+    ensure_course_manager(course, user)
+    return template_payload(course)
+
+
+@router.put('/courses/{course_id}/default-config')
+def save_course_template(course_id: int, payload: CourseTemplateUpdate, db=Depends(get_db),
+                         user=Depends(require_roles('teacher', 'admin'))):
+    # 课程模板只影响之后新开的班：已开班成绩册在首次建册时已复制，不在本请求里回溯。
+    lock_policy(db)
+    course = require_course(course_id, db)
+    ensure_course_manager(course, user)
+    course.default_gradebook_config = [
+        {'key': item.key, 'title': item.title, 'weight': str(item.weight), 'weight_mode': item.weight_mode}
+        for item in payload.categories]
+    audit(db, user.id, 'gradebook.course_template', 'course', course.id,
+          changes={'categories': [item.key for item in payload.categories]})
+    db.commit()
+    return template_payload(course)
 
 
 @router.get('/offerings')
@@ -38,6 +68,25 @@ def configure(offering_id: int, payload: ConfigUpdate, db=Depends(get_db), user=
     grades.save_config(db, offering_id, user, payload)
     db.commit()
     return grades.read_book(db, offering_id, user)
+
+
+@router.post('/offerings/{offering_id}/config/restore-default')
+def restore_default(offering_id: int, payload: RevisionAction, db=Depends(get_db),
+                    user=Depends(require_roles('teacher', 'admin'))):
+    grades.restore_course_default(db, offering_id, user, payload)
+    db.commit()
+    return grades.read_book(db, offering_id, user)
+
+
+@router.get('/offerings/{offering_id}/binding-options')
+def binding_options(offering_id: int, db=Depends(get_db), user=Depends(require_roles('teacher', 'admin'))):
+    # 发布表单只需要分类，不必触发整册草稿计算（含名单与来源预载）。
+    require_offering(db, offering_id, user)
+    book = grades.book_for(db, offering_id)
+    config = grades.config_read(db, book) if book else grades.book_config_for(db, offering_id)
+    return {'book_revision': book.revision if book else 0,
+            'categories': [{'key': row['key'], 'title': row['title'], 'weight_mode': row['weight_mode']}
+                           for row in config]}
 
 
 @router.patch('/offerings/{offering_id}/entries')

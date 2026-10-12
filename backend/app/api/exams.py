@@ -19,7 +19,8 @@ from app.models import (
     ExamAudienceStudent, ExamGrade, ExamQuestion, ExamSubmission,
     ManualScoreAudit, QuestionRubric, TeachingClassStudent, User,
 )
-from app.schemas import CourseStudentImportResult, CourseStudentImportRow, ExamAnswerBatchRequest, ExamAnswerScoreUpdate, ExamCreate, ExamGradeRead, ExamQuestionCreate, ExamQuestionRead, ExamQuestionTeacherRead, ExamQuestionUpdate, ExamRead, ExamRetryRequest, ExamSampleRunRequest, ExamSessionRead, ExamSubmitPayload, ExamSubmitRequest, ExamSubmissionRead, ExamTakeoverRequest, ExamTimeExtensionRequest, ExamUpdate, PaginatedResponse, SampleRunResponse
+from app.schemas import CourseStudentImportResult, CourseStudentImportRow, ExamAnswerBatchRequest, ExamAnswerScoreUpdate, ExamCreate, ExamGradeRead, ExamQuestionCreate, ExamQuestionRead, ExamQuestionTeacherRead, ExamQuestionUpdate, ExamRead, ExamRetryRequest, ExamSampleRunRequest, ExamSessionRead, ExamSubmitPayload, ExamSubmitRequest, ExamSubmissionRead, ExamTakeoverRequest, ExamTimeExtensionRequest, PaginatedResponse, SampleRunResponse
+from app.schemas.gradebook import ExamUpdateWithGradebook
 from app.services.exam_service import build_proctor_overview, build_student_exam_session, build_student_exam_summary, create_question, delete_question, exam_max_score, extend_exam_submission, force_submit_exam_submission, get_my_grade, get_question, hash_client_identity, list_questions, record_exam_events, release_exam_review, require_exam_editable, retry_exam_submission as retry_exam_submission_service, save_answer, start_exam as svc_start_exam, student_exam_status, submit_exam as svc_submit_exam, takeover_exam_session, update_question, validate_publish
 from app.services.time_utils import as_utc, utc_now
 from app.services.audience_service import (
@@ -392,7 +393,7 @@ def get_exam(exam_id: int, db: Session = Depends(get_db), current_user: User = D
 @router.patch("/{exam_id}", response_model=ExamRead)
 def update_exam(
     exam_id: int,
-    payload: ExamUpdate,
+    payload: ExamUpdateWithGradebook,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
@@ -401,6 +402,7 @@ def update_exam(
     ensure_exam_manager(exam, current_user)
     previous_status = exam.status
     changes = payload.model_dump(exclude_unset=True)
+    changes.pop("gradebook_binding", None)
     audience_updates = {key: changes.pop(key) for key in (
         "audience_mode", "audience_class_ids", "whitelist_student_ids", "excluded_student_ids",
     ) if key in changes}
@@ -489,6 +491,17 @@ def update_exam(
                     missing.append(str(position))
             if missing:
                 raise api_error(422, "AI_RUBRIC_REQUIRED", "以下编程题尚未锁定 Rubric：第 " + "、".join(missing) + " 题")
+        # 首次发布时按 exam_kind 自动归入成绩册分类；重复发布不会产生第二个分项。
+        if previous_status != "published" and exam.offering_id:
+            from app.services import gradebook_service as grades
+
+            binding = payload.gradebook_binding
+            if (binding is None or binding.enabled) and grades.bound_column(db, exam.offering_id, "exam", exam.id) is None:
+                category_key = binding.category_key if binding and binding.category_key else grades.EXAM_CATEGORY_BY_KIND.get(exam.exam_kind)
+                if not category_key:
+                    raise api_error(422, "GRADEBOOK_CATEGORY_REQUIRED", "「其他」类型考试必须选择计入总评的分类，或取消计入课程总评")
+                grades.bind_task_column(db, exam.offering_id, current_user.id, source_kind="exam", source_id=exam.id,
+                                        title=exam.title, category_key=category_key)
     db.commit()
     db.refresh(exam)
     return exam

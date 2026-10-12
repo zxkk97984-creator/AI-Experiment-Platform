@@ -12,6 +12,7 @@ import AppIcon from '../../components/ui/AppIcon.vue'
 import AIQuestionConfig from '../../components/ai/AIQuestionConfig.vue'
 import AiConfigForm from '../../components/ai/AiConfigForm.vue'
 import ConfirmDialog from '../../components/ui/ConfirmDialog.vue'
+import GradebookBindingField from '../../components/gradebook/GradebookBindingField.vue'
 import EnvironmentProfilePicker from '../../components/common/EnvironmentProfilePicker.vue'
 import TaskAudiencePicker from '../../components/teacher/TaskAudiencePicker.vue'
 import QeMarkdownEditor from '../../components/teacher/question-editor/QeMarkdownEditor.vue'
@@ -41,7 +42,9 @@ const editingId = ref(null)  // 编辑中的题目 id（null = 新建）
 const formKey = ref(0)       // 强制 QeTestCases 在加载/重置时重挂
 const lastSavedAt = ref(null)
 const saving = ref(false)
-const publishing = ref(false)      // 发布作业进行中（防重复点击）
+const publishing = ref(false)  // 发布作业进行中（防重复点击）
+// 发布作业默认计入课程总评，分类预选「平时」；教师可在发布卡片里取消或改分类。
+const gradebookBinding = ref({ enabled: true, category_key: 'regular' })
 const confirmPublish = ref(false)  // 发布作业确认弹窗
 const runResult = ref(null)
 const fullscreenCode = ref(false)
@@ -439,7 +442,7 @@ async function publishAssignment() {
      saved = await submitQuestion()  // 保存失败已由 submitQuestion toast 错误
      if (!saved) { confirmPublish.value = false; return }
    }
-   await assignmentsAPI.publish(route.params.id)
+   await assignmentsAPI.publish(route.params.id, { gradebook_binding: gradebookBinding.value })
    app.showToast('作业已发布', 'success')
    confirmPublish.value = false
    fetch()  // 刷新作业状态：按钮随之变为「已发布」禁用
@@ -594,6 +597,8 @@ onMounted(() => { fetch(); fetchEnv(); fetchAiStatus() })
             <dd><input id="assignment-due-at" v-model="scheduleDueLocal" type="datetime-local" /></dd>
           </div>
         </dl>
+        <GradebookBindingField v-if="assignmentDraft" v-model="gradebookBinding" class="qe-binding"
+                               :offering-id="assignment?.offering_id" default-key="regular" :disabled="publishing" />
         <button type="button" class="btn btn-sm btn-primary qe-schedule-save" :disabled="scheduleSaving" @click="requestScheduleSave">
           {{ scheduleSaving ? '保存中...' : '保存时间设置' }}
         </button>

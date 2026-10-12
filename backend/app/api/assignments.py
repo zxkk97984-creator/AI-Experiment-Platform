@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, UploadFile, status
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.models import (
     User,
 )
 from app.schemas.assignment_progress import AssignmentProgressRead
+from app.schemas.gradebook import TaskPublishRequest
 from app.schemas import (
     AssignmentCreate,
     CourseStudentImportResult,
@@ -371,6 +372,7 @@ async def import_assignment_audience(
 @router.post("/{assignment_id}/publish", response_model=AssignmentRead)
 def publish_assignment(
     assignment_id: int,
+    payload: TaskPublishRequest | None = Body(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
@@ -416,6 +418,17 @@ def publish_assignment(
     assignment.status = "published"
     if assignment.published_at is None:
         assignment.published_at = utc_now()
+    # 发布任务默认计入课程总评：只有带 offering_id 的班级任务才建分项，课程模板不建。
+    binding = payload.gradebook_binding if payload else None
+    if assignment.offering_id and (binding is None or binding.enabled):
+        from app.services import gradebook_service as grades
+
+        grades.bind_task_column(
+            db, assignment.offering_id, current_user.id, source_kind="assignment", source_id=assignment.id,
+            title=assignment.title,
+            category_key=(binding.category_key if binding and binding.category_key
+                          else grades.TASK_CATEGORY_BY_KIND["assignment"]),
+        )
     db.commit()
     db.refresh(assignment)
     return assignment

@@ -10,6 +10,7 @@ import ChoiceOptionsEditor from '../../components/teacher/exam/ChoiceOptionsEdit
 import FillBlankEditor from '../../components/teacher/exam/FillBlankEditor.vue'
 import QeTestCases from '../../components/teacher/question-editor/QeTestCases.vue'
 import TaskAudiencePicker from '../../components/teacher/TaskAudiencePicker.vue'
+import GradebookBindingField from '../../components/gradebook/GradebookBindingField.vue'
 import { examsAPI } from '../../api/exams.js'
 import { useAppStore } from '../../stores/app.js'
 import { taskEditorReturn } from '../../utils/taskEditorNavigation.js'
@@ -24,6 +25,11 @@ const modalAiExpanded = ref(true)
 const settings = ref({ title: '', duration_minutes: 60, start_at: '', end_at: '', show_score_after_grading: false, show_questions_after_review: false, show_answers_after_review: false, exam_kind: 'quiz', timing_mode: 'unified', shuffle_questions: false, shuffle_options: false })
 const settingsReady = ref(false)
 const settingsSaving = ref(false)
+// 发布考试默认计入课程总评：分类按考试类型预选（测验→平时、期中→期中、期末→期末、其他由教师选择）。
+const EXAM_CATEGORY_BY_KIND = { quiz: 'regular', midterm: 'midterm', final: 'final' }
+const gradebookBinding = ref({ enabled: true, category_key: 'regular' })
+const bindingDefaultKey = computed(() => EXAM_CATEGORY_BY_KIND[settings.value.exam_kind] || '')
+const bindingRequiresChoice = computed(() => settings.value.exam_kind === 'other')
 // 发布后锁定时间模式 / 乱序 / 时长：与后端 422 EXAM_SETTING_LOCKED 保持一致
 const isPublishedLocked = computed(() => exam.value?.status === 'published')
 const audienceMode = ref('all_enrolled')
@@ -195,6 +201,8 @@ const publishChecks = computed(() => [
   { label: '考试时长有效', ok: Number(settings.value.duration_minutes) > 0 },
   ...questionChecks.value,
   { label: '已设置有效考生范围', ok: audienceMode.value === 'all_enrolled' || (audienceMode.value === 'selected_classes' && audienceClassIds.value.length > 0) || (audienceMode.value === 'whitelist_only' && audienceWhitelistIds.value.length > 0) },
+  // 「其他」类型考试必须选择计入总评的分类，否则后端 422 GRADEBOOK_CATEGORY_REQUIRED。
+  ...(bindingRequiresChoice.value ? [{ label: '已为其他类型考试选择总评分类', ok: !gradebookBinding.value.enabled || Boolean(gradebookBinding.value.category_key) }] : []),
 ])
 const readyToPublish = computed(() => publishChecks.value.every(check => check.ok))
 const totalPoints = computed(() => questions.value.reduce((sum, item) => sum + Number(item.points || 0), 0))
@@ -230,7 +238,11 @@ async function saveSettings({ publish = false, unpublish = false } = {}) {
       whitelist_student_ids: audienceWhitelistIds.value,
       excluded_student_ids: audienceExcludedIds.value,
     }
-    if (publish) payload.status = 'published'
+    if (publish) {
+      payload.status = 'published'
+      // 只有首次发布需要归类；已发布考试的重复提交不携带归类，避免误改分项。
+      if (exam.value?.status !== 'published') payload.gradebook_binding = gradebookBinding.value
+    }
     if (unpublish) payload.status = 'draft'
     const response = await examsAPI.update(examId, payload)
     exam.value = response.data
@@ -460,6 +472,9 @@ onMounted(load)
                 <small>{{ check.ok ? '通过' : '待完善' }}</small>
               </div>
             </div>
+            <GradebookBindingField v-if="exam?.status === 'draft'" v-model="gradebookBinding"
+                                   :offering-id="exam?.offering_id" :default-key="bindingDefaultKey"
+                                   :require-choice="bindingRequiresChoice" :disabled="settingsSaving" />
             <p class="server-check-note">发布时，服务端还会校验标准答案、填空占位符、隐藏测试和 AI 评分规则。</p>
             <button v-if="exam?.status === 'draft'" class="btn-accent publish-button" :disabled="!readyToPublish || settingsSaving" @click="saveSettings({ publish: true })">检查通过并发布考试</button>
             <p v-else class="published-note">考试已发布；如有学生开始作答，关键考试内容将由服务端锁定。</p>

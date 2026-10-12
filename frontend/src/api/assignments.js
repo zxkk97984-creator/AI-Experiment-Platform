@@ -5,7 +5,7 @@ export const assignmentsAPI = {
   create(data) { return client.post('/assignments', data) },
   get(id) { return client.get(`/assignments/${id}`) },
   update(id, data) { return client.patch(`/assignments/${id}`, data) },
-  publish(id) { return client.post(`/assignments/${id}/publish`) },
+  publish(id, data) { return client.post(`/assignments/${id}/publish`, data) },
   deleteAssignment(id) { return client.delete(`/assignments/${id}`) },
   unpublishAssignment(id) { return client.post(`/assignments/${id}/unpublish`) },
   myProgress(id) { return client.get(`/assignments/${id}/my-progress`) },

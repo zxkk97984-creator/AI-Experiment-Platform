@@ -8,6 +8,7 @@ import ClassSummary from '../../components/common/ClassSummary.vue'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import AppIcon from '../../components/ui/AppIcon.vue'
 import CourseCreateModal from '../../components/teacher/CourseCreateModal.vue'
+import CourseGradebookTemplateModal from '../../components/teacher/CourseGradebookTemplateModal.vue'
 import TeacherPagination from '../../components/teacher/TeacherPagination.vue'
 import { coursesAPI } from '../../api/courses.js'
 import { academicsAPI } from '../../api/academics.js'
@@ -26,6 +27,7 @@ const serverSummary = ref({ total: 0, published: 0, draft: 0, archived: 0 })
 const loading = ref(true)
 const loadError = ref('')
 const showCreate = ref(false)
+const templateCourse = ref(null)
 const query = ref('')
 const statusFilter = ref('all')
 const termFilter = ref('all')
@@ -63,6 +65,8 @@ async function fetchCourses() {
     loading.value = false
   }
 }
+
+function openTemplate(course) { templateCourse.value = course }
 
 function handleCourseCreated(course) {
   showCreate.value = false
@@ -198,6 +202,7 @@ onMounted(async () => {
                   <td class="meta">{{ formatDateTime(courseUpdated(course)) }}</td>
                   <td class="col-actions course-actions">
                     <button type="button" class="btn btn-ghost btn-sm" @click="router.push(managePath(course))">设置</button>
+                    <button type="button" class="btn btn-ghost btn-sm" @click="openTemplate(course)">成绩模板</button>
                     <button v-if="course.status === 'draft'" type="button" class="btn btn-secondary btn-sm" @click="handlePublish(course)">发布</button>
                   </td>
                 </tr>
@@ -216,6 +221,8 @@ onMounted(async () => {
       </section>
 
       <CourseCreateModal v-if="showCreate" :terms="terms" @close="showCreate = false" @created="handleCourseCreated" />
+      <CourseGradebookTemplateModal v-if="templateCourse" :course="templateCourse" @close="templateCourse = null"
+                                    @saved="templateCourse = null" />
     </section>
   </AppLayout>
 </template>
