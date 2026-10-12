@@ -124,6 +124,10 @@ class Settings(BaseSettings):
     ai_test_group_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     ai_test_group_max_retries: int = Field(default=0, ge=0, le=3)
     ai_queue_name: str = "judge:ai:queue"
+    # 一键 AI 配置（批次 2）：生成任务走独立队列，不挤占正式判题容量
+    ai_setup_queue_name: str = "judge:ai-setup:queue"
+    # 单次成绩异议（批次 2）：结果对学生可见起可申请的窗口天数
+    appeal_window_days: int = Field(default=7, ge=1, le=90)
 
     @property
     def ai_ready(self) -> bool:

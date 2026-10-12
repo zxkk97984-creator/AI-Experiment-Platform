@@ -1804,3 +1804,6 @@ from .credential_delivery import CredentialDelivery  # noqa: E402,F401
 from .course_material import CourseMaterial, ChapterActivityLink  # noqa: E402,F401
 
 from .gradebook import Gradebook, GradebookCategory, GradebookColumn, GradebookEntry, GradebookAdjustment, GradebookSnapshot  # noqa: E402,F401
+
+from .ai_setup import AiGradingSetupJob, RubricTrialRun  # noqa: E402,F401
+from .appeal import GradeAppeal  # noqa: E402,F401
