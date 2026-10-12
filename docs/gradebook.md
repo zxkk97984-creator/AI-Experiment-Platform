@@ -29,7 +29,7 @@
 - `GET .../{id}/snapshots`、`GET /api/v1/gradebooks/snapshots/{snapshot_id}`：历史版本与按角色过滤的内容。
 - `GET /api/v1/gradebooks/snapshots/{snapshot_id}/export?format=xlsx|csv`：版本导出。
 
-验证使用隔离数据库：`env -u DAI_DATABASE_URL -u DAI_REDIS_URL .runtime/verify-venv/bin/pytest -q backend/tests/automated/test_gradebook.py`。独立虚拟环境安装当前依赖的步骤见[交付验证](school-release-verification.md)。
+验证使用隔离数据库：`env -u DAI_DATABASE_URL -u DAI_REDIS_URL .runtime/verify-venv/bin/pytest -q backend/tests/automated/test_gradebook.py`。
 
 `backend/tests/automated/test_gradebook_mysql_concurrency.py` 使用两个独立MySQL会话及事件 / 屏障，验证预览后转班、撤权、学期关闭、栏目和分数变化、两次同时发布的CAS、正式提交与总评发布的两种竞争顺序。设置`DAI_TEST_GRADEBOOK_MYSQL_URL`后运行该文件；它只接受管理员专门建立的空`dai_school_gradebook_verify`数据库，结束后删除该测试库中的表，拒绝非空库及其他库名。并发验证强制使用`REPEATABLE READ`。
 

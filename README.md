@@ -4,7 +4,7 @@
 
 当前仓库已标记为 `V0.1`。核心代码、数据库迁移、自动化测试和生产 Compose 已具备；真实部署机上的 Docker daemon、Registry、镜像推送/回拉和生产数据恢复演练仍需按部署环境完成，不能用受限开发沙箱替代。发布证据边界见 [`docs/production-evidence-checklist.md`](docs/production-evidence-checklist.md)。
 
-本轮新增单校教学功能：管理员分配授课实例、共享课程资料与章节活动、独立班级任务、逐 Cell 检查与同班排行榜、两级课程成绩簿，以及独立16位随机临时密码和限时凭据交付。旧课程绑定需管理员核对，闭学期和归档实例只读，历史成绩不自动重算。操作、迁移与试点步骤见 [`docs/school-teaching-upgrade.md`](docs/school-teaching-upgrade.md)，验证边界见 [`docs/school-release-verification.md`](docs/school-release-verification.md)。
+本轮新增单校教学功能：管理员分配授课实例、共享课程资料与章节活动、独立班级任务、逐 Cell 检查与同班排行榜、两级课程成绩簿，以及独立16位随机临时密码和限时凭据交付。旧课程绑定需管理员核对，闭学期和归档实例只读，历史成绩不自动重算。操作、迁移与试点步骤见 [`docs/school-teaching-upgrade.md`](docs/school-teaching-upgrade.md)。
 
 ## 项目定位
 
@@ -582,7 +582,7 @@ cd backend
 
 CI 分别运行 SQLite 和 MySQL 测试；独立 `lab-runtime` 任务构建当前 Judge/Kernel 镜像，实际执行 CPU 沙箱测试，并以 JUnit 检查零失败、零跳过。PyTorch、GPU、学校并发容量不在该轻量门禁内。完整 CI 门禁见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
 
-本轮逐项修复、隔离验证命令、实际结果和未验证范围见 [2026-10-09 修复验证记录](docs/review-fixes-20261009.md)。本地测试不要连接业务 Redis；测试夹具同时替换 FastAPI Redis 依赖和 Judge 服务工厂。
+本地测试不要连接业务 Redis；测试夹具同时替换 FastAPI Redis 依赖和 Judge 服务工厂。
 
 ### 前端
 
@@ -716,12 +716,13 @@ BASE_URL=http://localhost:8080 ./scripts/check_security_headers.sh
 
 1. 在真实部署机验证 Docker daemon、socket 权限、Registry Secret 和环境 V2 真实构建/推送/回拉；
 2. 完成生产数据库、Redis、Storage 的备份恢复演练，并补齐责任人和外部签字记录；
-3. 逐页移除前端 `teacher-management.css` 迁移桥接层，计划见 [`docs/ui-v2-migration-plan.md`](docs/ui-v2-migration-plan.md)；
+3. 逐页移除前端 `teacher-management.css` 迁移桥接层；
 4. 部署方按 [`docs/production-evidence-checklist.md`](docs/production-evidence-checklist.md) 补齐真实外部门禁；在证据完成前保持 AI 关闭。
 
 ## 当前文档地图
 
 - [`docs/架构设计总览.md`](docs/架构设计总览.md)：当前系统怎么设计；
+- [`docs/系统完善规划.md`](docs/系统完善规划.md)：全量源码审查结论——现状速览、待修严重问题、功能需求落地设计；
 - [`docs/environment-profiles.md`](docs/environment-profiles.md)：环境 V2、迁移、Registry 和运维；
 - [`docs/demo-data.md`](docs/demo-data.md)：Demo 数据播种与验证；
 - [`docs/backup-restore.md`](docs/backup-restore.md)：备份恢复上线边界；

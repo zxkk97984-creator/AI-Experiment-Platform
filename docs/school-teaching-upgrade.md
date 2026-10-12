@@ -68,4 +68,4 @@
 
 真实浏览器→API→MySQL→Docker联调已完成：学生看到已发布资料、逐Cell检查通过、正式提交在干净环境重放得100分；教师仅看到自己的班，配置默认两级比例、录分、发布、归档和下载Excel；学生仅看到本人结果。第二个版本绑定该正式实验分，按`80×30% + 100×40% + 80×30%`得到88.00；此前归档保持80.00。
 
-前端fixture与历史边界详见[界面验证](school-ui-verification.md)，Docker与Cell链路详见[实验验证](lab-learning-verification.md)。全量SQLite/MySQL回归、运行依赖审计和最终检查数量在[本轮交付验证](school-release-verification.md)统一记录。运行证据位于忽略目录`.runtime/school-verification/`，不随源码发布。
+运行证据位于忽略目录`.runtime/school-verification/`，不随源码发布。

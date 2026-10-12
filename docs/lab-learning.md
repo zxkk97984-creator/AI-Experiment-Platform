@@ -109,4 +109,4 @@ backend/.venv/bin/python scripts/register_lab_environment.py \
 
 管理员环境页面展示生效额度与队列。`./start.sh logs lab`查看本地Worker日志。备份必须包括数据库、`lab_data`（或对应S3前缀）、Studio资料及现有工作区。临时教材缓存可以重建；正式模型、数据版本和评分历史不可当缓存清除。
 
-100～200人是在线教学目标，不意味着同数量训练任务同时运行。已提供功能模拟脚本，生产MySQL、HTTP并发、磁盘和实际训练吞吐需在部署机测量。相关证据见[验证记录](lab-learning-verification.md)。
+100～200人是在线教学目标，不意味着同数量训练任务同时运行。已提供功能模拟脚本，生产MySQL、HTTP并发、磁盘和实际训练吞吐需在部署机测量。
