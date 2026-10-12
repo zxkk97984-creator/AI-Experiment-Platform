@@ -1190,15 +1190,21 @@ class ExperimentSubmission(TimestampMixin, Base):
 
 
 class QuestionRubric(TimestampMixin, Base):
-    """题目专属 Rubric——版本化管理，关联作业题或考试编程题"""
+    """题目专属 Rubric——版本化管理，关联作业题、考试编程题或练习题目。
+
+    目标三选一（``ck_rubric_xor_target``）：作业题 / 考试编程题 / 练习题目。
+    约束名不变，语义仍是「目标唯一」：禁止一行同时挂两个目标或一个都没有。
+    """
     __tablename__ = "question_rubrics"
     __table_args__ = (
         CheckConstraint(
-            "(judge_question_id IS NULL) != (exam_question_id IS NULL)",
+            "(judge_question_id IS NOT NULL) + (exam_question_id IS NOT NULL)"
+            " + (practice_problem_id IS NOT NULL) = 1",
             name="ck_rubric_xor_target",
         ),
         UniqueConstraint("judge_question_id", "version", name="uq_rubric_judge_version"),
         UniqueConstraint("exam_question_id", "version", name="uq_rubric_exam_version"),
+        UniqueConstraint("practice_problem_id", "version", name="uq_rubric_practice_version"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -1207,6 +1213,9 @@ class QuestionRubric(TimestampMixin, Base):
     )
     exam_question_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_questions.id"), nullable=True, index=True
+    )
+    practice_problem_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_problems.id"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
@@ -1247,7 +1256,8 @@ class ManualScoreAudit(TimestampMixin, Base):
 class JudgeGradingVersion(TimestampMixin, Base):
     """不可变评分版本（批次三 3B）。
 
-    - ``judge_question_id`` 与 ``exam_question_id`` 严格二选一；
+    - ``judge_question_id`` / ``exam_question_id`` / ``practice_problem_id`` 三选一
+      （``ck_grading_version_xor_target``，批次 5 扩展为练习目标，约束名不变）；
     - ``draft`` 可编辑（新版本另存）；``confirmed`` 之后 payload 不可修改；
       ``active`` 供新提交绑定；``retired`` 只禁止新绑定，不使历史绑定失效；
     - 保存入口函数、数据用例、比较规则、F/R 权重、来源摘要与绑定的 Rubric，
@@ -1257,11 +1267,13 @@ class JudgeGradingVersion(TimestampMixin, Base):
     __tablename__ = "judge_grading_versions"
     __table_args__ = (
         CheckConstraint(
-            "(judge_question_id IS NULL) != (exam_question_id IS NULL)",
+            "(judge_question_id IS NOT NULL) + (exam_question_id IS NOT NULL)"
+            " + (practice_problem_id IS NOT NULL) = 1",
             name="ck_grading_version_xor_target",
         ),
         UniqueConstraint("judge_question_id", "version", name="uq_grading_version_judge"),
         UniqueConstraint("exam_question_id", "version", name="uq_grading_version_exam"),
+        UniqueConstraint("practice_problem_id", "version", name="uq_grading_version_practice"),
         Index("ix_grading_versions_status", "status"),
     )
 
@@ -1271,6 +1283,9 @@ class JudgeGradingVersion(TimestampMixin, Base):
     )
     exam_question_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_questions.id"), nullable=True, index=True
+    )
+    practice_problem_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_problems.id"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
     # draft / confirmed / active / retired
@@ -1297,11 +1312,16 @@ class JudgeGradingVersion(TimestampMixin, Base):
 
 
 class CodeGrade(TimestampMixin, Base):
-    """统一 AI 代码评分记录——XOR 外键关联 Submission 或 ExamAnswer"""
+    """统一 AI 代码评分记录——三选一外键关联 Submission / ExamAnswer / PracticeSubmission。
+
+    ``ck_code_grade_xor_target``（约束名不变）在批次 5 扩展为练习目标三选一，
+    保证一条评分记录只属于一个目标，角色隔离与目标唯一性都不放松。
+    """
     __tablename__ = "code_grades"
     __table_args__ = (
         CheckConstraint(
-            "(submission_id IS NULL) != (exam_answer_id IS NULL)",
+            "(submission_id IS NOT NULL) + (exam_answer_id IS NOT NULL)"
+            " + (practice_submission_id IS NOT NULL) = 1",
             name="ck_code_grade_xor_target",
         ),
         Index("ix_code_grades_review_status", "needs_teacher_review", "status"),
@@ -1313,6 +1333,9 @@ class CodeGrade(TimestampMixin, Base):
     )
     exam_answer_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_answers.id"), nullable=True, unique=True
+    )
+    practice_submission_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_submissions.id"), nullable=True, unique=True
     )
     rubric_id: Mapped[int] = mapped_column(ForeignKey("question_rubrics.id"))
     mode: Mapped[str] = mapped_column(String(20))
@@ -1864,3 +1887,6 @@ from .ai_setup import AiGradingSetupJob, RubricTrialRun  # noqa: E402,F401
 from .appeal import GradeAppeal  # noqa: E402,F401
 
 from .exam_event import ExamEvent  # noqa: E402,F401
+
+from .practice import (PracticeProblem, PracticeSettings, PracticeStudentStat,  # noqa: E402,F401
+                       PracticeSubmission, PracticeUsageLog)

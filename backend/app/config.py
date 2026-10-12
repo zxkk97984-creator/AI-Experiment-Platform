@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     # （教师可设 300–7200 秒）。发布后锁定在模板版本上，已有实验继续用原配置。
     kernel_cell_timeout_seconds: int = Field(default=120, ge=10, le=1800)
     kernel_idle_seconds: int = Field(default=900, ge=300, le=7200)
-    worker_role: Literal["judge", "ai", "kernel"] = "judge"
+    worker_role: Literal["judge", "ai", "kernel", "practice"] = "judge"
     studio_storage_dir: str = str(
         Path(__file__).resolve().parents[1] / "storage" / "studio"
     )
@@ -133,6 +133,14 @@ class Settings(BaseSettings):
     ai_setup_queue_name: str = "judge:ai-setup:queue"
     # 单次成绩异议（批次 2）：结果对学生可见起可申请的窗口天数
     appeal_window_days: int = Field(default=7, ge=1, le=90)
+    # ── 自主练习（批次 5 Q8/Q9） ─────────────────────────────
+    # 练习判题走独立队列 + 受限 worker：绝不挤占正式作业/考试的
+    # judge:* 与 judge:ai:queue 容量；并发上限取自 practice_settings（库内配置）。
+    practice_judge_queue_name: str = "practice:judge:queue"
+    practice_ai_queue_name: str = "practice:ai:queue"
+    # 单次 AI 提交预扣的 token 估算值：日预算扣减以 practice_usage_logs 为准
+    practice_ai_token_estimate: int = Field(default=6000, ge=500, le=200000)
+    practice_queue_poll_seconds: float = Field(default=2, gt=0, le=60)
 
     @property
     def ai_ready(self) -> bool:
