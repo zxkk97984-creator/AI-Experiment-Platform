@@ -52,10 +52,17 @@ def test_real_nginx_import_limits(tmp_path):
             except OSError:
                 time.sleep(.05)
         mib = 1024 * 1024
-        cases = [('/api/v1/admin/roster-imports/preview', 5 * mib + 512, 204),
+        cases = [('/api/v1/admin/password-resets/preview-file', 5 * mib + 512, 204),
+                 ('/api/v1/admin/password-resets/preview-file', 6 * mib + 1, 413),
+                 ('/api/v1/admin/roster-imports/preview', 5 * mib + 512, 204),
                  ('/api/v1/courses/1/students/import', 2 * mib + 512, 204),
                  ('/api/v1/admin/roster-imports/preview', 6 * mib + 1, 413),
                  ('/api/v1/courses/1/students/import', 3 * mib + 1, 413),
+                 # 批次四：作业/考试名单导入专用路径放宽到 3 MiB（业务上限 2 MiB）
+                 ('/api/v1/assignments/1/audience/import', 2 * mib + 512, 204),
+                 ('/api/v1/exams/1/audience/import', 2 * mib + 512, 204),
+                 ('/api/v1/assignments/1/audience/import', 3 * mib + 1, 413),
+                 ('/api/v1/exams/1/audience/import', 3 * mib + 1, 413),
                  ('/api/v1/ordinary-json', mib + 1, 413)]
         for path, length, expected in cases:
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)

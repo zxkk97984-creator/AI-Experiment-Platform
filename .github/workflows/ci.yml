@@ -100,6 +100,43 @@ jobs:
       - name: 运行测试（跳过 kernel + docker）
         run: python -m pytest -q --ignore=tests/kernel_connect_test.py --ignore=tests/kernel_ipykernel_test.py --ignore=tests/kernel_test.py --ignore=tests/debug_kernel.py --ignore=tests/diag_execute.py --ignore=tests/test_kernel_prototype.py
 
+  backend-test-native-http:
+    name: 后端原生 HTTP 集成（真实 Uvicorn 子进程）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DAI_ENVIRONMENT: development
+      DAI_MIGRATION_MODE: disposable
+      DAI_DATABASE_URL: ""
+      DAI_REDIS_URL: redis://127.0.0.1:6379/0
+      DAI_SECRET_KEY: ci-native-http-key
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      # 独立目录必须显式运行：pytest.ini 的 testpaths 只包含 tests/automated
+      - name: 原生 HTTP 组
+        run: python -m pytest -q tests/native_http
+
   backend-lint:
     name: 后端高信号 lint（Ruff）
     runs-on: ubuntu-latest

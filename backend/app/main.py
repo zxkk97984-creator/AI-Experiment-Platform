@@ -103,21 +103,23 @@ async def _kernel_cleanup():
 
 @asynccontextmanager
 async def lifespan(app):
-    import redis as _redis
+    from app.redis_client import build_api_redis
+    from app.services import op_metrics
 
     settings = app.state.settings
-    app.state.redis_client = _redis.Redis.from_url(
-        settings.redis_url,
-        decode_responses=True,
-    )
+    # 有界客户端：0.5s 连接/读取、0 重试、连接池 32（见 app/redis_client.py）
+    app.state.redis_client = build_api_redis(settings)
     expiry_task = asyncio.create_task(_expiry_scanner())
     cleanup_task = asyncio.create_task(_kernel_cleanup())
+    # 指标聚合器：每进程唯一 flush 任务，每秒一次；关闭时限内 best-effort
+    op_metrics.start_flush_task()
     try:
         yield
     finally:
         expiry_task.cancel()
         cleanup_task.cancel()
         await asyncio.gather(expiry_task, cleanup_task, return_exceptions=True)
+        await op_metrics.stop_flush_task()
         close = getattr(app.state.redis_client, "close", None)
         if close is not None:
             close()
@@ -258,7 +260,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Redis 承载 Refresh Token、黑名单与队列唤醒，是认证关键依赖；
         任一依赖故障即返回 503，且不回显底层异常详情。
         """
-        import redis as _redis
+        from app.redis_client import build_api_redis
+
         ready = True
         details = {}
 
@@ -280,7 +283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redis_client = getattr(request.app.state, "redis_client", None)
         owns_redis_client = redis_client is None
         try:
-            r = redis_client or _redis.Redis.from_url(settings.redis_url, socket_connect_timeout=2)
+            r = redis_client or build_api_redis(settings)
             r.ping()
             details["redis"] = "ok"
         except Exception:

@@ -8,7 +8,10 @@ import sys
 
 TARGETS = ('backend', 'frontend', 'scripts', 'docs', '.github')
 EXTENSIONS = {'.py', '.yml', '.yaml', '.js', '.vue', '.md', '.sh', '.json', '.toml'}
-PATTERN = re.compile(rb'sk-[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----')
+PATTERN = re.compile(
+    rb'(?:sk-[A-Za-z0-9]{20,}|oc_sk_[A-Za-z0-9_-]{20,})'
+    rb'|-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----'
+)
 
 
 def scan(root):

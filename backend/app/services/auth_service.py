@@ -104,7 +104,10 @@ def issue_token_pair(user: User, redis_client, settings: Settings) -> TokenRespo
         session_version=user.session_version,
     )
     refresh_payload = decode_token(refresh_token, settings.secret_key, settings.algorithm)
-    redis_client.setex(
+    # 关键写入：Redis 故障必须 503，不能把"未登记可撤销会话"的 Token 发出去
+    _redis_call(
+        redis_client,
+        "setex",
         f"refresh:{refresh_payload['jti']}",
         settings.refresh_token_expire_days * 24 * 60 * 60,
         str(user.id),
@@ -125,8 +128,10 @@ def refresh_token_pair(db: Session, refresh_token: str, redis_client, settings: 
     if payload.get("type") != "refresh":
         raise api_error(401, "INVALID_TOKEN_TYPE", "Token 类型无效")
     refresh_key = f"refresh:{payload['jti']}"
-    # 原子化消费 Refresh Token：GETDEL 同时读取并删除，防止并发重复使用
-    user_id = redis_client.getdel(refresh_key)
+    # 原子化消费 Refresh Token：GETDEL 同时读取并删除，防止并发重复使用。
+    # 故障时结果未知（可能已删除也可能没删）——**不重放**，统一 503 让用户重新登录；
+    # 不承诺网络故障时旧 refresh token 仍可用（安全优先于可用性）。
+    user_id = _redis_call(redis_client, "getdel", refresh_key)
     if not user_id:
         raise api_error(401, "REFRESH_TOKEN_REVOKED", "刷新 Token 已失效")
     # user_id 是 bytes，需要解码
@@ -157,7 +162,11 @@ def revoke_tokens(
     """撤销同一会话的令牌；返回是否应清除请求携带的 refresh cookie。"""
     jti = access_payload.get("jti") if access_payload else None
     if jti:
-        redis_client.setex(f"blacklist:{jti}", max(token_ttl_seconds(access_payload), 1), "1")
+        # 退出登录：写黑名单失败必须 503，不能假装"已退出"却让 Token 继续可用
+        _redis_call(
+            redis_client, "setex",
+            f"blacklist:{jti}", max(token_ttl_seconds(access_payload), 1), "1",
+        )
     if refresh_token:
         try:
             refresh_payload = decode_token(refresh_token, settings.secret_key, settings.algorithm)
@@ -167,5 +176,5 @@ def revoke_tokens(
         refresh_subject = refresh_payload.get("sub")
         if access_subject and refresh_subject and access_subject != refresh_subject:
             return False
-        redis_client.delete(f"refresh:{refresh_payload.get('jti')}")
+        _redis_call(redis_client, "delete", f"refresh:{refresh_payload.get('jti')}")
     return True

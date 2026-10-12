@@ -38,6 +38,15 @@ def test_each_target_detects_without_printing_secret(repository, directory):
     assert secret not in result.stdout + result.stderr
 
 
+def test_opencode_key_detects_without_printing_secret(repository):
+    secret = 'oc' + '_sk_' + 'A' * 30
+    (repository / 'backend/example.py').write_text(secret)
+    result = scan(repository)
+    assert result.returncode == 1
+    assert 'backend' in result.stdout
+    assert secret not in result.stdout + result.stderr
+
+
 def test_missing_directory_and_non_repository_fail_closed(repository, tmp_path):
     (repository / 'docs/example.py').unlink()
     (repository / 'docs').rmdir()
