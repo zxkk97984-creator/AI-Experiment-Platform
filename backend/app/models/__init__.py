@@ -647,6 +647,10 @@ class Submission(TimestampMixin, Base):
 
 class Exam(TimestampMixin, Base):
     __tablename__ = "exams"
+    __table_args__ = (
+        CheckConstraint("exam_kind IN ('quiz', 'midterm', 'final', 'other')", name="ck_exam_kind"),
+        CheckConstraint("timing_mode IN ('unified', 'per_student')", name="ck_exam_timing_mode"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
@@ -657,6 +661,22 @@ class Exam(TimestampMixin, Base):
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ── 课堂试用：考试类型与考试秩序（批次 3） ────────────────
+    # exam_kind 供成绩册自动归类（批次 4 依赖）：quiz→平时、midterm→期中、final→期末、other→教师选择。
+    exam_kind: Mapped[str] = mapped_column(
+        String(20), default="quiz", server_default="quiz", nullable=False, index=True
+    )
+    # unified：交卷时间 = min(入场 + 时长, end_at)；per_student：入场 + 时长，
+    # 此时 end_at 只表示「最晚可开考时间」。发布后锁定。
+    timing_mode: Mapped[str] = mapped_column(
+        String(20), default="unified", server_default="unified", nullable=False
+    )
+    shuffle_questions: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    shuffle_options: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
     show_score_after_grading: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
     show_questions_after_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
     show_answers_after_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
@@ -766,6 +786,21 @@ class ExamSubmission(TimestampMixin, Base):
     # 创建/补建答案只能从这里复制，不得读取题目最新配置。
     grading_version_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # ── 考试秩序：乱序快照与答题设备代次（批次 3） ──────────────
+    # 开考时与 freeze_exam_versions 同一事务写入后冻结；此后一切顺序以库为准，不再重算。
+    question_order: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    option_order: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 写入代次：换机接管 +1；所有答题写入必须携带它，旧设备一律 409 DEVICE_SUPERSEDED。
+    write_generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    active_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    active_device_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 监考计数：由 exam_events 幂等重算（断网补报不重复累加），只供教师查看，不扣分。
+    blur_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    away_total_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    device_switch_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
     exam: Mapped[Exam] = relationship()
     student: Mapped[User] = relationship()
     answers: Mapped[list["ExamAnswer"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
@@ -807,7 +842,7 @@ class ExamQuestion(TimestampMixin, Base):
     __tablename__ = "exam_questions"
     __table_args__ = (
         CheckConstraint(
-            "question_type IN ('single_choice', 'multi_choice', 'fill_blank', 'code')",
+            "question_type IN ('single_choice', 'multi_choice', 'true_false', 'fill_blank', 'code')",
             name="ck_exam_question_type",
         ),
     )
@@ -1807,3 +1842,5 @@ from .gradebook import Gradebook, GradebookCategory, GradebookColumn, GradebookE
 
 from .ai_setup import AiGradingSetupJob, RubricTrialRun  # noqa: E402,F401
 from .appeal import GradeAppeal  # noqa: E402,F401
+
+from .exam_event import ExamEvent  # noqa: E402,F401

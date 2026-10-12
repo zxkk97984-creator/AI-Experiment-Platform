@@ -279,6 +279,10 @@ class Settings(BaseSettings):
     def lab_work_path(self) -> Path:
         return (Path(self.judge_work_dir).resolve() if self.judge_work_dir else self.studio_storage_path.parent / "judge-work") / "labs"
 
+    # ── 考试秩序（批次 3） ────────────────────────────────────
+    # 教师延时是明确留痕的例外：单场考试累计延长不得超过该上限。
+    exam_extension_max_minutes: int = Field(default=60, ge=1, le=180)
+
     # ── 登录限流 ──
     account_security_keys: str = ""  # Comma-separated Fernet keys, newest first; separate from JWT.
     account_worker_hash_concurrency: int = Field(default=2, ge=1, le=8)
