@@ -195,7 +195,9 @@ def upgrade() -> None:
 
     op.create_table(
         "practice_settings",
-        sa.Column("id", sa.Integer(), primary_key=True),
+        # 非自增主键：MySQL 8 拒绝「CHECK 引用 AUTO_INCREMENT 列」（errno 3818），
+        # 而 ck_practice_settings_singleton(id = 1) 是这张单行表的完整性保证。
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=False),
         sa.Column("grading_mode", sa.String(length=20), nullable=False),
         sa.Column("daily_submission_cap_per_student", sa.Integer(), nullable=False),
         sa.Column("daily_ai_budget_tokens", sa.Integer(), nullable=False),

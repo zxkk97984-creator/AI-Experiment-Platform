@@ -212,7 +212,9 @@ class PracticeSettings(TimestampMixin, Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # 单行表：主键固定 1 且显式关掉自增——MySQL 8 禁止 CHECK 引用 AUTO_INCREMENT 列（errno 3818），
+    # 只有非自增主键才能让 ck_practice_settings_singleton 在 MySQL 与 SQLite 上都成立。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, autoincrement=False)
     grading_mode: Mapped[str] = mapped_column(String(20), default="deterministic")
     # 每生每天提交次数上限（0 = 不限制）
     daily_submission_cap_per_student: Mapped[int] = mapped_column(Integer, default=50)
