@@ -212,7 +212,7 @@ onMounted(async () => {
 
     <template v-else>
       <p v-if="!forbidden" class="board-meta">
-        {{ scopeLabel }} · {{ boardLabel }} · {{ data.total || 0 }} 人参与
+        {{ scopeLabel }} · {{ boardLabel }} · {{ data.total || 0 }} 人
         <span v-if="truncated">（仅展示前 100 名，名次按完整榜单计算）</span>
       </p>
 

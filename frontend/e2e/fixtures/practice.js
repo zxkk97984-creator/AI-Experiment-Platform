@@ -225,17 +225,56 @@ export async function practiceFixture(page, role, options = {}) {
         meta: meta(),
       })
     }
-    if (path === '/practice/leaderboard' && req.method() === 'GET') {
+    // 批次 6 起榜单快照端点为 /practice/social/leaderboard（旧路径同时保留，便于回归对比）：
+    // 响应形状多了 opt_in / truncated / me / window，并保留 meta（排队与额度提示）
+    if ((path === '/practice/leaderboard' || path === '/practice/social/leaderboard')
+        && req.method() === 'GET') {
       state.leaderboardQueries.push(Object.fromEntries(url.searchParams.entries()))
+      const scope = url.searchParams.get('scope') || 'platform'
+      const items = options.empty ? [] : leaderboardRows
       return reply(route, {
-        items: options.empty ? [] : leaderboardRows,
-        total: options.empty ? 0 : leaderboardRows.length,
-        scope: url.searchParams.get('scope') || 'platform',
+        items,
+        total: items.length,
+        scope,
+        scope_id: scope === 'offering' ? Number(url.searchParams.get('scope_id') || 0) : 0,
         board: url.searchParams.get('board') || 'deterministic',
+        truncated: false,
+        anonymized: scope !== 'offering',
+        // 学生视角返回布尔 opt-in；教师视角为 null（不暴露任何学生偏好）
+        opt_in: role === 'student' ? (options.optIn ?? true) : null,
+        me: null,
+        window: null,
+        generated_at: '2026-10-13T03:00:00Z',
+        recalculated_at: '2026-10-13T03:00:00Z',
         meta: meta(),
       })
     }
     return reply(route, { items: [], total: 0 })
+  })
+
+  // 批次 6：我的练习页新增「打卡日历 / 徽章墙 / 成长曲线」区块（独立端点）。
+  // 这里给出确定性的最小载荷，避免落到 catch-all 造成跨批次耦合。
+  await page.route(/\/api\/v1\/practice\/social\/me\/overview/, async (route) => {
+    if (options.failed) return reply(route, { detail: { message: '测试服务不可用' } }, 503)
+    if (options.forbidden) return reply(route, { detail: { message: '无权限' } }, 403)
+    const emptyIncentive = options.empty
+    return reply(route, {
+      summary: { solved_count: 3, total_score: 240, avg_score: 80, accuracy: 0.75, submission_count: 4, streak_days: 2, last_active_date: '2026-10-13', daily_submissions_used: 2, daily_submission_cap: 20 },
+      boards: { deterministic: { solved_count: 3, total_score: 240, avg_score: 80, accuracy: 0.75 } },
+      badges: emptyIncentive ? [] : [
+        { key: 'first_solved', label: '首题通关', description: '通过第一道练习题', threshold: 1, metric: 'solved_count', progress: 1, earned: true, awarded_at: '2026-10-12T02:00:00Z' },
+        { key: 'streak_7', label: '连续打卡 7 天', description: '连续 7 天每天都有新增通关', threshold: 7, metric: 'streak_days', progress: 2, earned: false, awarded_at: null },
+      ],
+      checkin: emptyIncentive
+        ? { days: 30, active_dates: [], streak_days: 0, last_active_date: null }
+        : { days: 30, active_dates: ['2026-10-12', '2026-10-13'], streak_days: 2, last_active_date: '2026-10-13' },
+      growth: emptyIncentive ? [] : [
+        { date: '2026-10-12', passed_count: 1, submissions: 2, avg_score: 80 },
+        { date: '2026-10-13', passed_count: 2, submissions: 2, avg_score: 90 },
+      ],
+      opt_in: options.optIn ?? true,
+      recalculated_at: '2026-10-13T03:00:00Z',
+    })
   })
 
   await page.route(/\/api\/v1\/admin\/practice(\/|$|\?)/, async (route) => {
