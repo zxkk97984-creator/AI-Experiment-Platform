@@ -398,6 +398,8 @@ def test_migration_downgrade_upgrade_roundtrip(tmp_path):
     """Explicit disposable SQLite authorization retains the migration roundtrip."""
     env = _alembic_env(tmp_path, "roundtrip.db")
     env['DAI_ALLOW_TEACHING_DOWNGRADE'] = '1'
+    # 批次 3 的考试完整性迁移同样是生产保护型：disposable 往返需要显式开闸。
+    env['DAI_ALLOW_EXAM_INTEGRITY_DOWNGRADE'] = '1'
     _upgrade_head_seeded(env)
 
     r2 = subprocess.run(
