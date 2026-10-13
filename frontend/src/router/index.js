@@ -37,6 +37,13 @@ const routes = [
   { path: '/student/experiments', name: 'StudentExperiments', component: () => import('../views/student/ExperimentView.vue'), meta: { role: 'student' } },
   { path: '/student/experiments/:id', name: 'StudentExperimentDetail', component: () => import('../views/student/ExperimentDetailView.vue'), meta: { role: 'student' } },
   { path: '/student/courses/:id/notebook/:lid', name: 'StudentNotebook', component: () => import('../views/student/NotebookView.vue'), meta: { role: 'student' } },
+  { path: '/student/notifications', name: 'StudentNotifications', component: () => import('../views/student/StudentNotificationsView.vue'), meta: { role: 'student' } },
+  // 自主练习（批次 5）：中心 / 我的练习 / 作答 / 作答反馈
+  { path: '/student/practice', name: 'StudentPractice', component: () => import('../views/student/PracticeCenterView.vue'), meta: { role: 'student' } },
+  { path: '/student/practice/mine', name: 'StudentPracticeMine', component: () => import('../views/student/PracticeMineView.vue'), meta: { role: 'student' } },
+  { path: '/student/practice/leaderboard', name: 'StudentPracticeLeaderboard', component: () => import('../views/student/PracticeLeaderboardView.vue'), meta: { role: 'student' } },
+  { path: '/student/practice/problems/:id', name: 'StudentPracticeProblem', component: () => import('../views/student/PracticeProblemView.vue'), meta: { role: 'student' } },
+  { path: '/student/practice/submissions/:id', name: 'StudentPracticeSubmission', component: () => import('../views/student/PracticeSubmissionView.vue'), meta: { role: 'student' } },
 
   // Teacher
   { path: '/teacher', name: 'TeacherHome', component: () => import('../views/teacher/DashboardView.vue'), meta: { role: 'teacher' } },
@@ -47,6 +54,7 @@ const routes = [
   { path: '/teacher/exams', name: 'TeacherExams', component: () => import('../views/teacher/ExamManageView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/grades', name: 'TeacherGrades', component: () => import('../views/teacher/GradesView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/grades/:submissionId', name: 'TeacherGradeDetail', component: () => import('../views/teacher/GradeDetailView.vue'), meta: { role: 'teacher' } },
+  { path: '/teacher/exams/:id/proctor', name: 'TeacherExamProctor', component: () => import('../views/teacher/ProctorView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/exams/:id/edit', name: 'TeacherExamQuestionEdit', component: () => import('../views/teacher/ExamQuestionEditView.vue'), meta: { role: 'teacher' } },
  { path: '/teacher/experiments', name: 'TeacherExperiments', component: () => import('../views/teacher/ExperimentManageView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/experiments/create', redirect: '/teacher/experiments' },
@@ -63,6 +71,7 @@ const routes = [
   { path: '/teacher/notifications', name: 'TeacherNotifications', component: () => import('../views/teacher/NotificationsView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/ai-grading', name: 'TeacherAIGrading', component: () => import('../views/teacher/AIGradingReviewView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/ai-grading/:id', name: 'TeacherAIGradingDetail', component: () => import('../views/teacher/AIGradingReviewDetailView.vue'), meta: { role: 'teacher' } },
+  { path: '/teacher/practice/leaderboard', name: 'TeacherPracticeLeaderboard', component: () => import('../views/teacher/PracticeLeaderboardView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/courses/:courseId/lessons/:lessonId/edit', name: 'TeacherLessonEdit', component: () => import('../views/teacher/LessonEditView.vue'), meta: { role: 'teacher' } },
   { path: '/teacher/courses/:id/studio/:lid', name: 'TeacherStudio', component: () => import('../views/teacher/StudioView.vue'), meta: { role: 'teacher' } },
 
@@ -89,6 +98,13 @@ const routes = [
   { path: '/admin/judge-submissions/:id', name: 'AdminJudgeSubmissionDetail', component: () => import('../views/teacher/JudgeSubmissionDetailView.vue'), meta: { role: 'admin' } },
   { path: '/admin/ai-grading', name: 'AdminAIGrading', component: () => import('../views/teacher/AIGradingReviewView.vue'), meta: { role: 'admin' } },
   { path: '/admin/ai-grading/:id', name: 'AdminAIGradingDetail', component: () => import('../views/teacher/AIGradingReviewDetailView.vue'), meta: { role: 'admin' } },
+  // 自主练习管理员面：题库 / 编辑 / 设置 / 用量 / 复核
+  { path: '/admin/practice/problems', name: 'AdminPracticeProblems', component: () => import('../views/admin/PracticeProblemsView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/practice/problems/new', name: 'AdminPracticeProblemNew', component: () => import('../views/admin/PracticeProblemEditView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/practice/problems/:id/edit', name: 'AdminPracticeProblemEdit', component: () => import('../views/admin/PracticeProblemEditView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/practice/settings', name: 'AdminPracticeSettings', component: () => import('../views/admin/PracticeSettingsView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/practice/usage', name: 'AdminPracticeUsage', component: () => import('../views/admin/PracticeUsageView.vue'), meta: { role: 'admin' } },
+  { path: '/admin/practice/appeals', name: 'AdminPracticeAppeals', component: () => import('../views/admin/PracticeAppealsView.vue'), meta: { role: 'admin' } },
   { path: '/admin/logs', name: 'AdminLogs', component: () => import('../views/admin/AdminLogsView.vue'), meta: { role: 'admin' } },
 
   { path: '/', redirect: '/welcome' },

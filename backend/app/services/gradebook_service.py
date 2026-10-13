@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from openpyxl import Workbook
 from fastapi import HTTPException
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.errors import api_error
 from app.models import (AcademicTerm, Assignment, CodeGrade, Course, Exam, ExamQuestion, ExamSubmission,
@@ -18,6 +18,7 @@ from app.models import (AcademicTerm, Assignment, CodeGrade, Course, Exam, ExamQ
 from app.models.gradebook import (Gradebook, GradebookAdjustment, GradebookCategory,
                                  GradebookColumn, GradebookEntry, GradebookSnapshot)
 from app.models.teaching import CourseOffering, OfferingEnrollment, OfferingExperiment
+from app.schemas.gradebook import ConfigUpdate
 from app.services.account_service import audit, lock_policy
 from app.services.offering_service import require_offering
 from app.services.time_utils import utc_now
@@ -36,10 +37,60 @@ def score_text(value):
     return str(value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)) if value is not None else None
 
 
+# 新课程四类模板：平时 20 / 实验 30 / 期中 20 / 期末 30，教师可调整。
+DEFAULT_TEMPLATE = [{'key': 'regular', 'title': '平时成绩', 'weight': 20},
+                    {'key': 'labs', 'title': '实验成绩', 'weight': 30},
+                    {'key': 'midterm', 'title': '期中成绩', 'weight': 20},
+                    {'key': 'final', 'title': '期末成绩', 'weight': 30}]
+
+# 发布任务时的默认分类；exam_kind='other' 必须由教师显式选择分类。
+TASK_CATEGORY_BY_KIND = {'assignment': 'regular', 'experiment': 'labs'}
+EXAM_CATEGORY_BY_KIND = {'quiz': 'regular', 'midterm': 'midterm', 'final': 'final'}
+
+
+def expand_template(categories):
+    """课程模板只存分类与规则、不含任务 ID；展开时每个分类带一个人工录入分项。"""
+    return [{'key': item['key'], 'title': item['title'], 'weight': str(item['weight']),
+             'weight_mode': item.get('weight_mode', 'equal'), 'columns': [
+                 {'key': f"{item['key']}-main", 'title': item['title'], 'weight': None, 'source_kind': 'manual',
+                  'source_id': None, 'selection': 'highest', 'allocation_status': 'allocated'}]}
+            for item in categories]
+
+
 def default_config():
-    return [{'key': key, 'title': title, 'weight': str(weight), 'columns': [
-        {'key': f'{key}-main', 'title': title, 'weight': '100', 'source_kind': 'manual', 'source_id': None, 'selection': 'highest'}]}
-        for key, title, weight in [('regular', '平时成绩', 30), ('labs', '实验成绩', 40), ('exam', '考核成绩', 30)]]
+    return expand_template(DEFAULT_TEMPLATE)
+
+
+def course_template(course):
+    """课程模板只含分类与规则；未配置过模板时返回内置四类模板。"""
+    if course.default_gradebook_config:
+        return [{'key': item['key'], 'title': item['title'], 'weight': str(item['weight']),
+                 'weight_mode': item.get('weight_mode', 'equal')} for item in course.default_gradebook_config]
+    return [{'key': item['key'], 'title': item['title'], 'weight': str(item['weight']), 'weight_mode': 'equal'}
+            for item in DEFAULT_TEMPLATE]
+
+
+def book_config_for(db, offering_id):
+    """教学班首次建册时优先复制课程模板；课程模板后续修改不回溯已开班。"""
+    offering = db.get(CourseOffering, offering_id)
+    course = db.get(Course, offering.course_id) if offering else None
+    template = course.default_gradebook_config if course else None
+    return expand_template(template) if template else default_config()
+
+
+def seed_book(db, book):
+    for position, category_cfg in enumerate(book_config_for(db, book.offering_id)):
+        category = GradebookCategory(gradebook_id=book.id, key=category_cfg['key'], title=category_cfg['title'],
+                                     weight=category_cfg['weight'], weight_mode=category_cfg['weight_mode'],
+                                     position=position)
+        db.add(category); db.flush()
+        for index, column_cfg in enumerate(category_cfg['columns']):
+            db.add(GradebookColumn(gradebook_id=book.id, category_id=category.id, key=column_cfg['key'],
+                                   title=column_cfg['title'], weight=column_cfg['weight'],
+                                   source_kind=column_cfg['source_kind'], source_id=column_cfg['source_id'],
+                                   selection=column_cfg['selection'], position=index,
+                                   allocation_status=column_cfg['allocation_status']))
+    db.flush()
 
 
 def book_for(db, offering_id, *, lock=False):
@@ -79,6 +130,7 @@ def lock_book(db, offering_id, actor, expected_revision, *, write=True, create=F
             raise api_error(409, 'GRADEBOOK_REVISION_CONFLICT', '成绩簿尚未配置或版本已变化，请刷新')
         book = Gradebook(offering_id=offering_id, revision=1)
         db.add(book); db.flush()
+        seed_book(db, book)
     else:
         result = db.execute(update(Gradebook).where(Gradebook.id == book.id,
                             Gradebook.revision == expected_revision).values(revision=Gradebook.revision + 1))
@@ -98,9 +150,10 @@ def categories(db, book, *, lock=False):
 
 def config_read(db, book, *, lock=False):
     groups, columns = categories(db, book, lock=lock)
-    return [{'key': c.key, 'title': c.title, 'weight': str(c.weight), 'columns': [
-        {'key': col.key, 'title': col.title, 'weight': str(col.weight), 'source_kind': col.source_kind,
-         'source_id': col.source_id, 'selection': col.selection} for col in columns if col.category_id == c.id]} for c in groups]
+    return [{'key': c.key, 'title': c.title, 'weight': str(c.weight), 'weight_mode': c.weight_mode, 'columns': [
+        {'key': col.key, 'title': col.title, 'weight': str(col.weight) if col.weight is not None else None,
+         'source_kind': col.source_kind, 'source_id': col.source_id, 'selection': col.selection,
+         'allocation_status': col.allocation_status} for col in columns if col.category_id == c.id]} for c in groups]
 
 
 def source_target(db, kind, ident, offering_id, *, lock=False):
@@ -124,32 +177,109 @@ def save_config(db, offering_id, actor, payload):
     old_categories, old_columns = categories(db, book, lock=True)
     category_map = {row.key: row for row in old_categories}
     column_map = {row.key: row for row in old_columns}
-    keep_categories, keep_columns = set(), set()
+    keep_category_keys = {cfg.key for cfg in payload.categories}
+    keep_column_keys = {col.key for cfg in payload.categories for col in cfg.columns}
+    removed_columns = [c for c in old_columns if c.key not in keep_column_keys]
+    if removed_columns:
+        # 先删被移除的分项：否则把它的来源改绑给别的分项时会撞 uq_gradebook_column_source。
+        db.execute(delete(GradebookEntry).where(GradebookEntry.column_id.in_([c.id for c in removed_columns])))
+        db.execute(delete(GradebookColumn).where(GradebookColumn.id.in_([c.id for c in removed_columns])))
+        db.flush()
+    reassigned = [column_map[col_cfg.key] for cfg in payload.categories for col_cfg in cfg.columns
+                  if col_cfg.key in column_map
+                  and (column_map[col_cfg.key].source_kind, column_map[col_cfg.key].source_id)
+                  != (col_cfg.source_kind, col_cfg.source_id)]
+    if reassigned:
+        # 全部先置空再统一改绑：同一请求里交换两个分项的来源也不会中途撞唯一约束。
+        db.execute(delete(GradebookEntry).where(GradebookEntry.column_id.in_([c.id for c in reassigned])))
+        db.execute(update(GradebookColumn).where(GradebookColumn.id.in_([c.id for c in reassigned]))
+                   .values(source_kind='manual', source_id=None))
+        db.flush()
+    keep_categories = set()
     for pos, cfg in enumerate(payload.categories):
         category = category_map.get(cfg.key)
         if not category:
             category = GradebookCategory(gradebook_id=book.id, key=cfg.key)
             db.add(category)
         category.title, category.weight, category.position = cfg.title, cfg.weight, pos
+        category.weight_mode = cfg.weight_mode
         db.flush(); keep_categories.add(category.id)
         for index, col_cfg in enumerate(cfg.columns):
             column = column_map.get(col_cfg.key)
-            if not column:
+            is_new = column is None
+            if is_new:
                 column = GradebookColumn(gradebook_id=book.id, key=col_cfg.key)
                 db.add(column)
-            elif (column.source_kind, column.source_id) != (col_cfg.source_kind, col_cfg.source_id):
-                db.execute(delete(GradebookEntry).where(GradebookEntry.column_id == column.id))
             column.category_id, column.title, column.weight = category.id, col_cfg.title, col_cfg.weight
+            if col_cfg.weight is not None:
+                # 教师给出栏目内比例即视为已分配，不会再退回待分配。
+                column.allocation_status = 'allocated'
+            elif is_new:
+                # 自定义比例分类下新分项等待分配；等权分类直接按分项数均分。
+                column.allocation_status = 'pending' if cfg.weight_mode == 'custom' else 'allocated'
             column.source_kind, column.source_id = col_cfg.source_kind, col_cfg.source_id
             column.selection, column.position = col_cfg.selection, index
-            db.flush(); keep_columns.add(column.id)
-    removed_columns = [c.id for c in old_columns if c.id not in keep_columns]
-    if removed_columns:
-        db.execute(delete(GradebookEntry).where(GradebookEntry.column_id.in_(removed_columns)))
-        db.execute(delete(GradebookColumn).where(GradebookColumn.id.in_(removed_columns)))
+            db.flush()
     db.execute(delete(GradebookCategory).where(GradebookCategory.gradebook_id == book.id,
                                                GradebookCategory.id.not_in(keep_categories)))
-    audit(db, actor.id, 'gradebook.configure', 'offering', offering_id, changes={'revision': book.revision})
+    audit(db, actor.id, 'gradebook.configure', 'offering', offering_id,
+          changes={'revision': book.revision, 'categories': sorted(keep_category_keys)})
+    return book
+
+
+def free_column_key(db, gradebook_id, base):
+    key, suffix = base[:60], 1
+    while db.scalar(select(GradebookColumn.id).where(GradebookColumn.gradebook_id == gradebook_id,
+                                                     GradebookColumn.key == key)) is not None:
+        suffix += 1
+        key = f'{base[:58]}-{suffix}'
+    return key
+
+
+def bound_column(db, offering_id, source_kind, source_id):
+    book = book_for(db, offering_id)
+    if book is None: return None
+    return db.scalar(select(GradebookColumn).where(GradebookColumn.gradebook_id == book.id,
+        GradebookColumn.source_kind == source_kind, GradebookColumn.source_id == source_id))
+
+
+def bind_task_column(db, offering_id, actor_id, *, source_kind, source_id, title, category_key):
+    """把已发布任务登记为班级成绩册的自动分项；同一任务重复发布不会产生第二列。"""
+    book = book_for(db, offering_id, lock=True)
+    if book is None:
+        book = Gradebook(offering_id=offering_id, revision=1)
+        db.add(book); db.flush()
+        seed_book(db, book)
+    existing = db.scalar(select(GradebookColumn).where(GradebookColumn.gradebook_id == book.id,
+        GradebookColumn.source_kind == source_kind, GradebookColumn.source_id == source_id))
+    if existing: return existing
+    category = db.scalar(select(GradebookCategory).where(GradebookCategory.gradebook_id == book.id,
+                                                        GradebookCategory.key == category_key))
+    if category is None:
+        raise api_error(422, 'GRADEBOOK_CATEGORY_NOT_FOUND', '成绩册没有该分类，请先在成绩册栏目中补充分类')
+    position = db.scalar(select(func.max(GradebookColumn.position))
+                         .where(GradebookColumn.gradebook_id == book.id)) or 0
+    column = GradebookColumn(gradebook_id=book.id, category_id=category.id,
+        key=free_column_key(db, book.id, f'{source_kind}-{source_id}'), title=(title or '自动分项').strip()[:120],
+        weight=None, source_kind=source_kind, source_id=source_id, selection='highest', position=position + 1,
+        auto_bound=True, bound_at=utc_now(), bound_by_id=actor_id,
+        allocation_status='pending' if category.weight_mode == 'custom' else 'allocated')
+    db.add(column); db.flush()
+    # 新分项改变了成绩单草稿：递增修订号，避免教师拿旧修订号保存栏目时把自动分项删掉。
+    db.execute(update(Gradebook).where(Gradebook.id == book.id).values(revision=Gradebook.revision + 1))
+    db.flush()
+    audit(db, actor_id, 'gradebook.bind', 'gradebook', book.id,
+          changes={'column': column.key, 'source_kind': source_kind, 'source_id': source_id,
+                   'category': category_key, 'allocation_status': column.allocation_status})
+    return column
+
+
+def restore_course_default(db, offering_id, actor, payload):
+    """按课程模板重建本班栏目：模板只含分类与规则，不含任务 ID。"""
+    config = ConfigUpdate(expected_revision=payload.expected_revision, categories=book_config_for(db, offering_id))
+    book = save_config(db, offering_id, actor, config)
+    audit(db, actor.id, 'gradebook.restore_course_default', 'offering', offering_id, reason=payload.reason,
+          changes={'revision': book.revision})
     return book
 
 
@@ -343,6 +473,13 @@ def source_score(db, column, offering_id, student_id, *, lock=False, missing_con
                          'submission_id': chosen.id, 'reviewed_at': str(chosen.reviewed_at), 'selection': column.selection})
 
 
+def effective_units(included):
+    """没给栏目内比例的分项按同类均分：单位取已给比例分项的均值，全都没给则取 1。"""
+    explicit = [column.weight for column in included if column.weight is not None and column.weight > 0]
+    unit = sum(explicit, Decimal(0)) / len(explicit) if explicit else Decimal(1)
+    return {column.key: (column.weight if column.weight is not None else unit) for column in included}
+
+
 def calculate(db, book, *, lock=False):
     groups, columns = categories(db, book, lock=lock)
     targets = {}
@@ -356,6 +493,11 @@ def calculate(db, book, *, lock=False):
         GradebookEntry.column_id.in_([c.id for c in columns])), lock)}
     adjustments = {a.student_id: a for a in query_rows(db, select(GradebookAdjustment).where(GradebookAdjustment.gradebook_id == book.id), lock)}
     rows, blockers = [], []
+    # 待分配比例的自动分项不参与草稿计算（不静默改动原比例），并由发布门禁拦住。
+    for col in columns:
+        if col.allocation_status == 'pending':
+            blockers.append({'column': col.key, 'code': 'UNALLOCATED_WEIGHTS',
+                             'message': f'自动关联分项「{col.title}」尚未分配栏目内比例，确认分配后才能发布正式总评'})
     students = roster(db, book.offering_id, lock=lock)
     source_rows = preload_sources(db, columns, targets, book.offering_id, [s.id for s in students], lock=lock)
     for student in students:
@@ -379,20 +521,26 @@ def calculate(db, book, *, lock=False):
             if group.weight == 0:
                 results.append({'key': group.key, 'score': None, 'weighted_points': '0.00', 'effective_weights': {}})
                 continue
-            included = [c for c in children if cells[c.key]['state'] != 'exempt' and c.weight > 0]
-            denominator = sum((c.weight for c in included), Decimal(0))
-            if denominator == 0:
-                valid = False; blockers.append({'student_id': student.id, 'category': group.key, 'message': '整个一级栏目免修，必须调整栏目配置后才能发布'})
+            included = [c for c in children if cells[c.key]['state'] != 'exempt'
+                        and c.allocation_status != 'pending' and (c.weight is None or c.weight > 0)]
+            if not included:
+                valid = False
+                all_pending = bool(children) and all(c.allocation_status == 'pending' for c in children)
+                blockers.append({'student_id': student.id, 'category': group.key,
+                                 'message': '整个一级栏目的分项都在待分配，必须确认分配后才能发布' if all_pending
+                                            else '整个一级栏目免修，必须调整栏目配置后才能发布'})
                 results.append({'key': group.key, 'score': None, 'weighted_points': None, 'effective_weights': {}})
                 continue
+            units = effective_units(included)
+            denominator = sum(units.values(), Decimal(0))
             category_score, category_valid = Decimal(0), True
-            weights = {c.key: str((c.weight / denominator * HUNDRED).quantize(Decimal('0.0001'))) for c in included}
+            weights = {c.key: str((units[c.key] / denominator * HUNDRED).quantize(Decimal('0.0001'))) for c in included}
             for col in included:
                 cell = cells[col.key]
                 if cell['score'] is None:
                     category_valid = valid = False
                     blockers.append({'student_id': student.id, 'column': col.key, 'message': cell['message']})
-                else: category_score += decimal(cell['score']) * col.weight / denominator
+                else: category_score += decimal(cell['score']) * units[col.key] / denominator
             weighted = category_score * group.weight / HUNDRED if category_valid else None
             if weighted is not None: total += weighted
             results.append({'key': group.key, 'score': score_text(category_score) if category_valid else None,
@@ -404,9 +552,25 @@ def calculate(db, book, *, lock=False):
                      'adjustment': {'score': score_text(adjustment.score), 'reason': adjustment.reason} if adjustment else None})
     result = {'offering_id': book.offering_id, 'book_revision': book.revision, 'config': config_read(db, book, lock=lock),
               'rows': rows, 'blockers': blockers}
+    # 未决成绩异议只提示、不阻止发布（不进 blockers）：成绩册本身不提供异议入口，
+    # 教师看到计数后到 AI 评分复核页处理。
+    result['warnings'] = _appeal_warnings(db, book.offering_id)
     reviewed = {key: value for key, value in result.items() if key != 'book_revision'}
     result['preview_hash'] = hashlib.sha256(json.dumps(reviewed, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
     return result
+
+
+def _appeal_warnings(db, offering_id: int) -> list[dict]:
+    from app.services.appeal_service import count_offering_pending_appeals
+
+    pending = count_offering_pending_appeals(db, offering_id)
+    if not pending:
+        return []
+    return [{
+        'kind': 'PENDING_APPEALS',
+        'count': pending,
+        'message': f'有 {pending} 条成绩异议尚未处理，不影响总评发布，建议发布前先在 AI 评分复核页处理',
+    }]
 
 
 def snapshot_read(db, snapshot, actor):
@@ -487,7 +651,7 @@ def read_book(db, offering_id, actor):
     term, klass = db.get(AcademicTerm, offering.academic_term_id), db.get(TeachingClass, offering.teaching_class_id)
     return {'offering_id': offering_id, 'revision': book.revision if book else 0,
             'read_only': offering.status != 'active' or not term or term.status == 'closed' or not klass or klass.status == 'archived',
-            'config': config_read(db, book) if book else default_config(),
+            'config': config_read(db, book) if book else book_config_for(db, offering_id),
             'draft': calculate(db, book) if book else None,
             'snapshot': snapshot_read(db, latest, actor) if latest else None,
             'sources': source_options(db, offering_id)}

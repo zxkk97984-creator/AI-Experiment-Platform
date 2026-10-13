@@ -20,7 +20,8 @@ from app.models import (
 )
 from app.schemas import AIServiceStatus, PaginatedResponse
 from app.schemas.ai_grading import (
-    AIQuestionConfigUpdate, GradeOverrideCreate, RubricDocument,
+    AIQuestionConfigUpdate, AISetupEnableRequest, AISetupJobCreate,
+    AISetupTrialRunCreate, GradeOverrideCreate, RubricDocument,
     TestGroupsGenerateRequest, TestGroupsGenerateResponse,
 )
 from app.services.ai_client import AIServiceError, DeepSeekClient
@@ -67,6 +68,18 @@ def _lock_retry_target_and_validate_source(db: Session, cg: CodeGrade):
         if target is not None and (target.manual_score_at is not None
                                    or target.manual_score_reason is not None):
             raise api_error(409, "MANUAL_SCORE_FINAL", "人工最终分已生效，不能重试或重评 AI 分")
+    elif cg.practice_submission_id:
+        # 自主练习（批次 5）：目标行锁与判题认领同一把栅栏，锁序仍是 target → CodeGrade
+        from app.models.practice import PracticeSubmission
+
+        target = db.scalar(select(PracticeSubmission)
+                           .where(PracticeSubmission.id == cg.practice_submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        target_kind = "practice_submission"
+        version_id = target.grading_version_id if target is not None else None
+        target_id = cg.practice_submission_id
+        if target is not None and target.grading_status in ("queued", "running"):
+            raise api_error(409, "GRADING_IN_PROGRESS", "练习判题仍在进行，请稍后重试")
     else:
         raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
     if target is None or version_id is None:
@@ -107,6 +120,15 @@ def _lock_override_target(db: Session, cg: CodeGrade):
                            .with_for_update().execution_options(populate_existing=True))
         manual_final = target is not None and (target.manual_score_at is not None
                                                or target.manual_score_reason is not None)
+    elif cg.practice_submission_id:
+        # 自主练习：练习提交自身的人工/最终分不在本通道维护，
+        # 这里只保证行锁顺序（target → CodeGrade）与在途判题拒绝。
+        from app.models.practice import PracticeSubmission
+
+        target = db.scalar(select(PracticeSubmission)
+                           .where(PracticeSubmission.id == cg.practice_submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        manual_final = False
     else:
         raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
 
@@ -175,6 +197,9 @@ def _ensure_course_teacher(db: Session, course_id: int, user: User):
     """验证用户是该课程的教师或 admin"""
     if user.role == "admin":
         return
+    if course_id == 0:
+        # course_id==0 是平台级目标（自主练习题库）的哨兵值：只有管理员可写
+        raise api_error(403, "FORBIDDEN", "自主练习题库仅管理员可维护")
     course = db.get(Course, course_id)
     if not course:
         raise api_error(404, "NOT_FOUND", "课程不存在")
@@ -206,7 +231,14 @@ def _get_course_id_for_question(db: Session, kind: str, question_id: int) -> int
             raise api_error(404, "NOT_FOUND", "考试不存在")
         db.info["teaching_question_task"] = e
         return e.course_id
-    raise api_error(400, "INVALID_KIND", "kind 必须为 assignment 或 exam")
+    elif kind == "practice_problem":
+        # 平台级公共题库：没有课程归属，返回哨兵 0（写权限由 _ensure_course_teacher 收口）
+        from app.models.practice import PracticeProblem
+
+        if db.get(PracticeProblem, question_id) is None:
+            raise api_error(404, "NOT_FOUND", "练习题不存在")
+        return 0
+    raise api_error(400, "INVALID_KIND", "kind 必须为 assignment、exam 或 practice_problem")
 
 
 def _teacher_course_ids(db: Session, user: User) -> list[int]:
@@ -220,7 +252,15 @@ def _teacher_course_ids(db: Session, user: User) -> list[int]:
 
 
 def _check_grade_permission(db: Session, cg: CodeGrade, user: User):
-    """验证教师有权访问该评分记录——fail-closed（关联缺失时拒绝）"""
+    """验证教师有权访问该评分记录——fail-closed（关联缺失时拒绝）
+
+    自主练习不属于任何课程：教师一律 403（拿不到学生源码与他人评分详情），
+    练习评分只对管理员与提交者本人开放。
+    """
+    if cg.practice_submission_id:
+        if user.role != "admin":
+            raise api_error(403, "FORBIDDEN", "自主练习评分仅管理员与提交者本人可见")
+        return
     course_ids = _teacher_course_ids(db, user)
     if not course_ids:
         raise api_error(403, "FORBIDDEN", "无权操作")
@@ -596,6 +636,9 @@ def _build_grade_base_query(db: Session, user: User, kind: str | None,
             )
             query = query.where(permission_filter)
             count_q = count_q.where(permission_filter)
+        # 练习评分不进正式 AI 复核列表：练习由管理员在练习复核页处理
+        query = query.where(CodeGrade.practice_submission_id.is_(None))
+        count_q = count_q.where(CodeGrade.practice_submission_id.is_(None))
 
     # question_id 筛选：需要时添加 JOIN（admin 可能尚未 JOIN 相关表）
     if question_id is not None:
@@ -741,6 +784,9 @@ def get_grade_detail(
     cg = db.get(CodeGrade, grade_id)
     if cg is None:
         raise api_error(404, "NOT_FOUND", "评分记录不存在")
+    if cg.practice_submission_id and current_user.role != "admin":
+        # 练习详情可能带学生源码与评分明细：教师一律 403，绝不静默返回空字段
+        raise api_error(403, "FORBIDDEN", "自主练习评分仅管理员可见")
 
     # 权限：fail-closed——关联缺失时拒绝访问
     if current_user.role != "admin":
@@ -843,6 +889,52 @@ def get_grade_detail(
     }
 
 
+def _requeue_grade(
+    db: Session, redis_client, cg_ref: CodeGrade, *,
+    allow_completed: bool = False, commit: bool = True,
+) -> dict:
+    """retry 的事务内核心：锁 target → 校验来源版本 → 重置为 pending 并重新入队。
+
+    ``allow_completed=True`` 供成绩异议重评使用——异议本身就是对已完成结果的
+    合法重评理由；其余保护（来源版本校验、三类 409、清认领、代次递增）完全一致。
+    ``commit=False`` 时由调用方（异议处理）把 reset 与 appeal 状态收在同一事务里。
+    """
+    if cg_ref.status in ("running", "queued", "pending"):
+        return {"ok": True, "grade_id": cg_ref.id, "status": cg_ref.status,
+                "message": "评分进行中，不重复入队"}
+    if cg_ref.status == "completed" and not allow_completed:
+        raise api_error(400, "ALREADY_COMPLETED", "评分已成功完成，无需重试。如需重新评分请使用重评功能。")
+
+    _lock_retry_target_and_validate_source(db, cg_ref)
+    cg = db.scalar(select(CodeGrade).where(CodeGrade.id == cg_ref.id).with_for_update()
+                   .execution_options(populate_existing=True))
+    if cg is None:
+        raise api_error(404, "NOT_FOUND", "评分记录不存在")
+
+    # 目标锁定后重新确认状态，挡住锁等待期间已被其他 worker 改变的任务。
+    if cg.status in ("running", "queued", "pending"):
+        return {"ok": True, "grade_id": cg.id, "status": cg.status, "message": "评分进行中，不重复入队"}
+    if cg.status == "completed" and not allow_completed:
+        raise api_error(400, "ALREADY_COMPLETED", "评分已成功完成，无需重试。如需重新评分请使用重评功能。")
+
+    grade_id = cg.id
+    cg.status = "pending"
+    cg.last_error = None
+    cg.attempt_count = 0
+    # 受控重试：旧代次必须失效，否则上一轮仍在运行的写入会与新结果竞争
+    cg.claim_token = None
+    cg.result_revision = (cg.result_revision or 0) + 1
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+
+    ok = enqueue_ai_grade(db, redis_client, grade_id)
+    if commit:
+        db.commit()
+    return {"ok": ok, "grade_id": grade_id, "status": "queued" if ok else "pending"}
+
+
 @router.post("/grades/{grade_id}/retry")
 def retry_grade(
     grade_id: int,
@@ -859,52 +951,19 @@ def retry_grade(
     if current_user.role != "admin":
         _check_grade_permission(db, cg_ref, current_user)
 
-    if cg_ref.status in ("running", "queued", "pending"):
-        return {"ok": True, "grade_id": grade_id, "status": cg_ref.status,
-                "message": "评分进行中，不重复入队"}
-    if cg_ref.status == "completed":
-        raise api_error(400, "ALREADY_COMPLETED", "评分已成功完成，无需重试。如需重新评分请使用重评功能。")
-
-    _lock_retry_target_and_validate_source(db, cg_ref)
-    cg = db.scalar(select(CodeGrade).where(CodeGrade.id == grade_id).with_for_update()
-                   .execution_options(populate_existing=True))
-    if cg is None:
-        raise api_error(404, "NOT_FOUND", "评分记录不存在")
-
-    # 目标锁定后重新确认状态，挡住锁等待期间已被其他 worker 改变的任务。
-    if cg.status in ("running", "queued", "pending"):
-        return {"ok": True, "grade_id": grade_id, "status": cg.status, "message": "评分进行中，不重复入队"}
-    if cg.status == "completed":
-        raise api_error(400, "ALREADY_COMPLETED", "评分已成功完成，无需重试。如需重新评分请使用重评功能。")
-
-    cg.status = "pending"
-    cg.last_error = None
-    cg.attempt_count = 0
-    # 受控重试：旧代次必须失效，否则上一轮仍在运行的写入会与新结果竞争
-    cg.claim_token = None
-    cg.result_revision = (cg.result_revision or 0) + 1
-    db.commit()
-
-    ok = enqueue_ai_grade(db, redis_client, grade_id)
-    db.commit()
-    return {"ok": ok, "grade_id": grade_id, "status": "queued" if ok else "pending"}
+    return _requeue_grade(db, redis_client, cg_ref)
 
 
-@router.post("/grades/{grade_id}/override")
-def override_grade(
-    grade_id: int,
-    data: GradeOverrideCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """教师覆盖 AI 评分维度分。
+def _apply_grade_override(
+    db: Session, grade_id: int, data: GradeOverrideCreate, current_user: User,
+) -> dict:
+    """override 端点的事务内核心：不提交，由调用方收口。
 
     拒绝条件（与 judge.py 人工最终分保持同一套不变量）：
     * 主判题在途（``grading_status in queued/running``）→ 409 GRADING_IN_PROGRESS；
     * AI 评分在途（``CodeGrade.status in pending/queued/running``）→ 409 AI_GRADING_IN_PROGRESS；
     * 人工最终分已生效 → 409 MANUAL_SCORE_FINAL（只能走 manual-score 通道修改）。
     """
-    _teacher_or_admin(current_user)
     cg_ref = db.get(CodeGrade, grade_id)
     if cg_ref is None:
         raise api_error(404, "NOT_FOUND", "评分记录不存在")
@@ -1004,6 +1063,13 @@ def override_grade(
             finalize_if_ready(target.submission_id, db)
             # 教师覆盖确认是显式受控动作：失败原因已消除则收口
             promote_review_required_if_complete(target.submission_id, db)
+        elif cg.practice_submission_id:
+            # 自主练习：管理员改分与 CodeGrade 同一事务落到练习提交上
+            target.score = cg.final_score_100
+            target.grading_status = "completed"
+            target.finished_at = datetime.now(timezone.utc)
+            target.last_error = None
+            target.result_revision = (target.result_revision or 0) + 1
 
     # 使任何滞留认领失效：ai_claim_guard 要求 status=='running' 且 claim_token 匹配，
     # 清空后晚到的 AI 终态写入必然被栅栏拒绝，不会静默回退本次覆盖。
@@ -1011,8 +1077,21 @@ def override_grade(
     cg.claim_token = None
     cg.result_revision = (cg.result_revision or 0) + 1
 
-    db.commit()
     return {"ok": True, "grade_id": grade_id, "original": original, "replacement": replacement}
+
+
+@router.post("/grades/{grade_id}/override")
+def override_grade(
+    grade_id: int,
+    data: GradeOverrideCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """教师覆盖 AI 评分维度分（HTTP 入口，事务在此收口）。"""
+    _teacher_or_admin(current_user)
+    result = _apply_grade_override(db, grade_id, data, current_user)
+    db.commit()
+    return result
 
 
 @router.post("/questions/{kind}/{question_id}/regrade")
@@ -1148,5 +1227,199 @@ def regrade_question(
     db.commit()
 
     return {"ok": True, "total": count, "queued": queued}
+
+
+# ── 一键 AI 配置与草稿试判（批次 2） ──────────────────────────────
+
+def _setup_job_or_404(db: Session, job_id: int, user: User):
+    from app.models import AiGradingSetupJob
+
+    job = db.get(AiGradingSetupJob, job_id)
+    if job is None:
+        raise api_error(404, "NOT_FOUND", "配置任务不存在")
+    course_id = _get_course_id_for_question(db, job.question_kind, job.question_id)
+    _ensure_course_teacher(db, course_id, user)
+    from app.services.ai_grading_setup_service import expire_stale_job
+
+    return expire_stale_job(db, job)
+
+
+def _trial_run_read(run) -> dict:
+    return {
+        "id": run.id, "job_id": run.job_id, "status": run.status,
+        "algorithm_score": run.algorithm_score, "quality_score": run.quality_score,
+        "preview_score_100": run.preview_score_100,
+        # 试判不执行判题容器：F/R 确定性分不参与，绝不冒充完整成绩
+        "includes_deterministic": False,
+        "ai_result": run.ai_result,
+        "error_code": run.error_code, "error_message": run.error_message,
+        "attempts": run.attempts,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+    }
+
+
+def _setup_job_read(db: Session, job) -> dict:
+    rubric = db.get(QuestionRubric, job.draft_rubric_id) if job.draft_rubric_id else None
+    return {
+        "id": job.id, "question_kind": job.question_kind, "question_id": job.question_id,
+        "stage": job.stage, "progress": job.progress, "attempts": job.attempts,
+        "failed_stage": job.failed_stage,
+        "draft_rubric_id": job.draft_rubric_id,
+        "draft_rubric": rubric.rubric_json if rubric is not None else None,
+        "draft_rubric_status": rubric.status if rubric is not None else None,
+        "draft_test_groups": job.draft_test_groups or [],
+        "generate_test_groups": bool(job.generate_test_groups),
+        "error_code": job.error_code, "error_message": job.error_message,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
+
+
+@router.post("/setup-jobs", status_code=202)
+def create_setup_job(
+    data: AISetupJobCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    redis_client=Depends(get_redis_client),
+):
+    """一键配置：异步生成草稿；同一题目的活跃任务唯一，重复点击返回既有任务。"""
+    from app.services import ai_grading_setup_service as setup
+
+    _teacher_or_admin(current_user)
+    course_id = _get_course_id_for_question(db, data.question_kind, data.question_id)
+    _ensure_course_teacher(db, course_id, current_user)
+    _ensure_assignment_scoring_editable(db, data.question_kind, data.question_id)
+    if not settings.ai_ready:
+        raise api_error(503, "AI_NOT_READY", "AI 服务未配置 API Key")
+    _check_generation_rate_limit(redis_client, current_user.id,
+                                 f"setup:{data.question_kind}:{data.question_id}")
+
+    job, created = setup.create_or_get_job(
+        db, question_kind=data.question_kind, question_id=data.question_id,
+        teacher_id=current_user.id, reference_solution=data.reference_solution,
+        teacher_constraints=data.teacher_constraints, grading_mode=data.grading_mode,
+        generate_test_groups=data.generate_test_groups,
+    )
+    if job.stage == "queued":
+        setup.enqueue_setup_job(db, redis_client, job.id)
+    payload = _setup_job_read(db, job)
+    payload["reused"] = not created
+    return payload
+
+
+@router.get("/setup-jobs/{job_id}")
+def get_setup_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _teacher_or_admin(current_user)
+    job = _setup_job_or_404(db, job_id, current_user)
+    return _setup_job_read(db, job)
+
+
+@router.post("/setup-jobs/{job_id}/retry", status_code=202)
+def retry_setup_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    redis_client=Depends(get_redis_client),
+):
+    """失败重试：保留已生成草稿，从失败阶段续跑。"""
+    from app.services import ai_grading_setup_service as setup
+
+    _teacher_or_admin(current_user)
+    job = _setup_job_or_404(db, job_id, current_user)
+    try:
+        job = setup.retry_setup_job(db, redis_client, job)
+    except setup.SetupJobError as exc:
+        raise api_error(409, "INVALID_STATE", str(exc)) from exc
+    return _setup_job_read(db, job)
+
+
+@router.post("/setup-jobs/{job_id}/trial-runs", status_code=202)
+def create_trial_run(
+    job_id: int,
+    data: AISetupTrialRunCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    redis_client=Depends(get_redis_client),
+):
+    """草稿试判：独立任务运行，不创建正式提交、不消耗学生提交次数。"""
+    from app.services import ai_grading_setup_service as setup
+
+    _teacher_or_admin(current_user)
+    job = _setup_job_or_404(db, job_id, current_user)
+    if not settings.ai_ready:
+        raise api_error(503, "AI_NOT_READY", "AI 服务未配置 API Key")
+    _check_generation_rate_limit(redis_client, current_user.id, f"trial:{job.id}")
+    try:
+        run, created = setup.create_trial_run(
+            db, job=job, teacher_id=current_user.id, code=data.code,
+            client_request_id=data.client_request_id,
+        )
+    except setup.SetupJobError as exc:
+        raise api_error(409, "INVALID_STATE", str(exc)) from exc
+    if created or run.status == "queued":
+        setup.enqueue_trial_run(db, redis_client, run.id)
+    payload = _trial_run_read(run)
+    payload["reused"] = not created
+    return payload
+
+
+@router.get("/trial-runs/{run_id}")
+def get_trial_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.models import RubricTrialRun
+
+    _teacher_or_admin(current_user)
+    run = db.get(RubricTrialRun, run_id)
+    if run is None:
+        raise api_error(404, "NOT_FOUND", "试判任务不存在")
+    course_id = _get_course_id_for_question(db, run.question_kind, run.question_id)
+    _ensure_course_teacher(db, course_id, current_user)
+    return _trial_run_read(run)
+
+
+@router.post("/setup-jobs/{job_id}/enable")
+def enable_setup_job(
+    job_id: int,
+    data: AISetupEnableRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """保存并启用：patch → lock → create_draft → confirm → activate 单事务，全成功或全回滚。"""
+    from app.services import ai_grading_setup_service as setup
+    from app.services.grading_version_service import GradingVersionError
+
+    _teacher_or_admin(current_user)
+    job = _setup_job_or_404(db, job_id, current_user)
+    _ensure_assignment_scoring_editable(db, job.question_kind, job.question_id)
+    try:
+        return setup.enable_setup_job(
+            db, job=job, actor=current_user,
+            rubric=data.rubric, test_groups=data.test_groups,
+            teacher_constraints=data.teacher_constraints,
+            score_cap_rules=data.score_cap_rules, compare_rules=data.compare_rules,
+            entry_function=data.entry_function,
+            acknowledge_in_flight=data.acknowledge_in_flight,
+        )
+    except setup.EnableScoreError as exc:
+        raise api_error(422, "ENABLE_SCORE_LIMIT_EXCEEDED", str(exc),
+                        fields={"violations": exc.violations}) from exc
+    except GradingVersionError as exc:
+        raise api_error(409, "ENABLEMENT_BLOCKED", str(exc)) from exc
+    except setup.SetupJobError as exc:
+        raise api_error(409, "INVALID_STATE", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(422, "INVALID_RUBRIC", str(exc)) from exc
+
 
 from app.services.offering_service import teacher_course_condition

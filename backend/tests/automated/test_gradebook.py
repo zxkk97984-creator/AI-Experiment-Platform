@@ -86,10 +86,12 @@ def scored(case, values):
 
 def test_default_weights_pending_gate_and_exact_weight_validation(client, case):
     response = client.get(f'{API}/offerings/{case.offering}', headers=case.headers)
-    assert [c['weight'] for c in response.json()['config']] == ['30', '40', '30']
+    # 批次 4 起新课程模板为平时 20 / 实验 30 / 期中 20 / 期末 30（各栏目默认等权）。
+    assert [(c['key'], c['weight'], c['weight_mode']) for c in response.json()['config']] == \
+           [('regular', '20', 'equal'), ('labs', '30', 'equal'), ('midterm', '20', 'equal'), ('final', '30', 'equal')]
     assert response.json()['revision'] == 0
     saved = save(client, case)
-    assert len(saved['draft']['blockers']) == 6
+    assert len(saved['draft']['blockers']) == 8
     failed = publish(client, case, saved['revision'])
     assert failed.status_code == 409 and failed.json()['detail']['code'] == 'GRADEBOOK_INCOMPLETE'
     invalid = deepcopy(default_config()); invalid[0]['weight'] = '30.0001'

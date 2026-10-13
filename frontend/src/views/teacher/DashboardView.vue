@@ -289,7 +289,10 @@ onMounted(loadDashboard)
       <section class="recent-section">
         <div class="section-heading">
           <div><p class="eyebrow">最近动态</p><h2>最近提交</h2><p>按提交时间排序，仅展示最近 10 条</p></div>
-          <button type="button" class="text-btn" @click="go('/teacher/submissions/unified')">查看全部 →</button>
+          <div class="row-wrap">
+            <button type="button" class="text-btn" @click="go('/teacher/practice/leaderboard')">练习排行榜 →</button>
+            <button type="button" class="text-btn" @click="go('/teacher/submissions/unified')">查看全部 →</button>
+          </div>
         </div>
         <article class="teacher-card submission-card">
           <DashboardAsyncState :loading="loading" :error="error" :empty="!recentSubmissions.length" empty-title="暂无提交" empty-body="学生提交实验、作业或考试后，记录会出现在这里" @retry="loadDashboard">

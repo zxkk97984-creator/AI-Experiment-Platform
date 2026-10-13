@@ -305,6 +305,8 @@ class Course(TimestampMixin, Base):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     visibility: Mapped[str] = mapped_column(String(20), default="class", server_default="class", nullable=False)
     default_score: Mapped[float] = mapped_column(Float, default=100.0, server_default="100")
+    # 课程级成绩册模板：只存分类与规则，不存任务 ID；首次开班时复制到教学班成绩册。
+    default_gradebook_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     teacher: Mapped[User | None] = relationship()
     cover_object: Mapped[StorageObject | None] = relationship(foreign_keys=[cover_object_id])
@@ -647,6 +649,10 @@ class Submission(TimestampMixin, Base):
 
 class Exam(TimestampMixin, Base):
     __tablename__ = "exams"
+    __table_args__ = (
+        CheckConstraint("exam_kind IN ('quiz', 'midterm', 'final', 'other')", name="ck_exam_kind"),
+        CheckConstraint("timing_mode IN ('unified', 'per_student')", name="ck_exam_timing_mode"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
@@ -657,6 +663,22 @@ class Exam(TimestampMixin, Base):
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ── 课堂试用：考试类型与考试秩序（批次 3） ────────────────
+    # exam_kind 供成绩册自动归类（批次 4 依赖）：quiz→平时、midterm→期中、final→期末、other→教师选择。
+    exam_kind: Mapped[str] = mapped_column(
+        String(20), default="quiz", server_default="quiz", nullable=False, index=True
+    )
+    # unified：交卷时间 = min(入场 + 时长, end_at)；per_student：入场 + 时长，
+    # 此时 end_at 只表示「最晚可开考时间」。发布后锁定。
+    timing_mode: Mapped[str] = mapped_column(
+        String(20), default="unified", server_default="unified", nullable=False
+    )
+    shuffle_questions: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
+    shuffle_options: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False
+    )
     show_score_after_grading: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
     show_questions_after_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
     show_answers_after_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"))
@@ -766,6 +788,21 @@ class ExamSubmission(TimestampMixin, Base):
     # 创建/补建答案只能从这里复制，不得读取题目最新配置。
     grading_version_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # ── 考试秩序：乱序快照与答题设备代次（批次 3） ──────────────
+    # 开考时与 freeze_exam_versions 同一事务写入后冻结；此后一切顺序以库为准，不再重算。
+    question_order: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    option_order: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 写入代次：换机接管 +1；所有答题写入必须携带它，旧设备一律 409 DEVICE_SUPERSEDED。
+    write_generation: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    active_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    active_device_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 监考计数：由 exam_events 幂等重算（断网补报不重复累加），只供教师查看，不扣分。
+    blur_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    away_total_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    device_switch_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
     exam: Mapped[Exam] = relationship()
     student: Mapped[User] = relationship()
     answers: Mapped[list["ExamAnswer"]] = relationship(back_populates="submission", cascade="all, delete-orphan")
@@ -807,7 +844,7 @@ class ExamQuestion(TimestampMixin, Base):
     __tablename__ = "exam_questions"
     __table_args__ = (
         CheckConstraint(
-            "question_type IN ('single_choice', 'multi_choice', 'fill_blank', 'code')",
+            "question_type IN ('single_choice', 'multi_choice', 'true_false', 'fill_blank', 'code')",
             name="ck_exam_question_type",
         ),
     )
@@ -918,6 +955,14 @@ class NotebookTemplate(TimestampMixin, Base):
         String(16), nullable=False, default="unrestricted"
     )  # unrestricted | restricted
     draft_allowed_imports: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 草稿运行配置（Q1：发布前配置、发布后锁定） ──────────────
+    # 发布时复制到新的 NotebookTemplateVersion，历史版本不更新
+    draft_cell_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default=text("120")
+    )
+    draft_kernel_idle_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=900, server_default=text("900")
+    )
 
     owner: Mapped[User] = relationship(foreign_keys=[owner_id])
     versions: Mapped[list["NotebookTemplateVersion"]] = relationship(
@@ -962,6 +1007,14 @@ class NotebookTemplateVersion(Base):
         String(16), nullable=False, default="unrestricted"
     )
     allowed_imports: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # ── 发布运行配置快照（Q1） ────────────────────────────────
+    # 从草稿复制，发布后不可变；已开始实验的记录不随新版本自动升级
+    cell_timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default=text("120")
+    )
+    kernel_idle_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=900, server_default=text("900")
+    )
 
     template: Mapped[NotebookTemplate] = relationship(
         back_populates="versions",
@@ -1137,15 +1190,21 @@ class ExperimentSubmission(TimestampMixin, Base):
 
 
 class QuestionRubric(TimestampMixin, Base):
-    """题目专属 Rubric——版本化管理，关联作业题或考试编程题"""
+    """题目专属 Rubric——版本化管理，关联作业题、考试编程题或练习题目。
+
+    目标三选一（``ck_rubric_xor_target``）：作业题 / 考试编程题 / 练习题目。
+    约束名不变，语义仍是「目标唯一」：禁止一行同时挂两个目标或一个都没有。
+    """
     __tablename__ = "question_rubrics"
     __table_args__ = (
         CheckConstraint(
-            "(judge_question_id IS NULL) != (exam_question_id IS NULL)",
+            "(judge_question_id IS NOT NULL) + (exam_question_id IS NOT NULL)"
+            " + (practice_problem_id IS NOT NULL) = 1",
             name="ck_rubric_xor_target",
         ),
         UniqueConstraint("judge_question_id", "version", name="uq_rubric_judge_version"),
         UniqueConstraint("exam_question_id", "version", name="uq_rubric_exam_version"),
+        UniqueConstraint("practice_problem_id", "version", name="uq_rubric_practice_version"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -1154,6 +1213,9 @@ class QuestionRubric(TimestampMixin, Base):
     )
     exam_question_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_questions.id"), nullable=True, index=True
+    )
+    practice_problem_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_problems.id"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
@@ -1194,7 +1256,8 @@ class ManualScoreAudit(TimestampMixin, Base):
 class JudgeGradingVersion(TimestampMixin, Base):
     """不可变评分版本（批次三 3B）。
 
-    - ``judge_question_id`` 与 ``exam_question_id`` 严格二选一；
+    - ``judge_question_id`` / ``exam_question_id`` / ``practice_problem_id`` 三选一
+      （``ck_grading_version_xor_target``，批次 5 扩展为练习目标，约束名不变）；
     - ``draft`` 可编辑（新版本另存）；``confirmed`` 之后 payload 不可修改；
       ``active`` 供新提交绑定；``retired`` 只禁止新绑定，不使历史绑定失效；
     - 保存入口函数、数据用例、比较规则、F/R 权重、来源摘要与绑定的 Rubric，
@@ -1204,11 +1267,13 @@ class JudgeGradingVersion(TimestampMixin, Base):
     __tablename__ = "judge_grading_versions"
     __table_args__ = (
         CheckConstraint(
-            "(judge_question_id IS NULL) != (exam_question_id IS NULL)",
+            "(judge_question_id IS NOT NULL) + (exam_question_id IS NOT NULL)"
+            " + (practice_problem_id IS NOT NULL) = 1",
             name="ck_grading_version_xor_target",
         ),
         UniqueConstraint("judge_question_id", "version", name="uq_grading_version_judge"),
         UniqueConstraint("exam_question_id", "version", name="uq_grading_version_exam"),
+        UniqueConstraint("practice_problem_id", "version", name="uq_grading_version_practice"),
         Index("ix_grading_versions_status", "status"),
     )
 
@@ -1218,6 +1283,9 @@ class JudgeGradingVersion(TimestampMixin, Base):
     )
     exam_question_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_questions.id"), nullable=True, index=True
+    )
+    practice_problem_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_problems.id"), nullable=True, index=True
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
     # draft / confirmed / active / retired
@@ -1244,11 +1312,16 @@ class JudgeGradingVersion(TimestampMixin, Base):
 
 
 class CodeGrade(TimestampMixin, Base):
-    """统一 AI 代码评分记录——XOR 外键关联 Submission 或 ExamAnswer"""
+    """统一 AI 代码评分记录——三选一外键关联 Submission / ExamAnswer / PracticeSubmission。
+
+    ``ck_code_grade_xor_target``（约束名不变）在批次 5 扩展为练习目标三选一，
+    保证一条评分记录只属于一个目标，角色隔离与目标唯一性都不放松。
+    """
     __tablename__ = "code_grades"
     __table_args__ = (
         CheckConstraint(
-            "(submission_id IS NULL) != (exam_answer_id IS NULL)",
+            "(submission_id IS NOT NULL) + (exam_answer_id IS NOT NULL)"
+            " + (practice_submission_id IS NOT NULL) = 1",
             name="ck_code_grade_xor_target",
         ),
         Index("ix_code_grades_review_status", "needs_teacher_review", "status"),
@@ -1260,6 +1333,9 @@ class CodeGrade(TimestampMixin, Base):
     )
     exam_answer_id: Mapped[int | None] = mapped_column(
         ForeignKey("exam_answers.id"), nullable=True, unique=True
+    )
+    practice_submission_id: Mapped[int | None] = mapped_column(
+        ForeignKey("practice_submissions.id"), nullable=True, unique=True
     )
     rubric_id: Mapped[int] = mapped_column(ForeignKey("question_rubrics.id"))
     mode: Mapped[str] = mapped_column(String(20))
@@ -1804,3 +1880,13 @@ from .credential_delivery import CredentialDelivery  # noqa: E402,F401
 from .course_material import CourseMaterial, ChapterActivityLink  # noqa: E402,F401
 
 from .gradebook import Gradebook, GradebookCategory, GradebookColumn, GradebookEntry, GradebookAdjustment, GradebookSnapshot  # noqa: E402,F401
+
+from .kernel_exec import KernelExecution  # noqa: E402,F401
+
+from .ai_setup import AiGradingSetupJob, RubricTrialRun  # noqa: E402,F401
+from .appeal import GradeAppeal  # noqa: E402,F401
+
+from .exam_event import ExamEvent  # noqa: E402,F401
+
+from .practice import (PracticeProblem, PracticeSettings, PracticeStudentStat,  # noqa: E402,F401
+                       PracticeSubmission, PracticeUsageLog)

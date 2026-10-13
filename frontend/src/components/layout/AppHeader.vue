@@ -70,6 +70,10 @@ const PAGE_TITLES = {
   StudentExperiments: '实验',
   StudentExperimentDetail: '实验详情',
   StudentNotebook: 'Notebook',
+  StudentPractice: '自主练习',
+  StudentPracticeMine: '我的练习',
+  StudentPracticeProblem: '练习作答',
+  StudentPracticeSubmission: '作答反馈',
   TeacherHome: '工作台',
   TeacherCourses: '课程管理',
   TeacherChapterManage: '课程管理',
@@ -91,6 +95,7 @@ const PAGE_TITLES = {
   TeacherNotifications: '通知中心',
   TeacherAIGrading: 'AI 评分复核',
   TeacherAIGradingDetail: 'AI 评分详情',
+  TeacherPracticeLeaderboard: '练习排行榜',
   TeacherLessonEdit: '课时编辑',
   TeacherStudio: '实验模板',
   AdminHome: '管理概览',
@@ -107,6 +112,12 @@ const PAGE_TITLES = {
   AdminExperimentSubmissionDetail: '提交详情',
   AdminAIGrading: 'AI 评分复核',
   AdminAIGradingDetail: 'AI 评分详情',
+  AdminPracticeProblems: '练习题库',
+  AdminPracticeProblemNew: '新建练习题',
+  AdminPracticeProblemEdit: '编辑练习题',
+  AdminPracticeSettings: '练习设置',
+  AdminPracticeUsage: '练习用量',
+  AdminPracticeAppeals: '练习复核',
 }
 
 const rootLabel = computed(() => {
@@ -298,7 +309,7 @@ onBeforeUnmount(() => {
       :class="{ 'workspace-control': isWorkspace }"
       aria-label="通知"
       title="通知"
-      @click="router.push(auth.role === 'student' ? '/student' : auth.role === 'admin' ? '/admin' : '/teacher/notifications')"
+      @click="router.push(auth.role === 'student' ? '/student/notifications' : auth.role === 'admin' ? '/admin' : '/teacher/notifications')"
     >
       <AppIcon name="notification" :size="17" />
       <span v-if="unreadCount > 0" class="notify-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>

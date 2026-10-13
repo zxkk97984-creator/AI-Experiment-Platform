@@ -124,6 +124,23 @@ describe('CodeCell', () => {
   })
 
   it.each([
+    ['warning', '单元格执行超过 120 秒，已中断本次执行；内存变量已保留'],
+    ['error', '内核无响应，已重建：内存中的变量、导入与模型状态已丢失，请从头重新运行全部单元格'],
+  ])('renders the %s execution notice verbatim', (level, message) => {
+    const wrapper = mountCell({ notice: { level, message } })
+
+    const notice = wrapper.get('.cell-notice')
+    expect(notice.classes()).toContain(level)
+    expect(notice.attributes('role')).toBe('status')
+    expect(notice.text()).toBe(message)
+  })
+
+  it('does not render a notice container when there is no notice', () => {
+    const wrapper = mountCell()
+    expect(wrapper.find('.cell-notice').exists()).toBe(false)
+  })
+
+  it.each([
     [{ disabled: true }, 'disabled'],
     [{ isExecuting: true }, 'executing'],
   ])('blocks execution while $1', async (state) => {

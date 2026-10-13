@@ -1,6 +1,7 @@
 """检查点 3 返工: Kernel/Judge/权限 真实 RED 测试（替换所有伪测试）"""
 from __future__ import annotations
 
+import io
 import json
 import math
 import subprocess
@@ -164,10 +165,26 @@ def test_redis_lock_token_safe_release():
     fake_redis = MagicMock()
     fake_redis.set.return_value = True
 
-    with patch('redis.from_url', return_value=fake_redis), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"stdout":"ok","stderr":"","error":null}')
+    class _RunnerProcess:
+        """subprocess.Popen 替身：stdin 收代码，communicate 返回 runner JSON。"""
 
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.stdout = '{"stdout":"ok","stderr":"","error":null}'
+            self.stderr = ''
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return self.stdout, self.stderr
+
+        def kill(self):
+            self.returncode = -9
+
+    with patch('redis.from_url', return_value=fake_redis), \
+         patch('subprocess.run',
+               return_value=MagicMock(returncode=0, stdout='container-id\n')), \
+         patch('app.services.kernel_manager.subprocess.Popen',
+               return_value=_RunnerProcess()):
         result = km.execute(1, "print(1)")
 
     assert 'outputs' in result

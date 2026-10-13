@@ -357,6 +357,8 @@ def _run_alembic_command(db_path: Path, *args: str) -> subprocess.CompletedProce
     env["DAI_ALLOW_ACCOUNT_MANAGEMENT_DOWNGRADE"] = "true"
     env["DAI_ALLOW_LAB_DOWNGRADE"] = "true"
     env["DAI_ALLOW_TEACHING_DOWNGRADE"] = "1"  # This helper always targets its disposable tmp_path SQLite file.
+    # 批次 3 的考试完整性迁移是生产保护型，disposable 往返同样需要开闸。
+    env["DAI_ALLOW_EXAM_INTEGRITY_DOWNGRADE"] = "1"
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND_DIR,

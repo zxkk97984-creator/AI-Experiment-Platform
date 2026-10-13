@@ -6,21 +6,22 @@ import math
 from pathlib import Path
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.courses import can_access_course_content, ensure_course_manager, require_course
 from app.config import Settings, get_settings
-from app.dependencies import get_current_user, get_db, require_roles, PaginationParams, pagination
+from app.dependencies import get_current_user, get_db, get_redis_client, require_roles, PaginationParams, pagination
 from app.errors import api_error
 from app.models import (
     CodeGrade, Course, CourseEnrollment, Exam, ExamAnswer, ExamAudienceClass,
     ExamAudienceStudent, ExamGrade, ExamQuestion, ExamSubmission,
     ManualScoreAudit, QuestionRubric, TeachingClassStudent, User,
 )
-from app.schemas import CourseStudentImportResult, CourseStudentImportRow, ExamAnswerBatchRequest, ExamAnswerScoreUpdate, ExamCreate, ExamGradeRead, ExamQuestionCreate, ExamQuestionRead, ExamQuestionTeacherRead, ExamQuestionUpdate, ExamRead, ExamRetryRequest, ExamSampleRunRequest, ExamSessionRead, ExamSubmitRequest, ExamSubmissionRead, ExamTimeExtensionRequest, ExamUpdate, PaginatedResponse, SampleRunResponse
-from app.services.exam_service import build_student_exam_session, build_student_exam_summary, create_question, delete_question, exam_max_score, extend_exam_submission, force_submit_exam_submission, get_my_grade, get_question, list_questions, release_exam_review, require_exam_editable, retry_exam_submission as retry_exam_submission_service, save_answer, start_exam as svc_start_exam, student_exam_status, submit_exam as svc_submit_exam, update_question, validate_publish
+from app.schemas import CourseStudentImportResult, CourseStudentImportRow, ExamAnswerBatchRequest, ExamAnswerScoreUpdate, ExamCreate, ExamGradeRead, ExamQuestionCreate, ExamQuestionRead, ExamQuestionTeacherRead, ExamQuestionUpdate, ExamRead, ExamRetryRequest, ExamSampleRunRequest, ExamSessionRead, ExamSubmitPayload, ExamSubmitRequest, ExamSubmissionRead, ExamTakeoverRequest, ExamTimeExtensionRequest, PaginatedResponse, SampleRunResponse
+from app.schemas.gradebook import ExamUpdateWithGradebook
+from app.services.exam_service import build_proctor_overview, build_student_exam_session, build_student_exam_summary, create_question, delete_question, exam_max_score, extend_exam_submission, force_submit_exam_submission, get_my_grade, get_question, hash_client_identity, list_questions, record_exam_events, release_exam_review, require_exam_editable, retry_exam_submission as retry_exam_submission_service, save_answer, start_exam as svc_start_exam, student_exam_status, submit_exam as svc_submit_exam, takeover_exam_session, update_question, validate_publish
 from app.services.time_utils import as_utc, utc_now
 from app.services.audience_service import (
     effective_student_ids, exam_visible_condition, import_audience_students,
@@ -36,6 +37,70 @@ def ensure_exam_manager(exam, user, db=None):
     task_content_manager(db or object_session(exam), exam, user)
 
 router = APIRouter(prefix="/exams", tags=["exams"])
+
+
+def _client_fingerprint(request: Request, settings: Settings) -> tuple[str | None, str | None]:
+    """监考事件的客户端标识一律以 HMAC 摘要落库，绝不保存 IP/UA 明文。"""
+    from app.api.auth import _client_ip
+    ip = _client_ip(request, settings)
+    user_agent = request.headers.get("User-Agent")
+    return hash_client_identity(settings, ip), hash_client_identity(settings, user_agent)
+
+
+def _require_write_generation(payload: dict) -> int:
+    """写入代次是必填参数：缺失即拒绝，绝不放行"漏带字段"的旧设备。"""
+    value = payload.get("expected_write_generation")
+    if value is None:
+        raise api_error(
+            422, "WRITE_GENERATION_REQUIRED",
+            "缺少 expected_write_generation，请刷新页面后重试",
+            fields={"expected_write_generation": ["该字段必填"]},
+        )
+    try:
+        generation = int(value)
+    except (TypeError, ValueError):
+        raise api_error(422, "WRITE_GENERATION_REQUIRED", "expected_write_generation 必须是整数")
+    if generation < 1:
+        raise api_error(422, "WRITE_GENERATION_REQUIRED", "expected_write_generation 必须大于 0")
+    return generation
+
+
+def verify_student_reauth(request: Request, actor: User, password: str, redis,
+                          settings: Settings, db: Session) -> None:
+    """换机接管的二次验密：复用管理员复核的 `reauth:{username}` 限流与计次/清零语义。
+
+    先例 backend/app/api/account_management.py 的 verify_admin；二者共用同一限流键，
+    因此换机尝试与管理员复核共享失败计次，不会成为绕过限流的旁路。
+    """
+    from app.api.auth import _client_ip
+    from app.dependencies import get_current_payload
+    from app.services import account_service as accounts
+    from app.services.auth_service import (check_login_rate_limits, record_login_failure,
+                                           reset_login_failures)
+    from app.services.teaching_query_policy import lock_current_actor
+
+    actor = lock_current_actor(db, actor)
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise api_error(401, "INVALID_TOKEN", "缺少有效访问令牌")
+
+    def current_token():
+        payload = get_current_payload(token, settings, redis)
+        if payload["sub"] != str(actor.id) or payload.get("sv") != actor.session_version:
+            raise api_error(401, "SESSION_REVOKED", "会话已失效，请重新登录")
+
+    current_token()
+    key = "reauth:" + actor.username
+    ip = _client_ip(request, settings)
+    check_login_rate_limits(redis, settings, key, ip)
+    try:
+        accounts.verify_current(actor, password)
+    except Exception:
+        record_login_failure(redis, settings, key, ip)
+        raise
+    # 密码校验期间会话可能被登出/过期：校验成功后再次确认令牌有效，绝不把凭据交给失效会话。
+    current_token()
+    reset_login_failures(redis, key)
 
 
 def _nulls_last_order(column, *, descending: bool = False):
@@ -328,7 +393,7 @@ def get_exam(exam_id: int, db: Session = Depends(get_db), current_user: User = D
 @router.patch("/{exam_id}", response_model=ExamRead)
 def update_exam(
     exam_id: int,
-    payload: ExamUpdate,
+    payload: ExamUpdateWithGradebook,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
@@ -337,6 +402,7 @@ def update_exam(
     ensure_exam_manager(exam, current_user)
     previous_status = exam.status
     changes = payload.model_dump(exclude_unset=True)
+    changes.pop("gradebook_binding", None)
     audience_updates = {key: changes.pop(key) for key in (
         "audience_mode", "audience_class_ids", "whitelist_student_ids", "excluded_student_ids",
     ) if key in changes}
@@ -355,6 +421,19 @@ def update_exam(
                 raise api_error(409, "EXAM_ALREADY_STARTED", "已有学生开始考试，最晚进入时间只能延后")
     if changes.get("show_answers_after_review"):
         changes["show_questions_after_review"] = True
+    if previous_status == "published":
+        # 发布后锁定时间模式 / 乱序 / 时长：已下发的会话不能被中途改写；
+        # 需要延时走带审计与事件留痕的 submissions/{id}/extend 入口。
+        locked = [
+            key for key in ("timing_mode", "shuffle_questions", "shuffle_options", "duration_minutes")
+            if key in changes and changes[key] != getattr(exam, key)
+        ]
+        if locked:
+            raise api_error(
+                422, "EXAM_SETTING_LOCKED",
+                "考试已发布，时间模式、乱序开关与考试时长不能修改；如需延长作答时间请使用延时入口",
+                fields={key: ["发布后锁定"] for key in locked},
+            )
     for key, value in changes.items():
         setattr(exam, key, value)
     if audience_updates:
@@ -412,6 +491,17 @@ def update_exam(
                     missing.append(str(position))
             if missing:
                 raise api_error(422, "AI_RUBRIC_REQUIRED", "以下编程题尚未锁定 Rubric：第 " + "、".join(missing) + " 题")
+        # 首次发布时按 exam_kind 自动归入成绩册分类；重复发布不会产生第二个分项。
+        if previous_status != "published" and exam.offering_id:
+            from app.services import gradebook_service as grades
+
+            binding = payload.gradebook_binding
+            if (binding is None or binding.enabled) and grades.bound_column(db, exam.offering_id, "exam", exam.id) is None:
+                category_key = binding.category_key if binding and binding.category_key else grades.EXAM_CATEGORY_BY_KIND.get(exam.exam_kind)
+                if not category_key:
+                    raise api_error(422, "GRADEBOOK_CATEGORY_REQUIRED", "「其他」类型考试必须选择计入总评的分类，或取消计入课程总评")
+                grades.bind_task_column(db, exam.offering_id, current_user.id, source_kind="exam", source_id=exam.id,
+                                        title=exam.title, category_key=category_key)
     db.commit()
     db.refresh(exam)
     return exam
@@ -547,6 +637,7 @@ def run_exam_public_cases(
 def start_exam(
     exam_id: int,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
 ):
     exam = require_exam(exam_id, db)
@@ -572,14 +663,44 @@ def start_exam(
         if exam.end_at is not None and as_utc(exam.end_at) <= now:
             raise api_error(403, "EXAM_EXPIRED", "考试已结束")
 
-    svc_start_exam(exam, current_user, db)
+    svc_start_exam(exam, current_user, db, settings=settings)
     return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+
+
+@router.post("/{exam_id}/takeover", status_code=status.HTTP_200_OK)
+def takeover_exam(
+    exam_id: int,
+    payload: ExamTakeoverRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    redis=Depends(get_redis_client),
+    current_user: User = Depends(require_roles("student")),
+):
+    """学生二次验密后换机接管：旧设备立即失去答题写入权限，剩余时间不重置。"""
+    exam = require_exam(exam_id, db)
+    if exam.status != "published" or not can_access_course_content(exam.course, current_user, db):
+        raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
+    if not _student_exam_allowed(exam, current_user, db):
+        raise api_error(403, "FORBIDDEN", "没有权限参加该考试")
+    if not student_in_exam_audience(db, exam, current_user.id):
+        raise api_error(403, "NOT_IN_EXAM_AUDIENCE", "你不在本次考试范围内")
+    verify_student_reauth(request, current_user, payload.current_password, redis, settings, db)
+    ip_hash, ua_hash = _client_fingerprint(request, settings)
+    return takeover_exam_session(
+        db, exam, current_user,
+        expected_write_generation=payload.expected_write_generation,
+        device_id=payload.device_id, ip_hash=ip_hash, ua_hash=ua_hash,
+    )
 
 
 @router.post("/{exam_id}/submit", response_model=ExamSessionRead, status_code=status.HTTP_201_CREATED)
 def submit_exam(
     exam_id: int,
+    payload: ExamSubmitPayload,
+    request: Request,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
 ):
     # A received submission remains an idempotent read even after the offering
@@ -615,7 +736,13 @@ def submit_exam(
     # 幂等：重复提交返回当前状态，不报错（review_required 不自动重试）
     if sub.status in ("submitted", "grading", "graded", "review_required"):
         return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
-    svc_submit_exam(exam, current_user, db)
+    if sub.write_generation != payload.expected_write_generation:
+        from app.services.exam_service import reject_superseded_write
+        reject_superseded_write(db, sub, source="submit")
+    ip_hash, ua_hash = _client_fingerprint(request, settings)
+    svc_submit_exam(exam, current_user, db,
+                    expected_write_generation=payload.expected_write_generation,
+                    ip_hash=ip_hash, ua_hash=ua_hash)
     return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
 
 
@@ -653,6 +780,7 @@ def extend_submission_time(
     submission_id: int,
     payload: ExamTimeExtensionRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("teacher", "admin")),
 ):
     exam = require_exam(exam_id, db)
@@ -660,7 +788,24 @@ def extend_submission_time(
     submission = db.get(ExamSubmission, submission_id)
     if not submission or submission.exam_id != exam_id:
         raise api_error(404, "SUBMISSION_NOT_FOUND", "考试提交不存在")
-    return extend_exam_submission(submission, payload.minutes, current_user, db)
+    return extend_exam_submission(submission, payload.minutes, current_user, db, settings=settings)
+
+
+@router.get("/{exam_id}/proctor")
+def exam_proctor(
+    exam_id: int,
+    limit: int = Query(default=200, ge=1, le=500),
+    student_id: int | None = Query(default=None, gt=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles("teacher", "admin")),
+):
+    """只读监考视图：切屏次数、累计离开时长、换机次数、最后保存时间与事件时间线。
+
+    只记录、只展示：不自动交卷、不自动扣分、不产生任何写操作。
+    """
+    exam = require_exam(exam_id, db)
+    ensure_exam_manager(exam, current_user)
+    return build_proctor_overview(exam, db, limit=limit, student_id=student_id)
 
 
 @router.post("/{exam_id}/submissions/{submission_id}/force-submit", response_model=ExamSubmissionRead)
@@ -1505,28 +1650,57 @@ def del_question(exam_id: int, question_id: int, db: Session = Depends(get_db), 
 # ── 学生答题 ──
 
 @router.put("/{exam_id}/answers/{question_id}", status_code=status.HTTP_201_CREATED)
-def put_answer(exam_id: int, question_id: int, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(require_roles("student"))):
+def put_answer(exam_id: int, question_id: int, payload: dict, request: Request,
+               db: Session = Depends(get_db),
+               settings: Settings = Depends(get_settings),
+               current_user: User = Depends(require_roles("student"))):
     exam = require_exam(exam_id, db)
     if exam.status != "published" or not can_access_course_content(exam.course, current_user, db):
         raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
-    return save_answer(db, exam_id, question_id, current_user, payload)
+    ip_hash, ua_hash = _client_fingerprint(request, settings)
+    return save_answer(db, exam_id, question_id, current_user, payload,
+                       expected_write_generation=_require_write_generation(payload),
+                       ip_hash=ip_hash, ua_hash=ua_hash)
 
 
 @router.put("/{exam_id}/answers", status_code=status.HTTP_200_OK)
 def put_answers_batch(
     exam_id: int,
     payload: ExamAnswerBatchRequest,
+    request: Request,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
 ):
+    from app.services.exam_service import reject_superseded_write
     from app.services.time_utils import utc_now
     exam = require_exam(exam_id, db)
     if exam.status != "published" or not can_access_course_content(exam.course, current_user, db):
         raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
+    ip_hash, ua_hash = _client_fingerprint(request, settings)
+    sub = db.scalar(select(ExamSubmission).where(
+        ExamSubmission.exam_id == exam_id,
+        ExamSubmission.student_id == current_user.id,
+    ))
+    if sub is not None and sub.status == "started" \
+            and sub.write_generation != payload.expected_write_generation:
+        # 循环前整体判定：旧设备一个字节都不落库（逐题保存各自提交，不能事后回滚）。
+        reject_superseded_write(db, sub, source="save_answer_batch")
+    events_recorded = 0
+    if sub is not None and sub.status == "started" and payload.events:
+        events_recorded = record_exam_events(
+            db, sub, [item.model_dump() for item in payload.events], ip_hash=ip_hash, ua_hash=ua_hash,
+        )
+        db.commit()
+        db.refresh(sub)
     results = []
     for item in payload.answers:
         try:
-            answer = save_answer(db, exam_id, item.question_id, current_user, item.model_dump(exclude_none=True))
+            answer = save_answer(
+                db, exam_id, item.question_id, current_user, item.model_dump(exclude_none=True),
+                expected_write_generation=payload.expected_write_generation,
+                ip_hash=ip_hash, ua_hash=ua_hash,
+            )
             results.append({
                 "question_id": item.question_id,
                 "ok": True,
@@ -1541,7 +1715,12 @@ def put_answers_batch(
                 "code": exc.detail.get("code", "SAVE_FAILED") if isinstance(exc.detail, dict) else "SAVE_FAILED",
                 "message": exc.detail.get("message", str(exc.detail)) if isinstance(exc.detail, dict) else str(exc.detail),
             })
-    return {"results": results, "server_now": utc_now()}
+    return {
+        "results": results,
+        "server_now": utc_now(),
+        "events_recorded": events_recorded,
+        "write_generation": int(sub.write_generation) if sub is not None else None,
+    }
 
 @router.get("/{exam_id}/my-grade")
 def my_grade(exam_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_roles("student"))):

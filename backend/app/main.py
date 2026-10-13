@@ -42,10 +42,19 @@ def _scan_expired_exams_once(owner_id: str):
         return scan_expired_exams(db, utc_now())
 
 
-def _cleanup_kernel_once():
+def _cleanup_kernel_once(owner_id: str):
+    from app.config import get_settings
     from app.services.kernel_manager import get_kernel_manager
+    from app.services.scheduler_lease import try_acquire_lease
 
-    get_kernel_manager().cleanup_idle(max_idle_seconds=900)
+    with SessionLocal() as db:
+        # 多 API 实例下同一时刻只有一个实例执行内核清理（本协程此前是唯一无租约的后台任务）
+        if not try_acquire_lease(db, "kernel-cleanup", owner_id, ttl_seconds=240):
+            return None
+        # 有在途执行的内核不会被回收（cleanup_idle 内部查 kernel_executions）
+        get_kernel_manager().cleanup_idle(
+            max_idle_seconds=get_settings().kernel_idle_seconds, db=db
+        )
 
 
 def _normalize_detail(detail):
@@ -92,13 +101,46 @@ async def _expiry_scanner():
 
 
 async def _kernel_cleanup():
-    """定期清理空闲 Kernel session"""
+    """定期清理空闲 Kernel session（多副本 DB 租约互斥）"""
+    import os
+    import socket
+    import uuid
+
+    owner_id = f"api:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     while True:
         try:
-            await asyncio.sleep(300)  # 每 5 分钟清理一次
-            await _run_sync_in_thread(_cleanup_kernel_once)  # 15 分钟无活动则销毁
+            await asyncio.sleep(300)  # 每 5 分钟扫描一次；空闲阈值由 kernel_idle_seconds 决定
+            await _run_sync_in_thread(_cleanup_kernel_once, owner_id)
         except Exception:
             logger.exception("Kernel 清理异常")
+
+
+def _recalc_practice_stats_once(owner_id: str):
+    from app.services.practice_recalc_job import run_recalc
+
+    with SessionLocal() as db:
+        return run_recalc(db, owner_id=owner_id)
+
+
+async def _practice_stats_recalc():
+    """定期重算练习统计/榜单快照（多副本 DB 租约互斥，重算幂等可重入）
+
+    请求路径只读 practice_student_stats 快照，不在请求里聚合全表；间隔见
+    settings.practice_stats_recalc_seconds，租约先例见 _cleanup_kernel_once。
+    """
+    import os
+    import socket
+    import uuid
+
+    owner_id = f"api:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+    while True:
+        try:
+            interval = max(30.0, float(get_settings().practice_stats_recalc_seconds))
+            await asyncio.sleep(interval)
+            if get_settings().practice_stats_recalc_enabled:
+                await _run_sync_in_thread(_recalc_practice_stats_once, owner_id)
+        except Exception:
+            logger.exception("练习统计重算异常")
 
 
 @asynccontextmanager
@@ -111,6 +153,7 @@ async def lifespan(app):
     app.state.redis_client = build_api_redis(settings)
     expiry_task = asyncio.create_task(_expiry_scanner())
     cleanup_task = asyncio.create_task(_kernel_cleanup())
+    practice_recalc_task = asyncio.create_task(_practice_stats_recalc())
     # 指标聚合器：每进程唯一 flush 任务，每秒一次；关闭时限内 best-effort
     op_metrics.start_flush_task()
     try:
@@ -118,7 +161,9 @@ async def lifespan(app):
     finally:
         expiry_task.cancel()
         cleanup_task.cancel()
-        await asyncio.gather(expiry_task, cleanup_task, return_exceptions=True)
+        practice_recalc_task.cancel()
+        await asyncio.gather(expiry_task, cleanup_task, practice_recalc_task,
+                             return_exceptions=True)
         await op_metrics.stop_flush_task()
         close = getattr(app.state.redis_client, "close", None)
         if close is not None:

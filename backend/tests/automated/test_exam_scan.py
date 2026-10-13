@@ -192,5 +192,5 @@ class TestSubmitExamIdempotent:
             exam = db.get(Exam, ctx["exam_id"])
             student = db.get(User, sub.student_id)
 
-            returned = submit_exam(exam, student, db)
+            returned = submit_exam(exam, student, db, expected_write_generation=1)
             assert returned.status == "review_required", "review_required 应幂等返回，不自动重试"

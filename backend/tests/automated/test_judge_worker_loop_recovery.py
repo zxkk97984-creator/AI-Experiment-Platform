@@ -44,8 +44,10 @@ class Loop:
         self.pop_calls = []
         self.session_calls = 0
         self.recovery_results = list(recovery_results or [])
+        # 批次 2：AI worker 还会消费一键 AI 配置队列，假 settings 必须提供该字段
         self.settings = SimpleNamespace(worker_role=role, ai_enabled=enabled,
                                         judge_queue_name="judge:queue", ai_queue_name="judge:ai:queue",
+                                        ai_setup_queue_name="judge:ai-setup:queue",
                                         redis_url="redis://unused.invalid/0")
         kind = "ai_grade" if role == "ai" else message_kind
         queue = (self.settings.ai_queue_name if role == "ai" else worker.EXAM_JUDGE_QUEUE
@@ -182,7 +184,9 @@ def test_enabled_ai_worker_keeps_its_queue_and_never_runs_shared_recovery(monkey
     loop.run()
     assert loop.recoveries == []
     assert loop.processed == [1, 2, 3, 4, 5]
-    assert all(queues == ("judge:ai:queue",) for queues, _timeout in loop.pop_calls)
+    # blpop 每消费一条就轮转队列顺序，故按集合比较消费面
+    assert all(set(queues) == {"judge:ai:queue", "judge:ai-setup:queue"}
+               for queues, _timeout in loop.pop_calls)
 
 
 def test_disabled_ai_worker_opens_no_redis_connection(monkeypatch):

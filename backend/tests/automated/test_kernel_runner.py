@@ -1,8 +1,10 @@
 """Kernel 第二轮返工 RED 测试 — 只测 Kernel"""
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import time
 from unittest.mock import ANY, MagicMock, call, patch
 
 import pytest
@@ -14,158 +16,234 @@ from app.services.kernel_manager import (
 )
 
 
+class RecordingStdin(io.StringIO):
+    """记录写入内容的 stdin 替身：生产代码会主动 close()，之后仍要能读数。"""
+
+    def __init__(self):
+        super().__init__()
+        self._snapshot = ""
+
+    def write(self, data):
+        self._snapshot += data
+        return super().write(data)
+
+    def getvalue(self):
+        try:
+            return super().getvalue()
+        except ValueError:
+            return self._snapshot
+
+
+class FakeProcess:
+    """subprocess.Popen 的最小替身：stdin 收代码，communicate 返回预设输出。"""
+
+    def __init__(self, stdout="", stderr="", returncode=0, partial_stdout=None):
+        self.stdin = RecordingStdin()
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.partial_stdout = partial_stdout
+        self.killed = False
+        self.interrupted = False
+        self.communicate_calls = 0
+        # 生产代码通过 communicate(input=payload) 写 stdin（不能先 close 再 communicate）
+        self.stdin_payload = None
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls += 1
+        if input is not None and self.stdin_payload is None:
+            self.stdin_payload = input
+        return self.stdout, self.stderr
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class HangingProcess(FakeProcess):
+    """超时替身：中断前 communicate 一直抛 TimeoutExpired，中断后返回部分输出。"""
+
+    def communicate(self, input=None, timeout=None):
+        self.communicate_calls += 1
+        if input is not None and self.stdin_payload is None:
+            self.stdin_payload = input
+        if not self.interrupted:
+            # 模拟真实等待：不空转，让 deadline 尽快到达
+            time.sleep(min(timeout or 0, 0.02))
+            raise subprocess.TimeoutExpired("docker", timeout)
+        if self.partial_stdout is not None:
+            return self.partial_stdout, self.stderr
+        return self.stdout, self.stderr
+
+
+def _live_session(record_id=1, **kwargs):
+    km = KernelManager()
+    session = KernelSession(record_id, f"dai-kernel-rec-{record_id}", {"ip": "127.0.0.1"}, **kwargs)
+    km._sessions[record_id] = session
+    return km, session
+
+
+def _docker_run(*, exec_stdout="", exec_stderr="", exec_returncode=0, probe_returncode=0,
+                on_exec=None, on_kill=None):
+    """subprocess.run 替身：docker ps 视为存活，其余 docker 调用可定制。"""
+    def _run(args, **kwargs):
+        if isinstance(args, (list, tuple)) and len(args) > 2 and args[1] == "ps":
+            return MagicMock(returncode=0, stdout="container-id\n")
+        if isinstance(args, (list, tuple)) and len(args) > 2 and args[1] == "exec":
+            if "kill" in args:
+                if on_kill is not None:
+                    on_kill()
+                return MagicMock(returncode=0, stdout="")
+            if on_exec is not None:
+                return on_exec(args, kwargs)
+            return MagicMock(returncode=probe_returncode, stdout=exec_stdout, stderr=exec_stderr)
+        return MagicMock(returncode=0, stdout="")
+    return _run
+
+
 # ═══════════════════════════════════════════════════════════════
 # 1. Runner 连接持久 ipykernel，代码走 stdin
 # ═══════════════════════════════════════════════════════════════
 
 def test_runner_argv_has_trusted_script_and_no_student_code():
-    """docker exec argv 含 /.dai/kernel_runner.py 和 /tmp/conn.json，不含学生代码"""
-    km = KernelManager()
-    session = KernelSession(1, "dai-kernel-rec-1", {"ip": "127.0.0.1"})
-    session._is_alive = True
-    km._sessions[1] = session
+    """docker exec argv 含 /.dai/kernel_runner.py，不含学生代码；代码走 stdin"""
+    km, _session = _live_session(1)
 
     tricky_code = 'print("hello\\nworld")\nx = """quotes"""\n# backslash: \\'
 
     with patch('redis.from_url'), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"outputs":[]}')
-
+         patch('subprocess.run', side_effect=_docker_run()), \
+         patch('app.services.kernel_manager.subprocess.Popen') as mock_popen:
+        proc = FakeProcess(stdout='{"outputs":[]}')
+        mock_popen.return_value = proc
         km.execute(1, tricky_code)
 
-    exec_calls = [c for c in mock_run.call_args_list
-                  if len(c[0][0]) > 2 and 'exec' in c[0][0]]
-    assert len(exec_calls) >= 1, "must have docker exec call"
-    argv = exec_calls[0][0][0]
+    argv = mock_popen.call_args[0][0]
     argv_str = ' '.join(str(a) for a in argv)
 
     # trusted runner path (in argv)
     assert '/.dai/kernel_runner.py' in argv or 'kernel_runner.py' in argv_str
-    # conn file NOT in argv（runner 内部读取容器内的文件）
     # no student code in argv
     assert 'hello' not in argv_str
     assert '"""quotes"""' not in argv_str
-    # stdin 传递的 input JSON 包含代码
-    input_arg = exec_calls[0][1].get('input')
-    assert input_arg is not None, "代码应通过 stdin input= 传递"
-    decoded = json.loads(input_arg)
+    # stdin 传递的 JSON 包含代码（且代码不出现在 argv）
+    decoded = json.loads(proc.stdin_payload)
     assert decoded['code'] == tricky_code
 
 
 def test_environment_session_uses_canonical_runner_path():
     """绑定环境版本的 Kernel 必须调用环境镜像内的 canonical runner。"""
-    km = KernelManager()
-    session = KernelSession(
-        1,
-        "dai-kernel-rec-1",
-        {"ip": "127.0.0.1"},
-        image_ref="sha256:" + "a" * 64,
-        environment_version_id=2,
-    )
-    session._is_alive = True
-    km._sessions[1] = session
+    km, _session = _live_session(
+        1, image_ref="sha256:" + "a" * 64, environment_version_id=2)
 
     with patch('redis.from_url'), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"outputs":[]}')
+         patch('subprocess.run', side_effect=_docker_run()), \
+         patch('app.services.kernel_manager.subprocess.Popen') as mock_popen:
+        mock_popen.return_value = FakeProcess(stdout='{"outputs":[]}')
         km.execute(1, "print(1)")
 
-    exec_calls = [
-        c for c in mock_run.call_args_list
-        if len(c[0][0]) > 4 and c[0][0][0:2] == ["docker", "exec"]
-        and c[0][0][-2] == "python"
-    ]
-    assert len(exec_calls) == 1
-    assert exec_calls[0][0][0][-1] == "/opt/dai/kernel_runner.py"
+    argv = mock_popen.call_args[0][0]
+    assert argv[0:2] == ["docker", "exec"] and argv[-2] == "python"
+    assert argv[-1] == "/opt/dai/kernel_runner.py"
 
 
 def test_two_executions_use_same_session():
     """连续两次 execute 针对同一 container/session"""
-    km = KernelManager()
-    session = KernelSession(1, "dai-kernel-rec-1", {"ip": "127.0.0.1"})
-    session._is_alive = True
-    km._sessions[1] = session
+    km, _session = _live_session(1)
 
     with patch('redis.from_url'), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"outputs":[]}')
+         patch('subprocess.run', side_effect=_docker_run()), \
+         patch('app.services.kernel_manager.subprocess.Popen') as mock_popen:
+        mock_popen.side_effect = [
+            FakeProcess(stdout='{"outputs":[]}'),
+            FakeProcess(stdout='{"outputs":[]}'),
+        ]
         km.execute(1, "x = 1")
         km.execute(1, "print(x)")
 
-    exec_calls = [c for c in mock_run.call_args_list
-                  if len(c[0][0]) > 2 and 'exec' in c[0][0]]
-    assert len(exec_calls) == 2
+    assert mock_popen.call_count == 2
     # 两次 exec 同一个容器
-    containers = {c[0][0][3] for c in exec_calls}  # docker exec -i <name> ...
-    assert len(containers) == 1
+    containers = {c[0][0][3] for c in mock_popen.call_args_list}
+    assert containers == {"dai-kernel-rec-1"}
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2. 超时销毁 + 立即重建
+# 2. 超时语义：先中断保留变量，只有内核无响应才重建
 # ═══════════════════════════════════════════════════════════════
 
-def test_timeout_destroys_and_recreates():
-    """docker exec 超时 → rm old → create new → session 在内存和 Redis 中"""
-    km = KernelManager()
-    old_session = KernelSession(1, "dai-kernel-rec-1", {"ip": "127.0.0.1"})
-    old_session._is_alive = True
-    km._sessions[1] = old_session
+def test_timeout_with_responsive_kernel_preserves_variables_and_container():
+    """超时 → 只中断当前执行：不 rm 容器、session 不变、state_lost=False。"""
+    km, old_session = _live_session(1)
 
     fake_redis = MagicMock()
     fake_redis.set.return_value = True
+    fake_redis.eval.return_value = 1
+    proc = HangingProcess(partial_stdout='{"outputs":[{"msg_type":"stream","content":{"text":"1/3"}}]}')
 
     with patch('redis.from_url', return_value=fake_redis), \
-         patch.object(km, '_generate_conn_file') as mock_gen, \
-         patch('subprocess.run') as mock_run, \
+         patch('subprocess.run', side_effect=_docker_run(on_kill=lambda: setattr(proc, "interrupted", True))), \
+         patch('app.services.kernel_manager.subprocess.Popen', return_value=proc):
+        result = km.execute(1, "while True: pass", timeout_seconds=1)
+
+    assert result["outcome"] == "timeout"
+    assert result["state_lost"] is False
+    assert "已保留" in result["message"]
+    # 部分输出保留，且变量未被丢弃（没有销毁重建）
+    assert result["outputs"][0]["content"]["text"] == "1/3"
+    assert km._sessions[1] is old_session
+    assert proc.interrupted is True, "超时必须中断当前执行"
+
+
+def test_timeout_with_unresponsive_kernel_rebuilds_and_reports_state_lost():
+    """内核无响应 → 销毁重建 + state_lost=True + 明确「请从头重跑」文案。"""
+    km, old_session = _live_session(1)
+
+    fake_redis = MagicMock()
+    fake_redis.set.return_value = True
+    fake_redis.eval.return_value = 1
+    proc = HangingProcess(partial_stdout='{"outputs":[]}')
+    removed = []
+
+    def fake_run(args, **kwargs):
+        if isinstance(args, (list, tuple)) and args[1] == "rm":
+            removed.append(args)
+        if isinstance(args, (list, tuple)) and args[1] == "exec" and "kill" in args:
+            proc.interrupted = True
+        if isinstance(args, (list, tuple)) and args[1] == "exec":
+            return MagicMock(returncode=1, stdout="", stderr="no reply")  # 探测无响应
+        return MagicMock(returncode=0, stdout="container-id\n")
+
+    with patch('redis.from_url', return_value=fake_redis), \
+         patch('subprocess.run', side_effect=fake_run), \
+         patch('app.services.kernel_manager.subprocess.Popen', return_value=proc), \
+         patch.object(km, '_generate_conn_file', return_value=('/tmp/c.json', {
+             'shell_port': 1, 'iopub_port': 2, 'stdin_port': 3,
+             'control_port': 4, 'hb_port': 5, 'ip': '0.0.0.0'})), \
          patch('os.makedirs'), \
          patch('time.sleep'):
 
-        mock_gen.return_value = ('/tmp/c.json', {
-            'shell_port': 1, 'iopub_port': 2, 'stdin_port': 3,
-            'control_port': 4, 'hb_port': 5, 'ip': '0.0.0.0',
-        })
+        result = km.execute(1, "while True: pass", timeout_seconds=1)
 
-        # 第一次 subprocess.run: docker exec → TimeoutExpired
-        def run_side_effect(args, **kwargs):
-            if 'exec' in args:
-                raise subprocess.TimeoutExpired(args, 30)
-            return MagicMock(returncode=0, stdout='ok')
-
-        mock_run.side_effect = run_side_effect
-
-        with pytest.raises(RuntimeError, match='超时|timeout|TIMEOUT'):
-            km.execute(1, "while True: pass")
-
-    # 断言 destroy（rm -f）
-    rm_calls = [c for c in mock_run.call_args_list
-                if len(c[0][0]) >= 3 and 'rm' in c[0][0]]
-    assert len(rm_calls) >= 1, "超时后必须 rm 旧容器"
-
-    # 断言 timeout=30（subprocess.run 的 kwarg）
-    exec_calls = [c for c in mock_run.call_args_list if 'exec' in str(c[0][0])]
-    assert len(exec_calls) >= 1
-    # subprocess.run(args, timeout=N) — timeout is a kwarg
-    assert exec_calls[0][1].get('timeout') == 30, f"timeout={exec_calls[0][1].get('timeout')}"
-    assert 1 in km._sessions
-    assert km._sessions[1] is not old_session
-    assert fake_redis.setex.called
+    assert result["outcome"] == "failed"
+    assert result["state_lost"] is True
+    assert "状态已丢失" in result["message"]
+    assert "从头" in result["message"]
+    assert removed, "内核无响应必须 rm 旧容器"
+    assert km._sessions[1] is not old_session, "重建后的 session 必须替换旧 session"
+    fake_redis.delete.assert_any_call("kernel:session:1")
 
 
 def test_runner_infrastructure_failure_is_not_reported_as_cell_success():
     """A broken trusted runner must fail the request, not become a fake output."""
-    km = KernelManager()
-    session = KernelSession(1, "dai-kernel-rec-1", {"ip": "127.0.0.1"})
-    km._sessions[1] = session
+    km, _session = _live_session(1)
     fake_redis = MagicMock()
     fake_redis.set.return_value = True
-
-    def run_side_effect(args, **kwargs):
-        if args[1] == "ps":
-            return MagicMock(returncode=0, stdout="container-id\n")
-        return MagicMock(returncode=1, stdout="", stderr="runner crashed")
+    fake_redis.eval.return_value = 1
 
     with patch("redis.from_url", return_value=fake_redis), \
-         patch("subprocess.run", side_effect=run_side_effect):
+         patch("subprocess.run", side_effect=_docker_run()), \
+         patch("app.services.kernel_manager.subprocess.Popen",
+               return_value=FakeProcess(returncode=1, stderr="runner crashed")):
         with pytest.raises(RuntimeError, match="runner crashed"):
             km.execute(1, "print(1)")
 
@@ -253,7 +331,7 @@ def test_hidden_init_executes_in_order_and_skips_second_time():
     })()
 
     exec_calls = []
-    def fake_execute(rid, code):
+    def fake_execute(rid, code, **kwargs):
         exec_calls.append((rid, code))
         return {"outputs": [], "execution_time_ms": 5}
 
@@ -309,7 +387,7 @@ def test_hidden_init_second_cell_failure_destroys_and_no_marker():
         ]
     })()
 
-    def fake_execute(rid, code):
+    def fake_execute(rid, code, **kwargs):
         if code == 'fail':
             raise RuntimeError("hidden init failed")
         return {"outputs": [], "execution_time_ms": 5}
@@ -336,7 +414,7 @@ def test_hidden_init_marker_persistence_failure_destroys_kernel():
     session = KernelSession(1, "test-c", {"ip": "127.0.0.1"})
     km._sessions[1] = session
     km.get_or_create_session = lambda rid, d="": session
-    km.execute = lambda rid, code: {"outputs": [], "execution_time_ms": 1}
+    km.execute = lambda rid, code, **kwargs: {"outputs": [], "execution_time_ms": 1}
     destroyed = []
     km.destroy = lambda rid: destroyed.append(rid)
 
@@ -464,18 +542,16 @@ def test_redis_lock_failure_skips_docker_exec_and_fails_closed():
 
 def test_redis_lock_release_uses_token_safe_lua():
     """锁释放用 Lua eval token-safe，不是简单 del"""
-    km = KernelManager()
-    session = KernelSession(1, 'test-container', {"ip": "127.0.0.1"})
-    session._is_alive = True
-    km._sessions[1] = session
+    km, _session = _live_session(1, image_ref=None)
 
     fake_redis = MagicMock()
     fake_redis.set.return_value = True
     fake_redis.eval.return_value = 1
 
     with patch('redis.from_url', return_value=fake_redis), \
-         patch('subprocess.run') as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout='{"outputs":[]}')
+         patch('subprocess.run', side_effect=_docker_run()), \
+         patch('app.services.kernel_manager.subprocess.Popen',
+               return_value=FakeProcess(stdout='{"outputs":[]}')):
         km.execute(1, "print(1)")
 
     assert fake_redis.eval.call_count >= 1, "must use Lua eval for token-safe unlock"

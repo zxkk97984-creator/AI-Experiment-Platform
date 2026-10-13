@@ -139,6 +139,9 @@ def _version_read(
         environment_version_id=version.environment_version_id,
         import_policy_mode=version.import_policy_mode,
         allowed_imports=list(version.allowed_imports or []),
+        # 发布时从草稿复制的运行配置（Q1：发布后锁定，调整需新版本）
+        cell_timeout_seconds=version.cell_timeout_seconds,
+        kernel_idle_seconds=version.kernel_idle_seconds,
     )
 
 
@@ -196,6 +199,8 @@ def template_read(
         draft_environment_version_id=template.draft_environment_version_id,
         draft_import_policy_mode=template.draft_import_policy_mode,
         draft_allowed_imports=list(template.draft_allowed_imports or []),
+        draft_cell_timeout_seconds=template.draft_cell_timeout_seconds,
+        draft_kernel_idle_seconds=template.draft_kernel_idle_seconds,
         lesson_id=lesson_id,
         module_id=module_id,
         current_version=current,
@@ -531,11 +536,13 @@ def atomic_replace_draft(
     metadata: dict | None = None,
     assets_dir: str | None | object = ...,
     environment: dict | None = None,
+    kernel_config: dict | None = None,
 ) -> NotebookTemplate:
     """草稿原子替换——cells 与草稿环境（Phase 4）在同一 revision 内更新，避免内容成功而环境失败。
 
     environment 为 draft_environment_version_id/draft_import_policy_mode/draft_allowed_imports 三件套；
-    为 None 表示不更新环境（兼容旧调用）。
+    kernel_config 为 draft_cell_timeout_seconds/draft_kernel_idle_seconds（运行配置）；
+    为 None 表示不更新（兼容旧调用）。
     """
     values = {
         "draft_cells": copy.deepcopy(cells),
@@ -548,6 +555,8 @@ def atomic_replace_draft(
         values["draft_assets_dir"] = assets_dir
     if environment is not None:
         values.update(environment)
+    if kernel_config is not None:
+        values.update(kernel_config)
     manifest = db.scalar(
         select(StudioAssetManifest).where(
             StudioAssetManifest.template_id == template.id
@@ -609,12 +618,19 @@ def save_draft(
                 )
             ),
         }
+    # 运行配置（单格超时 / 空闲回收）与 cells、环境同一 revision 保存；发布后锁定
+    kernel_config = {
+        "draft_cell_timeout_seconds": updates.get("cell_timeout_seconds"),
+        "draft_kernel_idle_seconds": updates.get("kernel_idle_seconds"),
+    }
+    kernel_config = {k: v for k, v in kernel_config.items() if v is not None} or None
     return atomic_replace_draft(
         db,
         template,
         payload.draft_revision,
         normalize_cells(payload.cells),
         environment=environment,
+        kernel_config=kernel_config,
     )
 
 
@@ -936,6 +952,9 @@ def publish_template(
             environment_version_id=template.draft_environment_version_id,
             import_policy_mode=template.draft_import_policy_mode,
             allowed_imports=list(template.draft_allowed_imports or []),
+            # 发布冻结：草稿运行配置复制为版本不可变快照，已有实验继续用原版本配置
+            cell_timeout_seconds=template.draft_cell_timeout_seconds,
+            kernel_idle_seconds=template.draft_kernel_idle_seconds,
         )
         db.add(version)
         db.flush()
@@ -1096,6 +1115,9 @@ def preview_run(template: NotebookTemplate, user: User, cell_id: str, manager,
         except Exception:
             raise api_error(503, "ENVIRONMENT_IMAGE_MISSING", "运行环境暂不可用，请稍后重试")
     session_id = preview_session_key(template.id, user.id)
+    # 教师预览与学生执行共用同一入口：单格超时来自草稿配置（发布后锁定）
+    from app.services.lab_workspace import execute_kernel_code
+
     try:
         from app.services.lab_workspace import ensure_preview_kernel
         ensure_preview_kernel(manager, template, session_id, db, image_ref=image_ref,
@@ -1114,7 +1136,8 @@ def preview_run(template: NotebookTemplate, user: User, cell_id: str, manager,
         )
         for cell in hidden:
             try:
-                manager.execute(session_id, cell["source"])
+                execute_kernel_code(manager, session_id, cell["source"],
+                                    timeout_seconds=template.draft_cell_timeout_seconds)
             except Exception:
                 manager.destroy(session_id)
                 raise api_error(
@@ -1134,6 +1157,12 @@ def preview_run(template: NotebookTemplate, user: User, cell_id: str, manager,
                 f"预览初始化状态保存失败，Kernel 已销毁：{exc}",
             )
     try:
-        return manager.execute(session_id, requested["source"])
+        result = execute_kernel_code(manager, session_id, requested["source"],
+                                     timeout_seconds=template.draft_cell_timeout_seconds)
     except Exception as exc:
         raise api_error(500, "KERNEL_ERROR", f"预览执行失败：{exc}")
+    if result.get("state_lost"):
+        # 内核无响应必须销毁重建：明确告知教师草稿内核状态已丢失
+        raise api_error(500, "KERNEL_STATE_LOST",
+                        result.get("message") or "预览内核状态已丢失，请重试")
+    return result

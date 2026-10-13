@@ -29,6 +29,9 @@ vi.mock('../../../api/experiments.js', () => ({
     getRecordDetail: vi.fn(),
     saveCells: vi.fn(),
     executeCell: vi.fn(),
+    getExecution: vi.fn(),
+    getActiveExecution: vi.fn(),
+    cancelExecution: vi.fn(),
     interrupt: vi.fn(),
     restart: vi.fn(),
   },
@@ -144,8 +147,33 @@ describe('NotebookPlayer', () => {
     expect(wrapper.text()).not.toContain('重启 Kernel')
     await wrapper.get('[title="更多操作"]').trigger('click')
     expect(wrapper.text()).toContain('全部运行')
-    expect(wrapper.text()).toContain('中断 Kernel')
+    expect(wrapper.text()).toContain('中断运行')
     expect(wrapper.text()).toContain('重启 Kernel')
+  })
+
+  it('shows the running cell status and cancels the active execution from the menu', async () => {
+    const wrapper = await mountPlayer()
+    const store = useExperimentStore()
+    experimentsAPI.cancelExecution.mockResolvedValue({ data: { id: 5, status: 'cancelled' } })
+    store.cells[0].isRunning = true
+    store.executingCellId = 'intro'
+    store.activeExecutionId = 5
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('.player-exec-alert.running').text()).toContain('正在运行单元格')
+    await wrapper.get('[title="更多操作"]').trigger('click')
+    await wrapper.findAll('.menu-item').find((item) => item.text().includes('中断运行')).trigger('click')
+    expect(experimentsAPI.cancelExecution).toHaveBeenCalledWith(101, 5)
+  })
+
+  it('surfaces state-lost as an explicit alert instead of a silent failure', async () => {
+    const wrapper = await mountPlayer()
+    const store = useExperimentStore()
+    store.kernelStateLost = true
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('.player-exec-alert.error').text()).toContain('内核状态已丢失')
+    expect(wrapper.get('.player-exec-alert.error').text()).toContain('从头重新运行')
   })
 
   it('blocks route leave when the store cannot safely save', async () => {

@@ -14,6 +14,8 @@ const props = defineProps({
   disabled: { type: Boolean, default: false },
   isExecuting: { type: Boolean, default: false },
   checkResult: { type: Object, default: null },
+  /** 异步执行终态提示（超时已中断 / 内核无响应状态已丢失 / 已中断） */
+  notice: { type: Object, default: null },
   /** 编辑只读：CodeMirror/textarea 不可编辑，不 emit update:source。运行仍可执行原源码 */
   readonly: { type: Boolean, default: false },
 })
@@ -247,6 +249,7 @@ watch(() => props.readonly, () => {
     </div>
 
     <!-- 输出区 -->
+    <p v-if="notice" class="cell-notice" :class="notice.level" role="status">{{ notice.message }}</p>
     <p v-if="checkResult" class="cell-check-result" :class="checkResult.state" role="status">{{ checkResult.message }}<small> · 练习反馈，正式成绩以完整提交重放为准</small></p>
     <div v-if="getOutputs().length > 0" class="output-area">
       <div v-for="(output, i) in getOutputs()" :key="i" class="output-item">
@@ -273,6 +276,10 @@ watch(() => props.readonly, () => {
 .cell-check-result.passed { color: var(--success); background: var(--success-bg); }
 .cell-check-result.failed { color: var(--danger); background: var(--danger-bg); }
 .cell-check-result small { font-size: 11px; }
+.cell-notice { padding: 10px 14px; margin: 0; font-size: 13px; line-height: 1.6; border-top: 1px solid var(--border); }
+.cell-notice.info { color: var(--muted); background: var(--surface-sunken); }
+.cell-notice.warning { color: var(--warning); background: var(--warning-bg); }
+.cell-notice.error { color: var(--danger); background: var(--danger-bg); }
 .code-cell {
   background: var(--surface);
   border: 1px solid var(--border);

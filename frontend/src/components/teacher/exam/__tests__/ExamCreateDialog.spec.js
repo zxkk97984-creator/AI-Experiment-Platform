@@ -32,6 +32,35 @@ describe('ExamCreateDialog', () => {
       duration_minutes: 90,
       start_at: null,
       end_at: null,
+      // 批次 3：考试类型与考试秩序字段随创建载荷一起提交（默认值）
+      exam_kind: 'quiz',
+      timing_mode: 'unified',
+      shuffle_questions: false,
+      shuffle_options: false,
+    })
+  })
+
+  it('选择考试类型、时间模式与乱序后提交对应载荷', async () => {
+    const wrapper = mountDialog({ open: true, courses })
+    await wrapper.get('[name="title"]').setValue('期中考试')
+    await wrapper.get('.course-picker').trigger('click')
+    await wrapper.get('.course-item').trigger('click')
+    await wrapper.get('[data-testid="exam-kind"]').setValue('midterm')
+    await wrapper.get('[data-testid="exam-timing"]').setValue('per_student')
+    await wrapper.get('[data-testid="shuffle-questions"]').setValue(true)
+    await wrapper.get('[data-testid="shuffle-options"]').setValue(true)
+    await wrapper.get('[data-action="save-exam"]').trigger('click')
+
+    expect(wrapper.emitted('save')[0][0]).toEqual({
+      title: '期中考试',
+      course_id: 2,
+      duration_minutes: 60,
+      start_at: null,
+      end_at: null,
+      exam_kind: 'midterm',
+      timing_mode: 'per_student',
+      shuffle_questions: true,
+      shuffle_options: true,
     })
   })
 

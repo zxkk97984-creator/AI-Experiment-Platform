@@ -65,7 +65,7 @@ def test_exam_submission_and_grade_visibility(client, db_session_factory):
     submit_response = client.post(
         f"/api/v1/exams/{exam_id}/submit",
         headers=auth_header(student_token),
-        json={"score": 88},
+        json={"expected_write_generation": 1, "score": 88},
     )
     assert submit_response.status_code in (200, 201)
 

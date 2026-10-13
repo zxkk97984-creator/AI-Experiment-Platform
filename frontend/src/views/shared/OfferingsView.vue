@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AppLayout from '../../components/layout/AppLayout.vue'
 import LabAssessmentPanel from '../../components/labs/LabAssessmentPanel.vue'
+import GradebookBindingField from '../../components/gradebook/GradebookBindingField.vue'
 import { useAuthStore } from '../../stores/auth.js'
 import { offeringsAPI } from '../../api/offerings.js'
 import client from '../../api/client.js'
@@ -25,6 +26,8 @@ const assessmentEditor = ref('')
 const selectedExperiment = computed(() => templates.value.experiments.find(e => `${e.kind}:${e.id}` === assessmentEditor.value))
 const saveSharedTemplate = async () => true
 const ownerId = ref(''), taskKey = ref(''), experimentKey = ref(''), opensAt = ref(''), deadline = ref(''), assessmentId = ref('')
+// 向本班发布实验默认计入课程总评（分类预选「实验」），教师可取消或改分类。
+const experimentBinding = ref({ enabled: true, category_key: 'labs' })
 const prefix = computed(() => `/${auth.role}`)
 const otherClasses = computed(() => rows.value.filter(r => selected.value && r.id !== selected.value.id && r.course_id === selected.value.course_id && r.academic_term_id === selected.value.academic_term_id && r.status === 'active'))
 
@@ -158,7 +161,7 @@ async function copyTask() {
   await run(async () => { const [kind, id] = taskKey.value.split(':'); const result = await offeringsAPI.copyTask(selected.value.id, { kind, source_id: Number(id) }); notice.value = '班级任务已生成草稿，可继续设置并发布'; router.push(`${prefix.value}/${kind === 'exam' ? 'exams' : 'assignments'}/${result.data.id}/edit`) })
 }
 async function release() {
-  await run(async () => { const [entry_kind, id] = experimentKey.value.split(':'); await offeringsAPI.release(selected.value.id, { entry_kind, entry_id: Number(id), assessment_id: assessmentId.value ? Number(assessmentId.value) : null, opens_at: opensAt.value ? new Date(opensAt.value).toISOString() : null, deadline: deadline.value ? new Date(deadline.value).toISOString() : null }); notice.value = '实验已按所选模板与评测版本向本班发布'; assessmentEditor.value = experimentKey.value })
+  await run(async () => { const [entry_kind, id] = experimentKey.value.split(':'); await offeringsAPI.release(selected.value.id, { entry_kind, entry_id: Number(id), assessment_id: assessmentId.value ? Number(assessmentId.value) : null, opens_at: opensAt.value ? new Date(opensAt.value).toISOString() : null, deadline: deadline.value ? new Date(deadline.value).toISOString() : null, gradebook_binding: experimentBinding.value }); notice.value = '实验已按所选模板与评测版本向本班发布'; assessmentEditor.value = experimentKey.value })
 }
 onMounted(() => { run(load); if (auth.isAdmin) loadTerms() })
 onBeforeUnmount(() => { termGuard.invalidate(); selectionGuard.invalidate() })
@@ -207,7 +210,7 @@ onBeforeUnmount(() => { termGuard.invalidate(); selectionGuard.invalidate() })
           <label>共享任务模板<select v-model="taskKey"><option value="">请选择</option><option v-for="t in templates.tasks" :key="`${t.kind}:${t.id}`" :value="`${t.kind}:${t.id}`">{{ t.kind === 'exam' ? '考试' : '作业' }} · {{ t.title }}</option></select></label><button :disabled="busy || !taskKey" @click="copyTask">复制为本班任务</button>
           <label>实验模板<select v-model="experimentKey" @change="assessmentId = ''"><option value="">请选择</option><option v-for="e in templates.experiments" :key="`${e.kind}:${e.id}`" :value="`${e.kind}:${e.id}`">{{ e.title }}</option></select></label>
           <label>评测版本<select v-model="assessmentId"><option value="">人工评分</option><option v-for="a in templates.experiments.find(e => `${e.kind}:${e.id}` === experimentKey)?.assessments || []" :key="a.id" :value="a.id">评测 v{{ a.version }}</option></select></label>
-          <label>开放时间<input v-model="opensAt" type="datetime-local"></label><label>截止时间<input v-model="deadline" type="datetime-local"></label><button :disabled="busy || !experimentKey" @click="release">发布本班实验</button>
+          <label>开放时间<input v-model="opensAt" type="datetime-local"></label><label>截止时间<input v-model="deadline" type="datetime-local"></label><GradebookBindingField v-model="experimentBinding" class="wide" :offering-id="selected.id" default-key="labs" :disabled="busy" /><button :disabled="busy || !experimentKey" @click="release">发布本班实验</button>
           <label class="wide">本班实验评分配置<select v-model="assessmentEditor"><option value="">请选择已向本班发布的实验</option><option v-for="e in templates.experiments" :key="`${e.kind}:${e.id}`" :value="`${e.kind}:${e.id}`">{{ e.title }}</option></select></label>
         </div>
         <LabAssessmentPanel v-if="selectedExperiment && !auth.isStudent" :key="`${selected.id}:${assessmentEditor}`" :offering-id="selected.id" :kind="selectedExperiment.kind" :entry-id="selectedExperiment.id" :cells="selectedExperiment.cells" :environment-id="selectedExperiment.environment_version_id" :save-template="saveSharedTemplate" :template-signature="String(selectedExperiment.template_version_id)" />

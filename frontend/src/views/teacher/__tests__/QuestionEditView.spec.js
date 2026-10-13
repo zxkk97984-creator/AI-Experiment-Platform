@@ -800,7 +800,8 @@ describe('题目编辑页 QuestionEditView（IDE 布局重构）', () => {
     await clickBtn(wrapper, '确认发布')
     await flushPromises()
     expect(assignmentsAPI.createQuestion).toHaveBeenCalled()
-    expect(assignmentsAPI.publish).toHaveBeenCalledWith('7')
+    // 批次 4：发布作业携带「计入课程总评 + 分类」选择（默认勾选，预选平时）
+    expect(assignmentsAPI.publish).toHaveBeenCalledWith('7', { gradebook_binding: { enabled: true, category_key: 'regular' } })
     expect(appStore.showToast).toHaveBeenCalledWith('作业已发布', 'success')
   })
 
@@ -829,7 +830,8 @@ describe('题目编辑页 QuestionEditView（IDE 布局重构）', () => {
     await clickBtn(wrapper, '确认发布')
     await flushPromises()
     expect(assignmentsAPI.createQuestion).toHaveBeenCalled()
-    expect(assignmentsAPI.publish).toHaveBeenCalledWith('7')
+    // 批次 4：发布作业携带「计入课程总评 + 分类」选择（默认勾选，预选平时）
+    expect(assignmentsAPI.publish).toHaveBeenCalledWith('7', { gradebook_binding: { enabled: true, category_key: 'regular' } })
     expect(appStore.showToast).toHaveBeenCalledWith(expect.stringContaining('题目已保存为草稿，但发布失败'), 'error')
     expect(appStore.showToast).toHaveBeenCalledWith(expect.stringContaining('存在未配置 AI 评分的 legacy 题目'), 'error')
   })

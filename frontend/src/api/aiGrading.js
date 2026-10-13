@@ -17,4 +17,13 @@ export const aiGradingAPI = {
   retryGrade(id) { return client.post(`/ai-grading/grades/${id}/retry`) },
   overrideGrade(id, data) { return client.post(`/ai-grading/grades/${id}/override`, data) },
   regradeQuestion(kind, questionId) { return client.post(`/ai-grading/questions/${kind}/${questionId}/regrade`) },
+
+  // ── 一键 AI 配置（批次 2）：异步生成草稿 → 可选试判 → 保存并启用 ──
+  createSetupJob(data) { return client.post('/ai-grading/setup-jobs', data) },
+  getSetupJob(id) { return client.get(`/ai-grading/setup-jobs/${id}`) },
+  retrySetupJob(id) { return client.post(`/ai-grading/setup-jobs/${id}/retry`) },
+  createTrialRun(id, data) { return client.post(`/ai-grading/setup-jobs/${id}/trial-runs`, data) },
+  getTrialRun(id) { return client.get(`/ai-grading/trial-runs/${id}`) },
+  // 单事务保存并启用（内部含用例静态转换），预留 120s 避免网关先于后端中断
+  enableSetupJob(id, data) { return client.post(`/ai-grading/setup-jobs/${id}/enable`, data, { timeout: 120000 }) },
 }

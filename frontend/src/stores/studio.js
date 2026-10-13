@@ -22,6 +22,10 @@ export const useStudioStore = defineStore('studio', () => {
   const environmentVersionId = ref(null)
   const importPolicyMode = ref('unrestricted')
   const allowedImports = ref([])
+  // ── 运行配置（Q1：发布前配置、发布后锁定） ────────────────
+  // 单格超时秒数 10–1800；内核空闲回收秒数 300–7200（UI 按分钟输入）
+  const cellTimeoutSeconds = ref(120)
+  const kernelIdleSeconds = ref(900)
 
   const dirty = ref(false)
   const saving = ref(false)
@@ -59,6 +63,8 @@ export const useStudioStore = defineStore('studio', () => {
     environmentVersionId.value = d.draft_environment_version_id ?? null
     importPolicyMode.value = d.draft_import_policy_mode || 'unrestricted'
     allowedImports.value = [...(d.draft_allowed_imports || [])]
+    cellTimeoutSeconds.value = d.draft_cell_timeout_seconds ?? 120
+    kernelIdleSeconds.value = d.draft_kernel_idle_seconds ?? 900
     dirty.value = false
     saved.value = true
     conflict.value = false
@@ -235,6 +241,9 @@ export const useStudioStore = defineStore('studio', () => {
         environment_version_id: environmentVersionId.value,
         import_policy_mode: importPolicyMode.value,
         allowed_imports: [...allowedImports.value],
+        // 后端 strict=True：必须是 number，字符串会 422
+        cell_timeout_seconds: Number(cellTimeoutSeconds.value),
+        kernel_idle_seconds: Number(kernelIdleSeconds.value),
       }
       const res = await studioAPI.saveDraft(templateId.value, payload)
       _updateFromRead(res.data)
@@ -384,6 +393,8 @@ export const useStudioStore = defineStore('studio', () => {
       importPolicyMode.value = data.draft_import_policy_mode || 'unrestricted'
       allowedImports.value = [...(data.draft_allowed_imports || [])]
     }
+    if (data.draft_cell_timeout_seconds != null) cellTimeoutSeconds.value = data.draft_cell_timeout_seconds
+    if (data.draft_kernel_idle_seconds != null) kernelIdleSeconds.value = data.draft_kernel_idle_seconds
   }
 
   // ── 环境设置（Phase 4）：修改后纳入 dirty，随草稿保存 ──────
@@ -391,6 +402,14 @@ export const useStudioStore = defineStore('studio', () => {
     environmentVersionId.value = envId ?? null
     if (mode !== null) importPolicyMode.value = mode
     if (allowed !== null) allowedImports.value = [...allowed]
+    dirty.value = true
+    saved.value = false
+  }
+
+  // ── 运行配置（Q1）：修改后纳入 dirty，随草稿保存并在发布时冻结 ──
+  function setKernelConfig({ cellTimeoutSeconds: timeout, kernelIdleSeconds: idle } = {}) {
+    if (timeout != null) cellTimeoutSeconds.value = Number(timeout)
+    if (idle != null) kernelIdleSeconds.value = Number(idle)
     dirty.value = true
     saved.value = false
   }
@@ -410,12 +429,13 @@ export const useStudioStore = defineStore('studio', () => {
     templateId, name, description, status, draftRevision, draftRevisionSaved,
     cells, sortedCells, currentVersionId, lessonId, moduleId, ownerId,
     environmentVersionId, importPolicyMode, allowedImports,
+    cellTimeoutSeconds, kernelIdleSeconds,
     dirty, saving, saved, conflict, conflictMessage, error, studentPreview,
     executingCellId, runningCellId,
     open, create, importNew, importExisting, updateMetadata, bind,
     addCell, duplicateCell, deleteCell, moveCell, moveCellTo,
     updateCellSource, setCellEditable, setCellHidden,
-    setEnvironment, setImportPolicy,
+    setEnvironment, setImportPolicy, setKernelConfig,
     saveDraft, publish, exportDraft, exportVersion,
     previewRun, previewInterrupt, previewReset,
     destroy,

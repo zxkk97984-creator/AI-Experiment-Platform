@@ -127,12 +127,22 @@ def test_cell_execution_releases_metadata_locks_and_rechecks_after_runtime(clien
                 writer.commit()
             if mutation == 'logout': redis.set('blacklist:test-logout', '1')
             return {'outputs': [{'output_type': 'stream', 'text': 'private result'}], 'execution_time_ms': 1}
-        manager = SimpleNamespace(execute=runtime)
+        def kernel_execute(_record_id, _code, **kwargs):
+            return {'outputs': [{'output_type': 'stream', 'text': 'private result'}],
+                    'execution_time_ms': 1, 'outcome': 'succeeded',
+                    'state_lost': False, 'message': None}
+        manager = SimpleNamespace(execute=kernel_execute)
         monkeypatch.setattr('app.api.experiments.get_kernel_manager', lambda: manager)
-        monkeypatch.setattr('app.services.lab_workspace.ensure_record_kernel', lambda *args, **kwargs: None)
+        # 异步执行后，请求内的「运行时」边界是内核（会话）准备；真正的代码执行由 worker 负责。
+        # 用同一 runtime 钩子保持本用例原意：先释放策略/账号/教学锁 → 运行 → 复核权限与 revision。
+        monkeypatch.setattr('app.services.lab_workspace.ensure_record_kernel',
+                            lambda _manager, _record, *args, **kwargs: runtime(_record, 'code'))
         if mutation is None:
-            result = execute_cell(ident, 'code', ExperimentCellExecuteRequest(code='print(1)'), db, actor)
-            assert result.execution_count == 1
+            accepted = execute_cell(ident, 'code', ExperimentCellExecuteRequest(code='print(1)'), db, actor)
+            assert accepted.status == 'queued'
+            from kernel_test_support import drain_execution, kernel_runtime
+            with kernel_runtime(manager):
+                drain_execution(db_session_factory, test_settings, accepted.execution_id)
         else:
             with pytest.raises(HTTPException) as denied:
                 execute_cell(ident, 'code', ExperimentCellExecuteRequest(code='print(1)'), db, actor)

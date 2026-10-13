@@ -17,8 +17,10 @@ def test_worker_roles_consume_disjoint_queues():
     ai = Settings(_env_file=None, worker_role="ai", ai_enabled=True)
 
     assert _worker_queue_names(judge) == (judge.judge_queue_name, EXAM_JUDGE_QUEUE)
-    assert _worker_queue_names(ai) == (ai.ai_queue_name,)
+    # 批次 2：AI worker 同时消费一键 AI 配置队列（草稿生成/试判），仍与判题队列完全隔离
+    assert _worker_queue_names(ai) == (ai.ai_queue_name, ai.ai_setup_queue_name)
     assert ai.ai_queue_name not in _worker_queue_names(judge)
+    assert ai.ai_setup_queue_name not in _worker_queue_names(judge)
 
 
 def test_disabled_ai_worker_has_no_consumption_queues():

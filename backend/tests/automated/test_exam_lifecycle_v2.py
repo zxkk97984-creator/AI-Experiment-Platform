@@ -12,7 +12,8 @@ from teaching_test_support import grant_course_students
 API = "/api/v1"
 
 
-def _seed(client, db_sf, *, question=None, duration=60, start_delta=-10, end_delta=30):
+def _seed(client, db_sf, *, question=None, duration=60, start_delta=-10, end_delta=30,
+          timing_mode="unified"):
     create_user(db_sf, "life_teacher", "teacher")
     create_user(db_sf, "life_student", "student")
     teacher, _ = login(client, "life_teacher")
@@ -29,6 +30,7 @@ def _seed(client, db_sf, *, question=None, duration=60, start_delta=-10, end_del
         "duration_minutes": duration,
         "start_at": (now + timedelta(minutes=start_delta)).isoformat(),
         "end_at": (now + timedelta(minutes=end_delta)).isoformat(),
+        "timing_mode": timing_mode,
     })
     exam_id = exam.json()["id"]
     grant_course_students(db_sf, course_id, ["life_student"])
@@ -69,7 +71,9 @@ def test_draft_hidden_and_future_exam_never_exposes_questions(client, db_session
 
 
 def test_late_entry_receives_full_duration_not_global_window_cap(client, db_session_factory):
-    ctx = _seed(client, db_session_factory, duration=60, start_delta=-5, end_delta=5)
+    """显式 per_student：进入后拿完整时长，此时 end_at 只是「最晚可开考时间」。"""
+    ctx = _seed(client, db_session_factory, duration=60, start_delta=-5, end_delta=5,
+                timing_mode="per_student")
     client.patch(f"{API}/exams/{ctx['exam_id']}", headers=auth_header(ctx["teacher"]), json={"status": "published"})
     before = utc_now()
     started = client.post(f"{API}/exams/{ctx['exam_id']}/start", headers=auth_header(ctx["student"]))
@@ -81,6 +85,23 @@ def test_late_entry_receives_full_duration_not_global_window_cap(client, db_sess
     assert nested_expires_raw.tzinfo is not None
     expires = as_utc(expires_raw)
     assert expires >= before + timedelta(minutes=59, seconds=50)
+
+
+def test_unified_late_entry_caps_expiry_at_exam_end(client, db_session_factory):
+    """决策 4 的 unified 对照：默认模式下晚入场者的到期时刻收敛到 exam.end_at（G-2 时长收敛）。"""
+    ctx = _seed(client, db_session_factory, duration=60, start_delta=-5, end_delta=1)
+    client.patch(f"{API}/exams/{ctx['exam_id']}", headers=auth_header(ctx["teacher"]),
+                 json={"status": "published"})
+    started = client.post(f"{API}/exams/{ctx['exam_id']}/start", headers=auth_header(ctx["student"]))
+    assert started.status_code == 201, started.text
+    payload = started.json()
+    expires = as_utc(datetime.fromisoformat(payload["expires_at"]))
+    started_at = as_utc(datetime.fromisoformat(payload["submission"]["started_at"]))
+    with db_session_factory() as db:
+        exam_end = as_utc(db.get(Exam, ctx["exam_id"]).end_at)
+    assert expires == exam_end
+    # 修复前对照：不与 end_at 取 min 时会越过考试结束时间
+    assert started_at + timedelta(minutes=60) > exam_end
 
 
 def test_future_started_submission_is_scheduled_not_in_progress(client, db_session_factory):
@@ -110,14 +131,14 @@ def test_autosave_versions_restore_and_detect_conflicts(client, db_session_facto
     client.patch(f"{API}/exams/{ctx['exam_id']}", headers=auth_header(ctx["teacher"]), json={"status": "published"})
     headers = auth_header(ctx["student"])
     client.post(f"{API}/exams/{ctx['exam_id']}/start", headers=headers)
-    first = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=headers, json={"answers": [{
+    first = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=headers, json={"expected_write_generation": 1, "answers": [{
         "question_id": ctx["question_id"], "selected_options": ["A"], "expected_version": 0,
     }]})
     assert first.json()["results"][0]["version"] == 1
     restored = client.get(f"{API}/exams/{ctx['exam_id']}/session", headers=headers).json()["saved_answers"][0]
     assert restored["selected_options"] == ["A"]
     assert restored["version"] == 1
-    conflict = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=headers, json={"answers": [{
+    conflict = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=headers, json={"expected_write_generation": 1, "answers": [{
         "question_id": ctx["question_id"], "selected_options": ["B"], "expected_version": 0,
     }]})
     assert conflict.json()["results"][0]["ok"] is False
@@ -144,8 +165,8 @@ def test_deadline_submit_is_idempotent_and_start_retry_restores_existing_attempt
         submission = db.get(ExamSubmission, started.json()["id"])
         submission.expires_at = utc_now() - timedelta(seconds=1)
         db.commit()
-    first = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=auth_header(ctx["student"]))
-    second = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=auth_header(ctx["student"]))
+    first = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=auth_header(ctx["student"]), json={"expected_write_generation": 1})
+    second = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=auth_header(ctx["student"]), json={"expected_write_generation": 1})
     assert first.status_code == second.status_code == 201
     assert first.json()["submission"]["submission_reason"] == "time_expired"
     assert second.json()["id"] == first.json()["id"]
@@ -189,13 +210,13 @@ def test_fill_blank_partial_scoring_visibility_and_manual_review(client, db_sess
     assert client.patch(f"{API}/exams/{ctx['exam_id']}", headers=teacher_headers, json={"status": "published"}).status_code == 200
     started = client.post(f"{API}/exams/{ctx['exam_id']}/start", headers=student_headers).json()
     assert "correct_answer" not in started["questions"][0]
-    saved = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=student_headers, json={"answers": [{
+    saved = client.put(f"{API}/exams/{ctx['exam_id']}/answers", headers=student_headers, json={"expected_write_generation": 1, "answers": [{
         "question_id": ctx["question_id"],
         "text_answers": {"first": " DEF ", "second": "wrong"},
         "expected_version": 0,
     }]})
     assert saved.json()["results"][0]["ok"] is True
-    submitted = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=student_headers).json()
+    submitted = client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=student_headers, json={"expected_write_generation": 1}).json()
     assert submitted["status"] == "graded"
     assert submitted["score"] is None
     assert submitted["exam"]["max_score"] == 10
@@ -279,9 +300,9 @@ def test_review_session_hides_question_scores_until_score_is_released(client, db
     assert client.put(
         f"{API}/exams/{ctx['exam_id']}/answers/{ctx['question_id']}",
         headers=student_headers,
-        json={"selected_options": ["A"]},
+        json={"expected_write_generation": 1, "selected_options": ["A"]},
     ).status_code == 201
-    assert client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=student_headers).status_code == 201
+    assert client.post(f"{API}/exams/{ctx['exam_id']}/submit", headers=student_headers, json={"expected_write_generation": 1}).status_code == 201
 
     with db_session_factory() as db:
         exam = db.get(Exam, ctx["exam_id"])

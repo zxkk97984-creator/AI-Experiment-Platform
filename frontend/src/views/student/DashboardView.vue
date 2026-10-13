@@ -521,7 +521,7 @@ onMounted(loadDashboard)
                   <p class="section-eyebrow">课程动态</p>
                   <h2>通知公告</h2>
                 </div>
-                <button type="button" class="text-btn" @click="router.push('/student')">查看全部</button>
+                <button type="button" class="text-btn" @click="router.push('/student/notifications')">通知中心</button>
               </header>
               <DashboardAsyncState
                 :loading="loading"
@@ -555,6 +555,24 @@ onMounted(loadDashboard)
                   </article>
                 </div>
               </DashboardAsyncState>
+            </article>
+
+            <article class="workspace-card practice-card">
+              <header class="workspace-card-head">
+                <div>
+                  <p class="section-eyebrow">自主练习</p>
+                  <h2>练习中心</h2>
+                </div>
+                <button type="button" class="text-btn" @click="router.push('/student/practice')">去练习</button>
+              </header>
+              <div class="stack">
+                <p class="lead">全平台公共题库，提交后可查看测试结果与 AI 反馈；练习成绩独立于课程总评。</p>
+                <div class="row-wrap">
+                  <button type="button" class="btn btn-primary btn-sm" @click="router.push('/student/practice')">开始练习</button>
+                  <button type="button" class="btn btn-secondary btn-sm" @click="router.push('/student/practice/mine')">我的练习</button>
+                  <button type="button" class="btn btn-secondary btn-sm" @click="router.push('/student/practice/leaderboard')">练习排行榜</button>
+                </div>
+              </div>
             </article>
           </aside>
         </div>

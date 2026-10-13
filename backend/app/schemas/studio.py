@@ -101,6 +101,10 @@ class StudioDraftUpdate(BaseModel):
     environment_version_id: int | None = None
     import_policy_mode: Literal["unrestricted", "restricted"] | None = None
     allowed_imports: list[str] | None = None
+    # ── 运行配置（Q1：发布前配置、发布后锁定） ────────────────
+    # 单格执行超时 10–1800 秒；内核空闲回收 300–7200 秒（UI 用分钟）。省略=不改。
+    cell_timeout_seconds: int | None = Field(default=None, ge=10, le=1800)
+    kernel_idle_seconds: int | None = Field(default=None, ge=300, le=7200)
 
     @field_validator("allowed_imports")
     @classmethod
@@ -188,6 +192,9 @@ class StudioVersionRead(BaseModel):
     environment_version_id: int | None = None
     import_policy_mode: str = "unrestricted"
     allowed_imports: list[str] = Field(default_factory=list)
+    # 发布时冻结的运行配置（发布后锁定，调整需发布新版本）
+    cell_timeout_seconds: int = 120
+    kernel_idle_seconds: int = 900
 
 
 class StudioTemplateRead(BaseModel):
@@ -207,6 +214,9 @@ class StudioTemplateRead(BaseModel):
     draft_environment_version_id: int | None = None
     draft_import_policy_mode: str = "unrestricted"
     draft_allowed_imports: list[str] = Field(default_factory=list)
+    # 草稿运行配置（Q1）：发布时冻结到版本，发布后锁定
+    draft_cell_timeout_seconds: int = 120
+    draft_kernel_idle_seconds: int = 900
     lesson_id: int | None = None
     module_id: int | None = None
     current_version: StudioVersionRead | None = None

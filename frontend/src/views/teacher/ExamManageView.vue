@@ -19,6 +19,17 @@ const router = useRouter()
 const app = useAppStore()
 // 教师与管理员复用同一页面：链接前缀取自当前已鉴权路由
 const area = (suffix) => areaPathForRole((route.path || '').startsWith('/admin') ? 'admin' : 'teacher', suffix)
+// 监考视图目前只登记了教师路由（/teacher/exams/:id/proctor）
+const teacherArea = computed(() => !(route.path || '').startsWith('/admin'))
+const EXAM_KIND_LABELS = { quiz: '测验', midterm: '期中', final: '期末', other: '其他' }
+const examKindLabel = (exam) => EXAM_KIND_LABELS[exam.exam_kind] || '测验'
+const timingLabel = (exam) => (exam.timing_mode === 'per_student' ? '进入后完整时长' : '统一时间交卷')
+const shuffleLabel = (exam) => {
+  const parts = []
+  if (exam.shuffle_questions) parts.push('题目乱序')
+  if (exam.shuffle_options) parts.push('选项乱序')
+  return parts.length ? parts.join(' · ') : '顺序固定'
+}
 const exams = ref([])
 const courses = ref([])
 const offerings = ref([])
@@ -114,16 +125,17 @@ onMounted(() => { fetchExams(); fetchCourses(); fetchOfferings() })
           <table class="exam-table">
             <thead><tr><th>考试名称</th><th>所属课程</th><th>状态</th><th>题目数</th><th>时长</th><th>参与人数</th><th>最近更新</th><th>操作</th></tr></thead>
             <tbody><tr v-for="exam in pagedExams" :key="exam.id">
-              <td data-label="考试名称"><strong>{{ exam.title }}</strong><small>{{ exam.start_at ? formatDateTime(exam.start_at) + ' 开始' : '未设置考试时间' }}</small></td>
+              <td data-label="考试名称"><strong>{{ exam.title }}</strong><small>{{ exam.start_at ? formatDateTime(exam.start_at) + ' 开始' : '未设置考试时间' }}</small><small>{{ examKindLabel(exam) }} · {{ timingLabel(exam) }}</small></td>
               <td data-label="所属课程"><span>{{ courseName(exam) }}</span><small>课程 ID {{ exam.course_id }}</small></td>
               <td data-label="状态"><span class="status-pill" :class="displayStatus(exam)">{{ statusBadge(EXAM_STATUS_MAP, displayStatus(exam)).label }}</span></td>
               <td data-label="题目数">{{ exam.question_count ?? '—' }}</td>
-              <td data-label="时长">{{ exam.duration_minutes }} 分钟</td>
+              <td data-label="时长">{{ exam.duration_minutes }} 分钟<small>{{ shuffleLabel(exam) }}</small></td>
               <td data-label="参与人数">{{ exam.participant_count ?? 0 }}<span v-if="exam.expected_count"> / {{ exam.expected_count }}</span></td>
               <td data-label="最近更新" class="muted-cell">{{ formatDateTime(exam.updated_at || exam.created_at) }}</td>
               <td data-label="操作" class="row-actions">
                 <button class="text-action" @click="router.push(area(`/exams/${exam.id}/edit`))">编辑试卷</button>
                 <button class="text-action" @click="router.push(area(`/exams/${exam.id}/grades`))">成绩分析</button>
+                <button v-if="teacherArea" class="text-action" @click="router.push(`/teacher/exams/${exam.id}/proctor`)">监考</button>
                 <button v-if="displayStatus(exam) === 'draft'" class="publish-action" @click="router.push(area(`/exams/${exam.id}/edit`))">发布检查</button>
               </td>
             </tr></tbody>

@@ -60,9 +60,9 @@ def test_start_and_submit(client, db_session_factory):
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status":"published"})
     r = client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     assert r.status_code == 201
-    r = client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"selected_options":["A"]})
+    r = client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "selected_options":["A"]})
     assert r.status_code == 201
-    r = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    r = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     assert r.status_code == 201
     r = client.get(f"{API}/exams/{ctx['eid']}/my-grade", headers=_h(ctx['s_tok']))
     assert r.status_code == 200
@@ -75,8 +75,8 @@ def test_my_grade_does_not_leak_system_error(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status":"published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"code_answer":"def f(): pass"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "code_answer":"def f(): pass"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     # 手动把答案置为 system_error（模拟内部错误）
     with db_session_factory() as db:
@@ -111,9 +111,9 @@ def test_teacher_grades(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status":"published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"selected_options":["A"]})
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"code_answer":"def answer(): return True"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "selected_options":["A"]})
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "code_answer":"def answer(): return True"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     r = client.get(f"{API}/exams/{ctx['eid']}/grades", headers=_h(ctx['t_tok']))
     assert r.status_code == 200
     body = r.json()
@@ -325,9 +325,9 @@ def test_teacher_grade_detail_manual_score_override(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"selected_options": ["A"]})
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"code_answer": "def answer(): return True"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "code_answer": "def answer(): return True"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     # 先把提交固定为已完成，避免异步判题影响测试确定性
     with db_session_factory() as db:
@@ -438,8 +438,8 @@ def test_exam_points_are_frozen_for_display_scoring_and_manual_cap(client, db_se
     }
 
     client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']),
-               json={"selected_options": ["A"]})
-    submitted = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+               json={"expected_write_generation": 1, "selected_options": ["A"]})
+    submitted = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     assert submitted.status_code == 201, submitted.text
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
@@ -475,8 +475,8 @@ def test_exam_manual_score_rolls_back_when_audit_insert_fails(client, db_session
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']),
-               json={"selected_options": ["A"]})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+               json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
         answer = db.scalar(select(ExamAnswer).where(
@@ -524,8 +524,8 @@ def test_missing_exam_point_snapshot_blocks_manual_score_without_live_fallback(c
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']),
-               json={"selected_options": ["A"]})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+               json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
         answer = db.scalar(select(ExamAnswer).where(
@@ -557,8 +557,8 @@ def test_teacher_grade_detail_can_score_unanswered_question(client, db_session_f
     ctx = _setup(client, db_session_factory)
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"selected_options": ["A"]})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
@@ -606,8 +606,8 @@ def test_review_required_waits_until_every_question_scored(client, db_session_fa
     ctx = _setup(client, db_session_factory)
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"selected_options": ["A"]})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
@@ -704,10 +704,10 @@ def test_p1_resubmit_idempotent(client, db_session_factory):
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     # 第一次交卷
-    r1 = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    r1 = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     assert r1.status_code == 201
     # 第二次交卷（幂等）
-    r2 = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+    r2 = client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
     assert r2.status_code in (200, 201), f"重复交卷不应 403: {r2.status_code}"
 
 
@@ -757,7 +757,7 @@ def test_exam_list_returns_is_submitted_for_student(client, db_session_factory):
     assert student_items()[eid] is False
 
     # 交卷后（真实流程，状态为 submitted/grading 之一）：已提交
-    r = client.post(f"{API}/exams/{eid}/submit", headers=_h(s_tok))
+    r = client.post(f"{API}/exams/{eid}/submit", headers=_h(s_tok), json={"expected_write_generation": 1})
     assert r.status_code == 201, r.text
     assert student_items()[eid] is True
 
@@ -789,8 +789,8 @@ def test_manual_score_rejects_inflight_and_invalidates_old_claim(client, db_sess
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q1_id']}", headers=_h(ctx['s_tok']),
-               json={"selected_options": ["A"]})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+               json={"expected_write_generation": 1, "selected_options": ["A"]})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))
@@ -845,8 +845,8 @@ def test_teacher_ai_retry_releases_old_claim(client, db_session_factory):
     client.patch(f"{API}/exams/{ctx['eid']}", headers=_h(ctx['t_tok']), json={"status": "published"})
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx['s_tok']))
     client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['q2_id']}", headers=_h(ctx['s_tok']),
-               json={"code_answer": "print(1)"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']))
+               json={"expected_write_generation": 1, "code_answer": "print(1)"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx['s_tok']), json={"expected_write_generation": 1})
 
     with db_session_factory() as db:
         sub = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["eid"]))

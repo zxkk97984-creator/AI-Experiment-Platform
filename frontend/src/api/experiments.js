@@ -25,9 +25,27 @@ export const experimentsAPI = {
     })
   },
 
-  /** 执行 cell */
-  executeCell(recordId, cellId, code) {
-    return client.post(`/experiments/records/${recordId}/cells/${cellId}/execute`, { code })
+  /** 受理一次单元格执行（异步：202 + execution_id；同 client_request_id 幂等） */
+  executeCell(recordId, cellId, code, clientRequestId) {
+    return client.post(`/experiments/records/${recordId}/cells/${cellId}/execute`, {
+      code,
+      ...(clientRequestId ? { client_request_id: clientRequestId } : {}),
+    })
+  },
+
+  /** 查询一次执行的状态与输出（轮询/刷新恢复） */
+  getExecution(recordId, executionId) {
+    return client.get(`/experiments/records/${recordId}/executions/${executionId}`)
+  },
+
+  /** 刷新恢复：查询该记录当前在途执行（无在途任务时 execution 为 null） */
+  getActiveExecution(recordId) {
+    return client.get(`/experiments/records/${recordId}/executions/active`)
+  },
+
+  /** 中断一次执行：排队中直接取消，运行中由 worker 中断当前执行 */
+  cancelExecution(recordId, executionId) {
+    return client.post(`/experiments/records/${recordId}/executions/${executionId}/cancel`)
   },
 
   /** 中断 kernel */

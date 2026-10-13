@@ -26,7 +26,15 @@ for (const width of [320, 1440]) {
       }
       if (path === '/experiments/records/99') return reply({ ...notebook, offering_id: 11, lab_enabled: true })
       if (path === '/experiments/records/99/cells') return reply({ record_revision: 2 })
-      if (path === '/experiments/records/99/cells/code/execute') return reply({ outputs: [{ msg_type: 'stream', content: { text: '7\n' } }], execution_time_ms: 12, execution_count: 1 })
+      // 异步执行契约：POST 只受理（202 + execution_id），结果由 GET executions/{id} 轮询取得；
+      // 刷新恢复会先问 executions/active。
+      if (path === '/experiments/records/99/executions/active') return reply({ execution: null })
+      if (path === '/experiments/records/99/cells/code/execute') return reply({ execution_id: 77, status: 'queued', cell_id: 'code', timeout_seconds: 120, queue_position: 1 })
+      if (path === '/experiments/records/99/executions/77') return reply({
+        id: 77, record_id: 99, cell_id: 'code', status: 'succeeded', timeout_seconds: 120,
+        outputs: [{ msg_type: 'stream', content: { text: '7\n' } }], execution_time_ms: 12, execution_count: 1,
+        error_code: null, error_message: null, state_lost: false, timed_out: false, attempts: 1,
+      })
       if (path === '/labs/records/99/overview') return reply({ enabled: true, assessment: { id: 1, version: 1, config }, attempts_used: 0, max_submissions: 5, artifacts: [], submissions: [], runs: [] })
       if (path === '/labs/records/99/cells/code/check') return reply({ id: 50, kind: 'cell_check', status: 'queued' })
       if (path === '/labs/runs/50') return reply({ id: 50, status: 'succeeded', stale: false, result: { cell_checks: { point: { cell_id: 'code', passed: true, message: '检查通过' } } } })

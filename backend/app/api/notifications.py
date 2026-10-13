@@ -20,7 +20,7 @@ router = APIRouter(prefix="/notifications", tags=["通知"])
 def get_notifications(
     unread_only: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles("teacher")),
+    current_user: User = Depends(require_roles("teacher", "student")),
 ):
     return list_notifications(db, current_user, unread_only=unread_only)
 
@@ -29,7 +29,7 @@ def get_notifications(
 def read_notification(
     notification_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles("teacher")),
+    current_user: User = Depends(require_roles("teacher", "student")),
 ):
     if not mark_notification_read(db, current_user, notification_id):
         raise api_error(404, "NOTIFICATION_NOT_FOUND", "通知不存在或不可见")
@@ -39,7 +39,7 @@ def read_notification(
 @router.post("/read-all", status_code=204)
 def read_all_notifications(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles("teacher")),
+    current_user: User = Depends(require_roles("teacher", "student")),
 ):
     mark_all_notifications_read(db, current_user)
     return Response(status_code=204)

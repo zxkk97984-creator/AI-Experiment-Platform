@@ -138,6 +138,62 @@ def ensure_preview_kernel(manager, template, session_id, db, *, image_ref=None, 
     return manager.get_or_create_session(session_id, **kwargs)
 
 
+def execute_kernel_code(manager, record_id, code, *, timeout_seconds=None, interrupt_event=None):
+    """按真实 KernelManager 的扩展签名执行；fake/duck-typed manager 保持旧签名。
+
+    学生执行、隐藏初始化与教师预览共用这一个入口，避免三条路径的超时语义漂移。
+    """
+    from app.services.kernel_manager import KernelManager
+
+    if isinstance(manager, KernelManager):
+        return manager.execute(record_id, code, timeout_seconds=timeout_seconds,
+                               interrupt_event=interrupt_event)
+    return manager.execute(record_id, code)
+
+
+def initialize_hidden_cells(manager, record, version, db, *, image_ref=None,
+                            environment_version_id=None, timeout_seconds=None) -> None:
+    """按 order 执行隐藏初始化 cell（同一模板版本只执行一次）。
+
+    隐藏单元格只承载脚手架（初始化与教学演示）；答案、私有测试与评分逻辑留在
+    独立评测环境。失败即销毁 kernel 并抛 RuntimeError（fail-closed，不留半初始化状态）。
+    API 与 worker 共用本实现，保证两条路径语义一致。
+    """
+    if not version:
+        return
+    hidden_cells = sorted(
+        [c for c in version.cells if c.get("source_hidden") and c.get("type") == "code"],
+        key=lambda c: c.get("order", 0),
+    )
+    if not hidden_cells:
+        return
+
+    try:
+        ensure_record_kernel(manager, record, version, db, image_ref=image_ref,
+                             environment_version_id=environment_version_id)
+    except Exception as e:
+        raise RuntimeError(f"Kernel 创建失败：{e}") from e
+
+    version_id = record.template_version_id
+    if manager.is_template_initialized(record.id, version_id):
+        return
+
+    for cell in hidden_cells:
+        try:
+            execute_kernel_code(manager, record.id, cell["source"], timeout_seconds=timeout_seconds)
+        except Exception as e:
+            manager.destroy(record.id)
+            raise RuntimeError(
+                f"隐藏初始化 cell {cell['id']} 执行失败，Kernel 已销毁"
+            ) from e
+
+    try:
+        manager.mark_template_initialized(record.id, version_id)
+    except Exception as e:
+        manager.destroy(record.id)
+        raise RuntimeError(f"Kernel 初始化状态保存失败，Kernel 已销毁：{e}") from e
+
+
 def _kernel_context(manager, db, environment_version_id, config):
     environment = db.get(EnvironmentVersion, environment_version_id) if environment_version_id else None
     resources = config.get("resources") or {}

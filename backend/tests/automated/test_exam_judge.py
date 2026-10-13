@@ -66,8 +66,8 @@ def _runner_result(values):
 def test_correct_scores_full(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx["s_tok"]))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"code_answer":"def add(a,b):\n    return a+b"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1, "code_answer":"def add(a,b):\n    return a+b"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1})
     with db_session_factory() as db:
         from app.models import ExamAnswer
         ans = db.query(ExamAnswer).first()
@@ -82,8 +82,8 @@ def test_correct_scores_full(client, db_session_factory):
 def test_wrong_scores_zero(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx["s_tok"]))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"code_answer":"def add(a,b):\n    return 0"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1, "code_answer":"def add(a,b):\n    return 0"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1})
     with db_session_factory() as db:
         from app.models import ExamAnswer
         ans = db.query(ExamAnswer).first()
@@ -96,8 +96,8 @@ def test_wrong_scores_zero(client, db_session_factory):
 def test_docker_fail_marked_system_error(client, db_session_factory):
     ctx = _setup(client, db_session_factory)
     client.post(f"{API}/exams/{ctx['eid']}/start", headers=_h(ctx["s_tok"]))
-    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"code_answer":"def add(a,b):\n    return a+b"})
-    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]))
+    client.put(f"{API}/exams/{ctx['eid']}/answers/{ctx['qid']}", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1, "code_answer":"def add(a,b):\n    return a+b"})
+    client.post(f"{API}/exams/{ctx['eid']}/submit", headers=_h(ctx["s_tok"]), json={"expected_write_generation": 1})
     with db_session_factory() as db:
         from app.models import ExamAnswer
         ans = db.query(ExamAnswer).first()

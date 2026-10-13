@@ -27,6 +27,19 @@ export const useExperimentStore = defineStore('experiment', () => {
   const conflict = ref(false)
   const executingCellId = ref(null)
 
+  // ── 异步执行状态 ──
+  // 单格最长可配 1800 秒：轮询上限必须覆盖它（2000ms × 960 ≈ 1920s），否则长任务会被前端
+  // 提前放弃、学生看不到终态。这里沿用 pollCellCheck 的递归 setTimeout 范式。
+  const EXEC_POLL_INTERVAL_MS = 2000
+  const EXEC_POLL_MAX_ATTEMPTS = 960
+  const executionNotices = ref({})
+  const activeExecutionId = ref(null)
+  const kernelStateLost = ref(false)
+  const executionTimers = new Map()
+  const executionResolvers = new Map()
+  // 网络失败时保留 client_request_id，重试同一份代码不会创建第二个任务（后端唯一约束兜底）
+  const pendingExecutionRequests = new Map()
+
   // ── 提交状态 ──
   const submitting = ref(false)
   const lastSubmitTime = ref(null)
@@ -78,6 +91,11 @@ export const useExperimentStore = defineStore('experiment', () => {
     dirty.value = false
     saved.value = false
     dirtySources.value = {}
+    // 重置执行相关状态，避免串页（在途任务由 resumeActiveExecution 重新接上）
+    _clearExecutionState()
+    pendingExecutionRequests.clear()
+    executionNotices.value = {}
+    kernelStateLost.value = false
     // 重置提交相关状态，避免串页
     submissions.value = []
     submitAttemptCount.value = 0
@@ -98,7 +116,7 @@ export const useExperimentStore = defineStore('experiment', () => {
         id: c.id, type: c.type || 'code', source: c.source || '',
         order: c.order || 0,
         student_editable: c.student_editable == null ? c.type !== 'markdown' : c.student_editable === true,
-        outputs: c.outputs || null, isRunning: false,
+        outputs: c.outputs || null, isRunning: c.is_running === true,
       }))
       raw.sort((a, b) => a.order - b.order)
       cells.value = raw
@@ -110,6 +128,8 @@ export const useExperimentStore = defineStore('experiment', () => {
       if (d.record_revision != null) recordRevision.value = d.record_revision
       saved.value = true
       _startSafety()
+      // 刷新恢复：页面重新打开时接上仍在跑的单元格（不阻塞首屏渲染）
+      resumeActiveExecution()
     } catch (e) {
       const code = e.response?.data?.detail?.code
       const message = e.response?.data?.detail?.message
@@ -251,19 +271,131 @@ export const useExperimentStore = defineStore('experiment', () => {
     }
   }
 
+  const TERMINAL_EXECUTION_STATUSES = ['succeeded', 'timeout', 'failed', 'cancelled']
+
+  function _setExecutionNotice(cellId, notice) {
+    const next = { ...executionNotices.value }
+    if (notice) next[cellId] = notice
+    else delete next[cellId]
+    executionNotices.value = next
+  }
+
+  function _clearExecutionTimer(cellId) {
+    const timer = executionTimers.get(cellId)
+    if (timer) {
+      clearTimeout(timer)
+      executionTimers.delete(cellId)
+    }
+  }
+
+  function _releaseExecutionWaiters(cellId) {
+    const resolve = executionResolvers.get(cellId)
+    if (resolve) {
+      executionResolvers.delete(cellId)
+      resolve(null)
+    }
+  }
+
+  function _clearExecutionState() {
+    for (const cellId of [...executionTimers.keys()]) _clearExecutionTimer(cellId)
+    for (const cellId of [...executionResolvers.keys()]) _releaseExecutionWaiters(cellId)
+    for (const cell of cells.value) cell.isRunning = false
+    executingCellId.value = null
+    activeExecutionId.value = null
+  }
+
+  function _terminalNotice(data) {
+    if (data.status === 'timeout') {
+      return { level: 'warning', message: `单元格执行超过 ${data.timeout_seconds} 秒，已中断本次执行；内存变量已保留` }
+    }
+    if (data.status === 'failed') {
+      if (data.state_lost) {
+        return { level: 'error', message: '内核无响应，已重建：内存中的变量、导入与模型状态已丢失，请从头重新运行全部单元格' }
+      }
+      return { level: 'error', message: data.error_message || '执行失败' }
+    }
+    if (data.status === 'cancelled') return { level: 'info', message: '已中断本次执行' }
+    return null
+  }
+
+  function _applyExecutionResult(cell, data) {
+    const notice = _terminalNotice(data)
+    if (notice) _setExecutionNotice(cell.id, notice)
+    if (data.state_lost) kernelStateLost.value = true
+    // failed/cancelled 可能是空输出：不要用它覆盖上一次的真实输出
+    if (data.status === 'succeeded' || data.status === 'timeout') {
+      cell.outputs = {
+        outputs: data.outputs || [],
+        execution_time_ms: data.execution_time_ms,
+        execution_count: data.execution_count,
+      }
+    }
+  }
+
+  /** 轮询一次执行直到终态；返回终态数据（被取消/失败返回 null） */
+  function pollExecution(executionId, cellId, execRecordId) {
+    return new Promise((resolve) => {
+      const tick = async (attempts) => {
+        if (recordId.value !== execRecordId) { resolve(null); return }
+        const cell = cells.value.find(c => c.id === cellId)
+        if (!cell) { resolve(null); return }
+        try {
+          const { data } = await experimentsAPI.getExecution(execRecordId, executionId)
+          if (recordId.value !== execRecordId) { resolve(null); return }
+          if (TERMINAL_EXECUTION_STATUSES.includes(data.status)) {
+            _clearExecutionTimer(cellId)
+            _applyExecutionResult(cell, data)
+            cell.isRunning = false
+            executingCellId.value = null
+            activeExecutionId.value = null
+            resolve(data)
+            return
+          }
+          cell.isRunning = true
+          executingCellId.value = cellId
+          activeExecutionId.value = executionId
+          if (attempts >= EXEC_POLL_MAX_ATTEMPTS) {
+            _setExecutionNotice(cellId, { level: 'warning', message: '执行时间超出预期，请刷新页面查看最新状态' })
+            executingCellId.value = null
+            resolve(null)
+            return
+          }
+          executionResolvers.set(cellId, resolve)
+          _clearExecutionTimer(cellId)
+          executionTimers.set(cellId, setTimeout(() => tick(attempts + 1), EXEC_POLL_INTERVAL_MS))
+        } catch {
+          _clearExecutionTimer(cellId)
+          executingCellId.value = null
+          activeExecutionId.value = null
+          _setExecutionNotice(cellId, { level: 'error', message: '执行状态加载失败，请刷新页面重试' })
+          resolve(null)
+        }
+      }
+      tick(0)
+    })
+  }
+
   async function executeCell(cellId, checkFeedback = true) {
     const cell = cells.value.find(c => c.id === cellId)
     if (!cell || cell.type !== 'code') return
+    if (executingCellId.value) return
     executingCellId.value = cellId
+    kernelStateLost.value = false
+    _setExecutionNotice(cellId, null)
+    const execRecordId = recordId.value
+    if (!pendingExecutionRequests.has(cellId)) pendingExecutionRequests.set(cellId, crypto.randomUUID())
+    const clientRequestId = pendingExecutionRequests.get(cellId)
     try {
-      const res = await experimentsAPI.executeCell(recordId.value, cellId, cell.source)
-      cell.outputs = {
-        outputs: res.data.outputs,
-        execution_time_ms: res.data.execution_time_ms,
-        execution_count: res.data.execution_count,
+      const res = await experimentsAPI.executeCell(execRecordId, cellId, cell.source, clientRequestId)
+      pendingExecutionRequests.delete(cellId)
+      activeExecutionId.value = res.data.execution_id
+      const data = await pollExecution(res.data.execution_id, cellId, execRecordId)
+      if (data && data.status === 'succeeded' && checkFeedback && cellCheckTargets.value.includes(cellId)) {
+        await checkCell(cellId)
       }
-      if (checkFeedback && cellCheckTargets.value.includes(cellId)) await checkCell(cellId)
     } catch (e) {
+      // 有响应说明请求已被处理（4xx/5xx），下次点击生成新的幂等键；网络失败保留原键重试
+      if (e.response) pendingExecutionRequests.delete(cellId)
       const code = e.response?.data?.detail?.code
       const message = e.response?.data?.detail?.message
       if (code === 'IMPORT_NOT_ALLOWED' || code === 'IMPORT_NOT_INSTALLED' || code === 'ENVIRONMENT_IMAGE_MISSING') {
@@ -271,7 +403,28 @@ export const useExperimentStore = defineStore('experiment', () => {
       } else if (e.response?.status === 409) app.showToast('Kernel 正忙，请等待', 'warning')
       else app.showToast('执行失败', 'error')
     } finally {
-      executingCellId.value = null
+      if (executingCellId.value === cellId) executingCellId.value = null
+    }
+  }
+
+  /** 刷新恢复：页面重新打开时接上仍在执行的单元格并继续轮询 */
+  async function resumeActiveExecution() {
+    if (!recordId.value) return
+    const execRecordId = recordId.value
+    try {
+      const { data } = await experimentsAPI.getActiveExecution(execRecordId)
+      if (recordId.value !== execRecordId) return
+      const execution = data?.execution
+      if (!execution) return
+      const cell = cells.value.find(c => c.id === execution.cell_id)
+      if (!cell) return
+      executingCellId.value = cell.id
+      activeExecutionId.value = execution.id
+      cell.isRunning = true
+      await pollExecution(execution.id, cell.id, execRecordId)
+      if (recordId.value === execRecordId) executingCellId.value = null
+    } catch {
+      // 刷新恢复失败不阻塞页面；下次运行或再次刷新会重试
     }
   }
 
@@ -323,10 +476,27 @@ export const useExperimentStore = defineStore('experiment', () => {
     catch { app.showToast('中断失败', 'error') }
   }
 
+  /** 中断：优先取消当前执行任务（排队中直接取消、运行中由 worker 中断），无任务时退回内核中断 */
+  async function cancelExecution() {
+    const execRecordId = recordId.value
+    const executionId = activeExecutionId.value
+    if (!executionId) { await interruptKernel(); return }
+    try {
+      await experimentsAPI.cancelExecution(execRecordId, executionId)
+      app.showToast('已中断本次执行', 'success')
+    } catch {
+      app.showToast('中断失败', 'error')
+    }
+  }
+
   async function restartKernel() {
     try {
+      _clearExecutionState()
       await experimentsAPI.restart(recordId.value)
       for (const c of cells.value) { if (c.type === 'code') c.outputs = null }
+      executionNotices.value = {}
+      pendingExecutionRequests.clear()
+      kernelStateLost.value = false
       app.showToast('Kernel 已重启', 'success')
     } catch { app.showToast('重启失败', 'error') }
   }
@@ -413,16 +583,21 @@ export const useExperimentStore = defineStore('experiment', () => {
     cellCheckTimers.clear()
     cellCheckTargets.value = []
     cellCheckResults.value = {}
+    _clearExecutionState()
+    executionNotices.value = {}
+    kernelStateLost.value = false
   }
 
   return {
     context, recordId, recordRevision, cells, entryName, entryDescription,
     environmentSummary, labEnabled, cellCheckTargets, cellCheckResults,
     dirty, saving, saved, error, conflict, executingCellId,
+    executionNotices, activeExecutionId, kernelStateLost,
     submitting, lastSubmitTime, submitAttemptCount, submissions, currentClientRequestId,
     openLesson, openModule,
     updateCellSource, flushSave, canNavigate,
-    executeCell, executeAllCells, interruptKernel, restartKernel,
+    executeCell, executeAllCells, interruptKernel, cancelExecution, restartKernel,
+    resumeActiveExecution,
     submitExperiment, loadSubmissions,
     destroy,
   }

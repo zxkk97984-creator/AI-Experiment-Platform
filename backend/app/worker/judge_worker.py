@@ -1583,7 +1583,8 @@ def process_exam_answer(db: Session, redis_client, settings: Settings, answer_id
 # AI 评分处理
 # ═══════════════════════════════════════════════════════════════
 
-def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_id: int) -> CodeGrade:
+def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_id: int,
+                     metrics_sink=None) -> CodeGrade:
     from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
     from app.services.ai_grading_service import grade_code_submission
     from app.services.ai_client import AIServiceError, DeepSeekClient
@@ -1605,7 +1606,7 @@ def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_i
         return None
 
     try:
-        client = DeepSeekClient(settings, metrics_sink=ai_metrics_sink())
+        client = DeepSeekClient(settings, metrics_sink=metrics_sink or ai_metrics_sink())
         cg = grade_code_submission(db, client, code_grade_id)
         # 终态（completed / review_required）已由 grade_code_submission 在**同一事务**
         # 内写入并释放认领；这里只按已提交终态推进考试汇总。
@@ -1671,11 +1672,19 @@ def _worker_queue_names(settings: Settings) -> tuple[str, ...]:
 
     The deterministic worker is deliberately the default.  An AI worker is
     opt-in and has no consumption queues at all while AI is disabled.
+    The AI worker additionally consumes the one-click AI setup queue
+    (rubric/test-group generation and draft trial runs).
     """
     if settings.worker_role == "judge":
         return settings.judge_queue_name, EXAM_JUDGE_QUEUE
     if settings.worker_role == "ai":
-        return (settings.ai_queue_name,) if settings.ai_enabled else ()
+        if not settings.ai_enabled:
+            return ()
+        return settings.ai_queue_name, settings.ai_setup_queue_name
+    if settings.worker_role == "practice":
+        # 练习判题由 app.worker.practice_worker 独占消费 practice:*
+        # 队列；正式 worker 不监听它们，避免互相挤占容量。
+        return ()
     raise ValueError(f"unsupported worker role: {settings.worker_role}")
 
 
@@ -1735,9 +1744,13 @@ def run_worker_loop():
                 raise ValueError("queue message must be an object")
             msg_type = payload.get("type")
             job_id = payload.get("id")
-            expected_type = ("ai_grade" if worker_role == "ai" else
-                             "exam" if queue_name == EXAM_JUDGE_QUEUE else "assignment")
-            if (msg_type != expected_type or type(job_id) is not int or job_id <= 0
+            if queue_name == settings.ai_setup_queue_name:
+                expected_types = ("ai_setup", "ai_trial")
+            elif worker_role == "ai":
+                expected_types = ("ai_grade",)
+            else:
+                expected_types = ("exam",) if queue_name == EXAM_JUDGE_QUEUE else ("assignment",)
+            if (msg_type not in expected_types or type(job_id) is not int or job_id <= 0
                     or ("attempt" in payload and
                         (type(payload["attempt"]) is not int or payload["attempt"] < 0))):
                 raise ValueError("invalid queue message fields")
@@ -1747,7 +1760,18 @@ def run_worker_loop():
             logger.warning("无效判题消息，已忽略: queue=%s", queue_name)
             continue
 
-        if worker_role == "ai":
+        if queue_name == settings.ai_setup_queue_name:
+            from app.services import ai_grading_setup_service as setup_service
+
+            try:
+                with SessionLocal() as db:
+                    if msg_type == "ai_setup":
+                        setup_service.run_setup_job(db, redis_client, settings, job_id)
+                    else:
+                        setup_service.run_trial_run(db, redis_client, settings, job_id)
+            except Exception:
+                logger.exception("AI 配置任务异常: id=%s", job_id)
+        elif worker_role == "ai":
             try:
                 with SessionLocal() as db:
                     process_ai_grade(db, redis_client, settings, job_id)

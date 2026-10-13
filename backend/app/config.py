@@ -72,7 +72,12 @@ class Settings(BaseSettings):
     # 存量兼容路径与开发环境。安全参数不在此处放松。
     kernel_image: str = "dai-kernel-python:latest"
     jupyter_enabled: bool = False
-    worker_role: Literal["judge", "ai"] = "judge"
+    # ── 交互内核运行配置（Q1） ────────────────────────────────
+    # 单格执行超时默认 120 秒（教师可设 10–1800 秒）；内核空闲回收默认 900 秒
+    # （教师可设 300–7200 秒）。发布后锁定在模板版本上，已有实验继续用原配置。
+    kernel_cell_timeout_seconds: int = Field(default=120, ge=10, le=1800)
+    kernel_idle_seconds: int = Field(default=900, ge=300, le=7200)
+    worker_role: Literal["judge", "ai", "kernel", "practice"] = "judge"
     studio_storage_dir: str = str(
         Path(__file__).resolve().parents[1] / "storage" / "studio"
     )
@@ -124,6 +129,21 @@ class Settings(BaseSettings):
     ai_test_group_timeout_seconds: float = Field(default=120.0, gt=0, le=300)
     ai_test_group_max_retries: int = Field(default=0, ge=0, le=3)
     ai_queue_name: str = "judge:ai:queue"
+    # 一键 AI 配置（批次 2）：生成任务走独立队列，不挤占正式判题容量
+    ai_setup_queue_name: str = "judge:ai-setup:queue"
+    # 单次成绩异议（批次 2）：结果对学生可见起可申请的窗口天数
+    appeal_window_days: int = Field(default=7, ge=1, le=90)
+    # ── 自主练习（批次 5 Q8/Q9） ─────────────────────────────
+    # 练习判题走独立队列 + 受限 worker：绝不挤占正式作业/考试的
+    # judge:* 与 judge:ai:queue 容量；并发上限取自 practice_settings（库内配置）。
+    practice_judge_queue_name: str = "practice:judge:queue"
+    practice_ai_queue_name: str = "practice:ai:queue"
+    # 单次 AI 提交预扣的 token 估算值：日预算扣减以 practice_usage_logs 为准
+    practice_ai_token_estimate: int = Field(default=6000, ge=500, le=200000)
+    practice_queue_poll_seconds: float = Field(default=2, gt=0, le=60)
+    # 批次 6：练习统计/榜单重算（请求路径只读快照，重算在 scheduler_lease 下按间隔执行）
+    practice_stats_recalc_enabled: bool = True
+    practice_stats_recalc_seconds: float = Field(default=300, ge=30, le=3600)
 
     @property
     def ai_ready(self) -> bool:
@@ -274,6 +294,10 @@ class Settings(BaseSettings):
     @property
     def lab_work_path(self) -> Path:
         return (Path(self.judge_work_dir).resolve() if self.judge_work_dir else self.studio_storage_path.parent / "judge-work") / "labs"
+
+    # ── 考试秩序（批次 3） ────────────────────────────────────
+    # 教师延时是明确留痕的例外：单场考试累计延长不得超过该上限。
+    exam_extension_max_minutes: int = Field(default=60, ge=1, le=180)
 
     # ── 登录限流 ──
     account_security_keys: str = ""  # Comma-separated Fernet keys, newest first; separate from JWT.

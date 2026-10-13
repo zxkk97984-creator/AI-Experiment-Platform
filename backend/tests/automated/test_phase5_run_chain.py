@@ -1022,15 +1022,28 @@ def test_execute_cell_runs_with_env_digest_and_no_diagnostic(client, db_session_
     with patch("app.api.experiments.get_kernel_manager") as mock_km:
         km = MagicMock()
         km.get_or_create_session.side_effect = fake_get_or_create
-        km.execute.return_value = {"outputs": [], "execution_time_ms": 5}
+        km.is_template_initialized.return_value = True
+        km.execute.return_value = {"outputs": [], "execution_time_ms": 5,
+                                   "outcome": "succeeded", "state_lost": False, "message": None}
         mock_km.return_value = km
         r = client.post(f"/api/v1/experiments/records/{record_id}/cells/c1/execute",
                         headers=auth_header(s_tok),
                         json={"code": "print(1)"})
-    assert r.status_code == 200, r.text
+        assert r.status_code == 202, r.text
+        # 异步执行：内核准备仍在请求内完成（环境 digest 断言不变），代码执行由 worker 负责
+        from kernel_test_support import drain_execution, kernel_runtime
+        with kernel_runtime(km):
+            drain_execution(db_session_factory, test_settings, r.json()["execution_id"])
+        status = client.get(
+            f"/api/v1/experiments/records/{record_id}/executions/{r.json()['execution_id']}",
+            headers=auth_header(s_tok))
+
     assert captured["image_ref"] == "sha256:" + "a" * 64
     assert captured["env_id"] is not None
-    assert r.json().get("diagnostic") is None
+    body = status.json()
+    assert body["status"] == "succeeded"
+    assert body["error_code"] is None
+    assert body["outputs"] == [], "无 import 错误时不得合成 diagnostic 输出"
 
 
 # ═══════════════════════════════════════════════════════════════

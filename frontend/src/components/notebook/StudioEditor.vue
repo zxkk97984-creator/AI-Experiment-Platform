@@ -133,12 +133,38 @@ function showLabPublishing() {
   focusLabPublishing.value += 1
 }
 
+// ── 运行配置（Q1）：发布表单里的两个数字输入，发布后锁定 ──────────
+const publishTimeout = ref(120)
+const publishIdleMinutes = ref(15)
+
+const publishMessage = computed(() => (
+  `本次将发布：${publishSummary.value.title}`
+  + `${publishSummary.value.environment ? `；运行环境：${publishSummary.value.environment}` : ''}`
+  + `${publishSummary.value.packages.length ? `；可用库：${publishSummary.value.packages.join(' · ')}` : ''}`
+))
+
+const publishConfigError = computed(() => {
+  const timeout = Number(publishTimeout.value)
+  const idleMinutes = Number(publishIdleMinutes.value)
+  if (!Number.isFinite(timeout) || timeout < 10 || timeout > 1800) return '单格执行超时需在 10–1800 秒之间'
+  if (!Number.isFinite(idleMinutes) || idleMinutes < 5 || idleMinutes > 120) return '内核空闲回收需在 5–120 分钟之间'
+  return ''
+})
+
 function confirmPublish() {
   if (labConfigured.value) { showLabPublishing(); return }
+  publishTimeout.value = store.cellTimeoutSeconds ?? 120
+  publishIdleMinutes.value = Math.round((store.kernelIdleSeconds ?? 900) / 60)
   showPublishDialog.value = true
 }
 
 async function doPublish() {
+  if (publishConfigError.value) return
+  // 与 cells、环境同一草稿 revision 保存；publish() 会先保存草稿再发布，因此发布即冻结
+  store.setKernelConfig({
+    cellTimeoutSeconds: Number(publishTimeout.value),
+    kernelIdleSeconds: Math.round(Number(publishIdleMinutes.value) * 60),
+  })
   publishBusy.value = true
   try {
     const version = await store.publish()
@@ -666,17 +692,44 @@ function handleMarkdownEdit(cellId) {
       </div>
     </div>
 
-    <!-- 发布确认：显示实验标题，并附带本次使用的环境与包摘要 -->
-    <ConfirmDialog
-      v-if="showPublishDialog"
-      title="确认发布？"
-      :message="`本次将发布：${publishSummary.title}${publishSummary.environment ? `；运行环境：${publishSummary.environment}` : ''}${publishSummary.packages.length ? `；可用库：${publishSummary.packages.join(' · ')}` : ''}`"
-      confirm-text="发布"
-      cancel-text="取消"
-      :busy="publishBusy"
-      @confirm="doPublish"
-      @cancel="showPublishDialog = false"
-    />
+    <!-- 发布表单：显示实验标题/环境摘要，并配置单格超时与空闲回收（发布后锁定） -->
+    <div v-if="showPublishDialog" class="modal-overlay" @click.self="showPublishDialog = false">
+      <div v-dialog-focus class="modal-content publish-modal" role="dialog" aria-modal="true" aria-label="发布实验版本" @keydown.esc="showPublishDialog = false">
+        <div class="modal-header">
+          <h3>确认发布？</h3>
+          <button class="modal-close" aria-label="关闭发布" @click="showPublishDialog = false">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="publish-summary">{{ publishMessage }}</p>
+          <div class="run-config">
+            <label class="rc-field">
+              <span class="rc-label">单格执行超时（秒）</span>
+              <input
+                v-model.number="publishTimeout"
+                type="number" min="10" max="1800" step="10"
+                aria-label="单格执行超时秒数"
+              />
+            </label>
+            <label class="rc-field">
+              <span class="rc-label">内核空闲回收（分钟）</span>
+              <input
+                v-model.number="publishIdleMinutes"
+                type="number" min="5" max="120" step="1"
+                aria-label="内核空闲回收分钟数"
+              />
+            </label>
+            <p v-if="publishConfigError" class="rc-error" role="alert">{{ publishConfigError }}</p>
+            <p class="rc-hint">发布后锁定，调整需发布新版本；已有实验继续使用原版本配置。</p>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="tb-btn" :disabled="publishBusy" @click="showPublishDialog = false">取消</button>
+          <button class="tb-btn tb-btn-accent" :disabled="publishBusy || !!publishConfigError" @click="doPublish">
+            {{ publishBusy ? '处理中…' : '发布' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <!-- 未保存离开确认（替代原 window.confirm，四页统一） -->
     <ConfirmDialog
@@ -750,6 +803,15 @@ body.dragging-cells { user-select: none; -webkit-user-select: none; cursor: grab
 .modal-header h3 { margin: 0; font-size: var(--text-md); }
 .modal-close { background: none; border: none; cursor: pointer; font-size: 16px; color: var(--muted); }
 .modal-body { padding: var(--space-4); }
+.publish-summary { margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--muted); }
+.run-config { display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--surface-subtle); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.rc-field { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); font-size: var(--text-sm); }
+.rc-label { color: var(--fg); }
+.rc-field input { width: 120px; padding: 4px 8px; font-size: var(--text-sm); color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rc-field input:focus { outline: none; border-color: var(--accent); }
+.rc-error { margin: 0; font-size: var(--text-xs); color: var(--danger); }
+.rc-hint { margin: 0; font-size: var(--text-xs); color: var(--muted); }
+.modal-footer { display: flex; justify-content: flex-end; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); }
 .history-item { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); font-size: var(--text-sm); }
 .history-item:last-child { border-bottom: none; }
 .version-num { font-weight: 600; min-width: 36px; }
