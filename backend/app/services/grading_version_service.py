@@ -193,14 +193,42 @@ def validate_payload(payload: dict) -> dict:
 
 
 def _next_version(db: Session, *, judge_question_id: int | None,
-                  exam_question_id: int | None) -> int:
+                  exam_question_id: int | None,
+                  practice_problem_id: int | None = None) -> int:
     query = select(JudgeGradingVersion)
-    if judge_question_id is not None:
+    if practice_problem_id is not None:
+        query = query.where(JudgeGradingVersion.practice_problem_id == practice_problem_id)
+    elif judge_question_id is not None:
         query = query.where(JudgeGradingVersion.judge_question_id == judge_question_id)
     else:
         query = query.where(JudgeGradingVersion.exam_question_id == exam_question_id)
     latest = db.scalars(query.order_by(JudgeGradingVersion.version.desc()).limit(1)).first()
     return (latest.version + 1) if latest else 1
+
+
+QUESTION_KINDS = ("assignment", "exam", "practice_problem")
+
+
+def question_model_for(question_kind: str):
+    """题目模型：练习目标是平台级题库（批次 5），与作业题/考试题三选一。"""
+    from app.models import ExamQuestion, JudgeQuestion
+    from app.models.practice import PracticeProblem
+
+    if question_kind == "assignment":
+        return JudgeQuestion
+    if question_kind == "exam":
+        return ExamQuestion
+    if question_kind == "practice_problem":
+        return PracticeProblem
+    raise GradingVersionError(f"question_kind 必须是 {QUESTION_KINDS}")
+
+
+def practice_version_mode(problem) -> str:
+    """练习题目口径（deterministic|ai）→ 评分版本口径（legacy|active）。"""
+    from app.services.practice_service import version_mode_for
+
+    return version_mode_for(getattr(problem, "grading_mode", "deterministic")
+                            or "deterministic")
 
 
 def create_draft(db: Session, *, question_kind: str, question_id: int, payload: dict,
@@ -214,8 +242,8 @@ def create_draft(db: Session, *, question_kind: str, question_id: int, payload: 
     ``commit`` 默认 False（与历史行为一致：只 flush，由调用方决定事务边界）；
     「保存并启用」传 ``commit=False`` 与其余步骤共用同一事务。
     """
-    if question_kind not in ("assignment", "exam"):
-        raise GradingVersionError("question_kind 必须是 assignment 或 exam")
+    if question_kind not in QUESTION_KINDS:
+        raise GradingVersionError(f"question_kind 必须是 {QUESTION_KINDS}")
     if execution_mode not in EXECUTION_MODES:
         raise GradingVersionError(f"execution_mode 必须是 {EXECUTION_MODES}")
     if source_kind not in SOURCE_KINDS:
@@ -225,15 +253,20 @@ def create_draft(db: Session, *, question_kind: str, question_id: int, payload: 
     if not isinstance(entry_function, str) or not entry_function.isidentifier():
         raise GradingVersionError("entry_function 必须是合法标识符")
 
-    question = (db.get(JudgeQuestion, question_id) if question_kind == "assignment"
-                else db.get(ExamQuestion, question_id))
+    question = db.get(question_model_for(question_kind), question_id)
     if question is None:
         raise GradingVersionError("题目不存在")
     if rubric_id is not None and db.get(QuestionRubric, rubric_id) is None:
         # 先校验存在性：否则外键错误会变成 500，而不是可解释的配置错误
         raise GradingVersionError("指定的 Rubric 不存在")
 
-    mode_snapshot = grading_mode_snapshot or getattr(question, "grading_mode", "legacy") or "legacy"
+    if grading_mode_snapshot is not None:
+        mode_snapshot = grading_mode_snapshot
+    elif question_kind == "practice_problem":
+        # 练习题目口径是 deterministic|ai，版本口径是 legacy|active
+        mode_snapshot = practice_version_mode(question)
+    else:
+        mode_snapshot = getattr(question, "grading_mode", "legacy") or "legacy"
     if mode_snapshot not in GRADING_MODES:
         raise GradingVersionError(f"grading_mode_snapshot 必须是 {GRADING_MODES}")
 
@@ -288,10 +321,12 @@ def create_draft(db: Session, *, question_kind: str, question_id: int, payload: 
     version = JudgeGradingVersion(
         judge_question_id=question_id if question_kind == "assignment" else None,
         exam_question_id=question_id if question_kind == "exam" else None,
+        practice_problem_id=question_id if question_kind == "practice_problem" else None,
         version=_next_version(
             db,
             judge_question_id=question_id if question_kind == "assignment" else None,
             exam_question_id=question_id if question_kind == "exam" else None,
+            practice_problem_id=question_id if question_kind == "practice_problem" else None,
         ),
         status="draft",
         execution_mode=execution_mode,
@@ -369,7 +404,14 @@ def activate_version(db: Session, version: JudgeGradingVersion, *,
         raise GradingVersionError("只有 confirmed 版本可以启用")
     _validate_activation_strategy(db, version)
     query = select(JudgeGradingVersion).where(JudgeGradingVersion.status == "active")
-    if version.judge_question_id is not None:
+    if version.practice_problem_id is not None:
+        # 练习题两种口径（普通判题/AI 综合）各自保留一个 active 版本：
+        # 全局开关关掉 AI 后新提交仍要能绑定普通判题版本，历史成绩也按口径分榜。
+        query = query.where(
+            JudgeGradingVersion.practice_problem_id == version.practice_problem_id,
+            JudgeGradingVersion.grading_mode_snapshot == version.grading_mode_snapshot,
+        )
+    elif version.judge_question_id is not None:
         query = query.where(JudgeGradingVersion.judge_question_id == version.judge_question_id)
     else:
         query = query.where(JudgeGradingVersion.exam_question_id == version.exam_question_id)
@@ -429,6 +471,8 @@ def active_version_for(db: Session, *, question_kind: str,
     query = select(JudgeGradingVersion).where(JudgeGradingVersion.status == "active")
     if question_kind == "assignment":
         query = query.where(JudgeGradingVersion.judge_question_id == question_id)
+    elif question_kind == "practice_problem":
+        query = query.where(JudgeGradingVersion.practice_problem_id == question_id)
     else:
         query = query.where(JudgeGradingVersion.exam_question_id == question_id)
     return db.scalars(query.order_by(JudgeGradingVersion.version.desc()).limit(1)).first()
@@ -516,7 +560,7 @@ def bind_exam_answer_version(db: Session, answer: ExamAnswer) -> int | None:
 def set_question_current_version(db: Session, *, question_kind: str, question_id: int,
                                  version_id: int | None) -> None:
     """更新题目的 current_grading_version_id（启用/退役时保持一致）。"""
-    model = JudgeQuestion if question_kind == "assignment" else ExamQuestion
+    model = question_model_for(question_kind)
     db.execute(update(model).where(model.id == question_id).values(
         current_grading_version_id=version_id))
     db.flush()
@@ -555,13 +599,27 @@ def enablement_preflight(db: Session, *, question_kind: str, question_id: int) -
       版本，不受后续切换影响；
     * ``blocking`` / ``warnings``：给调用方直接展示的结论。
     """
-    if question_kind not in ("assignment", "exam"):
-        raise GradingVersionError("question_kind 必须是 assignment 或 exam")
+    if question_kind not in ("assignment", "exam", "practice_problem"):
+        raise GradingVersionError("question_kind 必须是 assignment 或 exam 或 practice_problem")
     report: dict = {"question_kind": question_kind, "question_id": question_id,
                     "in_flight": 0, "unbound_legacy": 0, "started_exams": 0,
                     "active_version": None, "blocking": [], "warnings": []}
 
-    if question_kind == "assignment":
+    if question_kind == "practice_problem":
+        from app.models.practice import PracticeSubmission
+
+        in_flight = db.scalar(
+            select(func.count()).select_from(PracticeSubmission).where(
+                PracticeSubmission.problem_id == question_id,
+                PracticeSubmission.grading_status.in_(IN_FLIGHT_STATUSES))
+        ) or 0
+        unbound = db.scalar(
+            select(func.count()).select_from(PracticeSubmission).where(
+                PracticeSubmission.problem_id == question_id,
+                PracticeSubmission.grading_version_id.is_(None),
+                PracticeSubmission.grading_status.notin_(IN_FLIGHT_STATUSES))
+        ) or 0
+    elif question_kind == "assignment":
         in_flight = db.scalar(
             select(func.count()).select_from(Submission).where(
                 Submission.question_id == question_id,

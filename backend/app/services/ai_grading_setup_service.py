@@ -81,6 +81,11 @@ def active_key_for(question_kind: str, question_id: int) -> str:
 
 
 def _question(db: Session, question_kind: str, question_id: int):
+    if question_kind == "practice_problem":
+        # 自主练习（批次 5）：平台级公共题库，管理员复用本流水线配置 AI 评分
+        from app.models.practice import PracticeProblem
+
+        return db.get(PracticeProblem, question_id)
     model = JudgeQuestion if question_kind == "assignment" else ExamQuestion
     return db.get(model, question_id)
 
@@ -663,6 +668,16 @@ def enable_setup_job(
     if job.question_kind == "exam" and getattr(question, "question_type", "code") != "code" \
             and grading_mode != "legacy":
         raise SetupJobError("选择题只支持 legacy 模式")
+    # 练习题目口径是 deterministic|ai，评分版本口径是 legacy|active：
+    # 题目上存创作口径、版本上存版本模式，两者显式映射（否则题目 CHECK 约束会拒绝）。
+    practice_mode: str | None = None
+    version_mode = grading_mode
+    if job.question_kind == "practice_problem":
+        from app.services.practice_service import MODE_TO_VERSION_MODE
+
+        practice_mode = "ai" if grading_mode in ("active", "shadow") else "deterministic"
+        version_mode = MODE_TO_VERSION_MODE[practice_mode]
+        grading_mode = practice_mode
 
     # 分值与在途门禁：先配置错误（422），再状态冲突（409）。
     # 分值上限必须用原始测试组直接判，转换器对 F/R 不等 60/10 的报错是 409 语义，
@@ -694,7 +709,7 @@ def enable_setup_job(
     question.test_groups = group_dicts
     if score_cap_rules is not None:
         question.score_cap_rules = list(score_cap_rules)
-    if job.requested_grading_mode is not None:
+    if job.requested_grading_mode is not None or practice_mode is not None:
         question.grading_mode = grading_mode
     db.flush()
 
@@ -713,7 +728,7 @@ def enable_setup_job(
                           "source": "ai_setup"},
         rubric_id=rubric_row.id,
         source_kind="ai_draft",
-        grading_mode_snapshot=grading_mode,
+        grading_mode_snapshot=version_mode,
         actor_id=actor.id,
         commit=False,
     )

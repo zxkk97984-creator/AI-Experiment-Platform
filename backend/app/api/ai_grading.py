@@ -68,6 +68,18 @@ def _lock_retry_target_and_validate_source(db: Session, cg: CodeGrade):
         if target is not None and (target.manual_score_at is not None
                                    or target.manual_score_reason is not None):
             raise api_error(409, "MANUAL_SCORE_FINAL", "人工最终分已生效，不能重试或重评 AI 分")
+    elif cg.practice_submission_id:
+        # 自主练习（批次 5）：目标行锁与判题认领同一把栅栏，锁序仍是 target → CodeGrade
+        from app.models.practice import PracticeSubmission
+
+        target = db.scalar(select(PracticeSubmission)
+                           .where(PracticeSubmission.id == cg.practice_submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        target_kind = "practice_submission"
+        version_id = target.grading_version_id if target is not None else None
+        target_id = cg.practice_submission_id
+        if target is not None and target.grading_status in ("queued", "running"):
+            raise api_error(409, "GRADING_IN_PROGRESS", "练习判题仍在进行，请稍后重试")
     else:
         raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
     if target is None or version_id is None:
@@ -108,6 +120,15 @@ def _lock_override_target(db: Session, cg: CodeGrade):
                            .with_for_update().execution_options(populate_existing=True))
         manual_final = target is not None and (target.manual_score_at is not None
                                                or target.manual_score_reason is not None)
+    elif cg.practice_submission_id:
+        # 自主练习：练习提交自身的人工/最终分不在本通道维护，
+        # 这里只保证行锁顺序（target → CodeGrade）与在途判题拒绝。
+        from app.models.practice import PracticeSubmission
+
+        target = db.scalar(select(PracticeSubmission)
+                           .where(PracticeSubmission.id == cg.practice_submission_id)
+                           .with_for_update().execution_options(populate_existing=True))
+        manual_final = False
     else:
         raise api_error(409, "GRADING_TARGET_MISSING", "评分记录没有绑定提交")
 
@@ -176,6 +197,9 @@ def _ensure_course_teacher(db: Session, course_id: int, user: User):
     """验证用户是该课程的教师或 admin"""
     if user.role == "admin":
         return
+    if course_id == 0:
+        # course_id==0 是平台级目标（自主练习题库）的哨兵值：只有管理员可写
+        raise api_error(403, "FORBIDDEN", "自主练习题库仅管理员可维护")
     course = db.get(Course, course_id)
     if not course:
         raise api_error(404, "NOT_FOUND", "课程不存在")
@@ -207,7 +231,14 @@ def _get_course_id_for_question(db: Session, kind: str, question_id: int) -> int
             raise api_error(404, "NOT_FOUND", "考试不存在")
         db.info["teaching_question_task"] = e
         return e.course_id
-    raise api_error(400, "INVALID_KIND", "kind 必须为 assignment 或 exam")
+    elif kind == "practice_problem":
+        # 平台级公共题库：没有课程归属，返回哨兵 0（写权限由 _ensure_course_teacher 收口）
+        from app.models.practice import PracticeProblem
+
+        if db.get(PracticeProblem, question_id) is None:
+            raise api_error(404, "NOT_FOUND", "练习题不存在")
+        return 0
+    raise api_error(400, "INVALID_KIND", "kind 必须为 assignment、exam 或 practice_problem")
 
 
 def _teacher_course_ids(db: Session, user: User) -> list[int]:
@@ -221,7 +252,15 @@ def _teacher_course_ids(db: Session, user: User) -> list[int]:
 
 
 def _check_grade_permission(db: Session, cg: CodeGrade, user: User):
-    """验证教师有权访问该评分记录——fail-closed（关联缺失时拒绝）"""
+    """验证教师有权访问该评分记录——fail-closed（关联缺失时拒绝）
+
+    自主练习不属于任何课程：教师一律 403（拿不到学生源码与他人评分详情），
+    练习评分只对管理员与提交者本人开放。
+    """
+    if cg.practice_submission_id:
+        if user.role != "admin":
+            raise api_error(403, "FORBIDDEN", "自主练习评分仅管理员与提交者本人可见")
+        return
     course_ids = _teacher_course_ids(db, user)
     if not course_ids:
         raise api_error(403, "FORBIDDEN", "无权操作")
@@ -597,6 +636,9 @@ def _build_grade_base_query(db: Session, user: User, kind: str | None,
             )
             query = query.where(permission_filter)
             count_q = count_q.where(permission_filter)
+        # 练习评分不进正式 AI 复核列表：练习由管理员在练习复核页处理
+        query = query.where(CodeGrade.practice_submission_id.is_(None))
+        count_q = count_q.where(CodeGrade.practice_submission_id.is_(None))
 
     # question_id 筛选：需要时添加 JOIN（admin 可能尚未 JOIN 相关表）
     if question_id is not None:
@@ -742,6 +784,9 @@ def get_grade_detail(
     cg = db.get(CodeGrade, grade_id)
     if cg is None:
         raise api_error(404, "NOT_FOUND", "评分记录不存在")
+    if cg.practice_submission_id and current_user.role != "admin":
+        # 练习详情可能带学生源码与评分明细：教师一律 403，绝不静默返回空字段
+        raise api_error(403, "FORBIDDEN", "自主练习评分仅管理员可见")
 
     # 权限：fail-closed——关联缺失时拒绝访问
     if current_user.role != "admin":
@@ -1018,6 +1063,13 @@ def _apply_grade_override(
             finalize_if_ready(target.submission_id, db)
             # 教师覆盖确认是显式受控动作：失败原因已消除则收口
             promote_review_required_if_complete(target.submission_id, db)
+        elif cg.practice_submission_id:
+            # 自主练习：管理员改分与 CodeGrade 同一事务落到练习提交上
+            target.score = cg.final_score_100
+            target.grading_status = "completed"
+            target.finished_at = datetime.now(timezone.utc)
+            target.last_error = None
+            target.result_revision = (target.result_revision or 0) + 1
 
     # 使任何滞留认领失效：ai_claim_guard 要求 status=='running' 且 claim_token 匹配，
     # 清空后晚到的 AI 终态写入必然被栅栏拒绝，不会静默回退本次覆盖。

@@ -132,9 +132,10 @@ class PracticeSubmission(TimestampMixin, Base):
     grading_version_id: Mapped[int | None] = mapped_column(
         ForeignKey("judge_grading_versions.id"), nullable=True, index=True
     )
-    code_grade_id: Mapped[int | None] = mapped_column(
-        ForeignKey("code_grades.id"), nullable=True
-    )
+    # 不加外键：``code_grades.practice_submission_id`` 已经反向指向本表，
+    # 这里再建 FK 会形成循环外键依赖，导致 Base.metadata.drop_all 无法排序
+    # （测试 teardown 全库崩）。权威关联以 code_grades.practice_submission_id 为准。
+    code_grade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # ── 判题状态与结果（认领栅栏：claim_token 用于条件 UPDATE，绝不裸赋值写分） ──
     grading_status: Mapped[str] = mapped_column(String(20), default="queued")
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

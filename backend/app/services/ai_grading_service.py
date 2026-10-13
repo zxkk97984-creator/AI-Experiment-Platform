@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models import (CodeGrade, ExamAnswer, ExamQuestion, ExamSubmission, JudgeQuestion,
                         QuestionRubric, Submission)
+from app.models.practice import PracticeSubmission
 from app.schemas.ai_grading import AIGradeResponse
 from app.services.ai_client import DeepSeekClient
 from app.services.ai_prompts import build_grading_messages
@@ -90,6 +91,18 @@ def grade_code_submission(
         code = answer.code_answer or ""
         target_id = grade.exam_answer_id
         target_type = "exam_answer"
+    elif grade.practice_submission_id:
+        # 自主练习（批次 5）：独立域，题目是平台级公共题库
+        # （PracticeSubmission 已在模块顶部导入，此处不可再局部导入：会让它变成
+        #  函数局部名，导致下面的 target_model 映射在前面的分支里 UnboundLocalError）
+        from app.models.practice import PracticeProblem
+
+        submission = db.get(PracticeSubmission, grade.practice_submission_id)
+        question = (db.get(PracticeProblem, submission.problem_id)
+                    if submission is not None else None)
+        code = submission.code if submission is not None else ""
+        target_id = grade.practice_submission_id
+        target_type = "practice_submission"
     else:
         raise ValueError("CodeGrade 未关联任何提交")
 
@@ -98,7 +111,11 @@ def grade_code_submission(
 
     source = (grade.deterministic_details or {}).get("source") or {}
     source_revision = source.get("result_revision")
-    target_model = Submission if target_type == "submission" else ExamAnswer
+    target_model = {
+        "submission": Submission,
+        "exam_answer": ExamAnswer,
+        "practice_submission": PracticeSubmission,
+    }[target_type]
     revision_guard = (target_model, target_id, source_revision)
     if grade.mode == "active" and (
         not isinstance(source_revision, int) or isinstance(source_revision, bool)
@@ -152,9 +169,10 @@ def grade_code_submission(
     }
 
     # A09：绑定版本优先——冻结的题面不得被后续题目修改影响
+    # （练习提交同样按绑定的评分版本快照评分，与作业提交走同一条冻结路径）
     frozen = frozen_grading_facts(
         db,
-        submission=submission if target_type == "submission" else None,
+        submission=submission if target_type in ("submission", "practice_submission") else None,
         answer=answer if target_type == "exam_answer" else None,
     )
     if grade.mode == "active" and frozen is None:
@@ -311,6 +329,14 @@ def grade_code_submission(
             related.append((ExamAnswer, grade.exam_answer_id,
                             {"score": round_score(merged.scaled_score),
                              "result_revision": ExamAnswer.result_revision + 1}))
+        elif grade.practice_submission_id:
+            # 练习：与 CodeGrade 同一事务写入正式分；确定性分保持已落库的值不变
+            related.append((PracticeSubmission, grade.practice_submission_id,
+                            {"score": merged.final_score_100,
+                             "grading_status": "completed",
+                             "last_error": None,
+                             "finished_at": datetime.now(timezone.utc),
+                             "result_revision": PracticeSubmission.result_revision + 1}))
 
     if not finish_ai_grade(
         db, code_grade_id, values, related_updates=related,

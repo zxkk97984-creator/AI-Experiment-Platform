@@ -28,7 +28,8 @@ class AiGradingSetupJob(TimestampMixin, Base):
     __tablename__ = "ai_grading_setup_jobs"
     __table_args__ = (
         CheckConstraint(
-            "question_kind IN ('assignment', 'exam')",
+            # practice_problem（批次 5）：管理员在题库编辑页复用本流水线配置 AI 评分
+            "question_kind IN ('assignment', 'exam', 'practice_problem')",
             name="ck_ai_setup_job_question_kind",
         ),
         CheckConstraint(

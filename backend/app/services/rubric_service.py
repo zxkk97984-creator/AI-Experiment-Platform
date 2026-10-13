@@ -240,6 +240,8 @@ def _target_column(kind: str):
         return QuestionRubric.judge_question_id
     if kind == "exam":
         return QuestionRubric.exam_question_id
+    if kind == "practice_problem":
+        return QuestionRubric.practice_problem_id
     raise ValueError(f"未知 kind: {kind}")
 
 
@@ -248,6 +250,8 @@ def _kind_to_column(kind: str) -> str:
         return "judge_question_id"
     if kind == "exam":
         return "exam_question_id"
+    if kind == "practice_problem":
+        return "practice_problem_id"
     raise ValueError(f"未知 kind: {kind}")
 
 
@@ -256,4 +260,6 @@ def _detect_kind(rubric: QuestionRubric) -> str:
         return "assignment"
     if rubric.exam_question_id is not None:
         return "exam"
+    if rubric.practice_problem_id is not None:
+        return "practice_problem"
     raise ValueError("Rubric 未关联任何题目")

@@ -1583,7 +1583,8 @@ def process_exam_answer(db: Session, redis_client, settings: Settings, answer_id
 # AI 评分处理
 # ═══════════════════════════════════════════════════════════════
 
-def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_id: int) -> CodeGrade:
+def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_id: int,
+                     metrics_sink=None) -> CodeGrade:
     from app.services.ai_grading_queue import claim_ai_grade, fail_ai_grade
     from app.services.ai_grading_service import grade_code_submission
     from app.services.ai_client import AIServiceError, DeepSeekClient
@@ -1605,7 +1606,7 @@ def process_ai_grade(db: Session, redis_client, settings: Settings, code_grade_i
         return None
 
     try:
-        client = DeepSeekClient(settings, metrics_sink=ai_metrics_sink())
+        client = DeepSeekClient(settings, metrics_sink=metrics_sink or ai_metrics_sink())
         cg = grade_code_submission(db, client, code_grade_id)
         # 终态（completed / review_required）已由 grade_code_submission 在**同一事务**
         # 内写入并释放认领；这里只按已提交终态推进考试汇总。
@@ -1680,6 +1681,10 @@ def _worker_queue_names(settings: Settings) -> tuple[str, ...]:
         if not settings.ai_enabled:
             return ()
         return settings.ai_queue_name, settings.ai_setup_queue_name
+    if settings.worker_role == "practice":
+        # 练习判题由 app.worker.practice_worker 独占消费 practice:*
+        # 队列；正式 worker 不监听它们，避免互相挤占容量。
+        return ()
     raise ValueError(f"unsupported worker role: {settings.worker_role}")
 
 

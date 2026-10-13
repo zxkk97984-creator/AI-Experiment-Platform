@@ -24,6 +24,14 @@ def _ai_queue_name() -> str:
     return get_settings().ai_queue_name
 
 
+def queue_name_for_code_grade(grade: CodeGrade | None) -> str:
+    """评分目标决定队列：练习走独立队列，绝不挤占正式 judge:ai:queue 容量。"""
+    settings = get_settings()
+    if grade is not None and grade.practice_submission_id:
+        return settings.practice_ai_queue_name
+    return settings.ai_queue_name
+
+
 def enqueue_ai_grade(db: Session, redis_client: Redis, code_grade_id: int) -> bool:
     """将 pending CodeGrade 条件更新为 queued 并推送 Redis。幂等：非 pending 返回 False。
 
@@ -37,10 +45,11 @@ def enqueue_ai_grade(db: Session, redis_client: Redis, code_grade_id: int) -> bo
     )
     if result.rowcount == 0:
         return False
+    queue_name = queue_name_for_code_grade(db.get(CodeGrade, code_grade_id))
     msg = json.dumps({"type": "ai_grade", "id": code_grade_id, "attempt": 0})
     db.commit()
     try:
-        redis_client.rpush(_ai_queue_name(), msg)
+        redis_client.rpush(queue_name, msg)
     except Exception:
         logger.warning("Redis 推送失败，queued 记录等待 stale recovery: grade=%s", code_grade_id)
     return True
@@ -208,7 +217,7 @@ def fail_ai_grade(
 
         record_metric(redis_client, "judge_failures_total", label="retryable")
         msg = json.dumps({"type": "ai_grade", "id": code_grade_id, "attempt": current + 1})
-        redis_client.rpush(_ai_queue_name(), msg)
+        redis_client.rpush(queue_name_for_code_grade(grade), msg)
     else:
         guard = ai_claim_guard(db, code_grade_id)
         if guard is None:
@@ -240,6 +249,11 @@ def fail_ai_grade(
             if ans:
                 from app.services.exam_grading import finalize_if_ready
                 finalize_if_ready(ans.submission_id, db)
+        # 练习 CodeGrade：AI 未完成时保留已完成的确定性分并明确标记
+        # 「AI 评分未完成」，绝不写 0 分，也不当成完整 AI 成绩。
+        if grade.practice_submission_id:
+            from app.services.practice_service import mark_practice_ai_incomplete
+            mark_practice_ai_incomplete(db, grade.practice_submission_id)
 
 
 def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
@@ -253,7 +267,6 @@ def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
     """
     recovered = {"running": 0, "queued": 0, "pending": 0}
     now = datetime.now(timezone.utc)
-    qname = _ai_queue_name()
 
     # running 超时 → queued（CAS：仍 running 且 started_at 未变；先 commit 再 rpush）
     running_threshold = now - timedelta(seconds=STALE_RUNNING_SECONDS)
@@ -287,7 +300,7 @@ def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
         db.commit()  # 先持久化状态变更
         try:
             msg = json.dumps({"type": "ai_grade", "id": grade.id, "attempt": grade.attempt_count})
-            redis_client.rpush(qname, msg)
+            redis_client.rpush(queue_name_for_code_grade(grade), msg)
         except Exception:
             logger.warning("Redis 推送失败（running→queued），等待下次恢复: grade=%s", grade.id)
         recovered["running"] += 1
@@ -317,7 +330,7 @@ def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
         db.commit()  # 先持久化
         try:
             msg = json.dumps({"type": "ai_grade", "id": grade.id, "attempt": grade.attempt_count})
-            redis_client.rpush(qname, msg)
+            redis_client.rpush(queue_name_for_code_grade(grade), msg)
         except Exception:
             logger.warning("Redis 推送失败（queued 重推），等待下次恢复: grade=%s", grade.id)
         recovered["queued"] += 1
@@ -347,7 +360,7 @@ def recover_stale_ai_grades(db: Session, redis_client: Redis) -> dict[str, int]:
         db.commit()  # 先持久化状态变更
         try:
             msg = json.dumps({"type": "ai_grade", "id": grade.id, "attempt": grade.attempt_count})
-            redis_client.rpush(qname, msg)
+            redis_client.rpush(queue_name_for_code_grade(grade), msg)
         except Exception:
             logger.warning("Redis 推送失败（pending→queued），等待下次恢复: grade=%s", grade.id)
         recovered["pending"] += 1

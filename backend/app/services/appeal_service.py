@@ -145,7 +145,34 @@ def resolve_appeal_target(
             scorable=grade is not None,
         )
 
-    # 自主练习：批次 5 接管（本轮先按不可申请处理，绝不静默接受）
+    if target_kind == "practice_submission":
+        # 自主练习（批次 5）：首期只覆盖实际参与计分的 AI 评分结果，
+        # 普通判题成绩不提供异议入口（绝不给"看似受理、实际无处受理"的假入口）。
+        from app.models.practice import PracticeProblem, PracticeSubmission
+
+        submission = db.get(PracticeSubmission, target_id)
+        if submission is None or submission.student_id != student_id:
+            raise api_error(404, "APPEAL_TARGET_NOT_FOUND", "成绩记录不存在")
+        grade = db.scalar(
+            select(CodeGrade).where(CodeGrade.practice_submission_id == submission.id))
+        if submission.grading_mode != "ai" or grade is None:
+            raise api_error(409, "APPEAL_TARGET_UNSUPPORTED",
+                            "普通判题成绩暂不支持异议申请")
+        problem = db.get(PracticeProblem, submission.problem_id)
+        visible = ((grade.finished_at if grade is not None and grade.finished_at else None)
+                   or submission.finished_at or submission.created_at)
+        return AppealTarget(
+            target_kind=target_kind, target_id=submission.id,
+            title=(problem.title if problem is not None else "练习题目"),
+            route=f"/student/practice/submissions/{submission.id}",
+            score_before=grade.final_score_100 if grade is not None else submission.score,
+            result_revision=(grade.result_revision or 0) if grade is not None
+            else (submission.result_revision or 0),
+            visible_at=visible, code_grade=grade,
+            scorable=bool(grade is not None and grade.mode == "active"),
+        )
+
+    # 未知目标类型：绝不静默接受
     raise api_error(409, "APPEAL_TARGET_UNSUPPORTED", "该成绩类型暂不支持异议申请")
 
 
@@ -362,11 +389,11 @@ def _adjust_appeal(
     score: float | None, functional_score: float | None, robustness_score: float | None,
     algorithm_score: float | None, quality_score: float | None, final_score_100: float | None,
 ) -> dict:
-    """改分：作业/考试编程题走既有 override 路径；实验走既有 lab manual_review 通道。"""
+    """改分：作业/考试编程题与自主练习走既有 override 路径；实验走既有 lab manual_review 通道。"""
     if not comment:
         raise api_error(422, "APPEAL_COMMENT_REQUIRED", "改分必须填写处理说明")
 
-    if appeal.target_kind in ("submission", "exam_answer"):
+    if appeal.target_kind in ("submission", "exam_answer", "practice_submission"):
         from app.api.ai_grading import _apply_grade_override
         from app.schemas.ai_grading import GradeOverrideCreate
 
@@ -434,7 +461,7 @@ def _regrade_appeal(
     ))
     db.flush()
 
-    if appeal.target_kind in ("submission", "exam_answer"):
+    if appeal.target_kind in ("submission", "exam_answer", "practice_submission"):
         from app.api.ai_grading import _requeue_grade
 
         grade = db.get(CodeGrade, appeal.code_grade_id) if appeal.code_grade_id else None
@@ -477,6 +504,8 @@ def resolve_regrading_appeals(db: Session, code_grade_id: int) -> list[int]:
         target_kind, target_id = "submission", grade.submission_id
     elif grade.exam_answer_id:
         target_kind, target_id = "exam_answer", grade.exam_answer_id
+    elif grade.practice_submission_id:
+        target_kind, target_id = "practice_submission", grade.practice_submission_id
     else:
         return []
 

@@ -318,7 +318,7 @@ class AISetupJobCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    question_kind: Literal["assignment", "exam"]
+    question_kind: Literal["assignment", "exam", "practice_problem"]
     question_id: int = Field(gt=0)
     reference_solution: str | None = Field(default=None, max_length=50000)
     teacher_constraints: dict[str, Any] | None = None
