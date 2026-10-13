@@ -159,6 +159,11 @@ def finish_ai_grade(db: Session, code_grade_id: int, values: dict,
             raise RelatedWriteError(
                 f"AI 评分关联写入失败（{model.__tablename__}#{pk} 未命中），已回滚: grade={code_grade_id}"
             )
+    # 批次 6：练习提交的 AI 终态分数同样要在**同一事务**内结算打卡与徽章；
+    # 只识别 practice_submissions，作业/考试的关联写入路径完全不受影响。
+    from app.services import practice_badge_service
+
+    practice_badge_service.settle_related_updates(db, related_updates)
     db.commit()
     db.expire_all()
     _forget_ai_claim(db, code_grade_id)

@@ -247,6 +247,11 @@ def publish_problem(db: Session, *, problem: PracticeProblem, actor: User) -> Ju
     problem.archived_at = None
     db.commit()
     db.refresh(problem)
+    # 批次 6：改题换版本后，旧提交立刻退出当前榜——只重算该题的提交者（定向，
+    # 不做全表聚合，也不等下一个重算周期）。
+    from app.services import practice_recalc_job
+
+    practice_recalc_job.recalc_after_problem_change(db, problem_id=problem.id)
     return version
 
 
@@ -255,6 +260,7 @@ def archive_problem(db: Session, *, problem: PracticeProblem) -> PracticeProblem
     problem.archived_at = utcnow()
     db.commit()
     db.refresh(problem)
+    # 归档不改评分版本，历史成绩的榜单口径不变（不做无谓重算）
     return problem
 
 
@@ -522,6 +528,10 @@ def mark_practice_ai_incomplete(db: Session, submission_id: int) -> None:
     if result.rowcount == 0:
         db.rollback()
         return
+    # 批次 6：AI 未完成也是终态；保留确定性分则同样结算打卡与徽章（同一事务）
+    from app.services import practice_badge_service
+
+    practice_badge_service.settle_after_terminal_write(db, submission_id)
     db.commit()
     db.expire_all()
 

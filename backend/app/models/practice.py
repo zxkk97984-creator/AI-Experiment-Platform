@@ -34,6 +34,12 @@ PRACTICE_SUBMISSION_STATUSES = (
 PRACTICE_SCOPE_KINDS = ("offering", "platform")
 PRACTICE_BOARD_KINDS = ("deterministic", "ai")
 PRACTICE_METRICS = ("submissions", "ai_tokens", "ai_amount")
+# 激励徽章只有四个（规格明确「首题／10 题／50 题／连续 7 天」）：
+#   first_solved 首题、solved_10 十题、solved_50 五十题、streak_7 连续打卡 7 天
+PRACTICE_BADGE_KEYS = ("first_solved", "solved_10", "solved_50", "streak_7")
+PRACTICE_BADGE_THRESHOLDS = {
+    "first_solved": 1, "solved_10": 10, "solved_50": 50, "streak_7": 7,
+}
 
 
 class PracticeProblem(TimestampMixin, Base):
@@ -248,3 +254,44 @@ class PracticeUsageLog(TimestampMixin, Base):
     student_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     metric: Mapped[str] = mapped_column(String(30), nullable=False)
     amount: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class PracticeBadgeAward(TimestampMixin, Base):
+    """激励徽章发放记录（批次 6）：唯一 ``(student_id, badge_key)``，绝无第二条。
+
+    发放与提交终态写入**同一事务**（见文件尾的会话钩子）：worker 重试、队列重复
+    投递、AI 结果重放都不会多发；事务回滚则徽章一起回滚，不会出现「没通关却有徽章」。
+    """
+
+    __tablename__ = "practice_badge_awards"
+    __table_args__ = (
+        CheckConstraint(
+            "badge_key IN ('first_solved', 'solved_10', 'solved_50', 'streak_7')",
+            name="ck_practice_badge_key",
+        ),
+        UniqueConstraint("student_id", "badge_key", name="uq_practice_badge_student_key"),
+        Index("ix_practice_badge_awards_student", "student_id", "awarded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    badge_key: Mapped[str] = mapped_column(String(30), nullable=False)
+    # 达成时的数值（通过题数或连续天数），用于徽章墙展示
+    progress_value: Mapped[int] = mapped_column(Integer, default=1)
+    # 触发发放的提交；用普通整数不留外键：徽章是激励记录，不参与提交表引用完整性
+    source_submission_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PracticeBoardPreference(TimestampMixin, Base):
+    """全平台榜的主动加入/退出（opt-in）：没有行 = 未加入（默认不公开）。"""
+
+    __tablename__ = "practice_board_preferences"
+    __table_args__ = (
+        UniqueConstraint("student_id", name="uq_practice_board_pref_student"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    platform_opt_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

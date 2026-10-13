@@ -570,6 +570,7 @@ onMounted(loadDashboard)
                 <div class="row-wrap">
                   <button type="button" class="btn btn-primary btn-sm" @click="router.push('/student/practice')">开始练习</button>
                   <button type="button" class="btn btn-secondary btn-sm" @click="router.push('/student/practice/mine')">我的练习</button>
+                  <button type="button" class="btn btn-secondary btn-sm" @click="router.push('/student/practice/leaderboard')">练习排行榜</button>
                 </div>
               </div>
             </article>

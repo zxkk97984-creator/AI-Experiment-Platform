@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     # 单次 AI 提交预扣的 token 估算值：日预算扣减以 practice_usage_logs 为准
     practice_ai_token_estimate: int = Field(default=6000, ge=500, le=200000)
     practice_queue_poll_seconds: float = Field(default=2, gt=0, le=60)
+    # 批次 6：练习统计/榜单重算（请求路径只读快照，重算在 scheduler_lease 下按间隔执行）
+    practice_stats_recalc_enabled: bool = True
+    practice_stats_recalc_seconds: float = Field(default=300, ge=30, le=3600)
 
     @property
     def ai_ready(self) -> bool:

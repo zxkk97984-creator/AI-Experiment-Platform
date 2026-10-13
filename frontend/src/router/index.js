@@ -41,6 +41,7 @@ const routes = [
   // 自主练习（批次 5）：中心 / 我的练习 / 作答 / 作答反馈
   { path: '/student/practice', name: 'StudentPractice', component: () => import('../views/student/PracticeCenterView.vue'), meta: { role: 'student' } },
   { path: '/student/practice/mine', name: 'StudentPracticeMine', component: () => import('../views/student/PracticeMineView.vue'), meta: { role: 'student' } },
+  { path: '/student/practice/leaderboard', name: 'StudentPracticeLeaderboard', component: () => import('../views/student/PracticeLeaderboardView.vue'), meta: { role: 'student' } },
   { path: '/student/practice/problems/:id', name: 'StudentPracticeProblem', component: () => import('../views/student/PracticeProblemView.vue'), meta: { role: 'student' } },
   { path: '/student/practice/submissions/:id', name: 'StudentPracticeSubmission', component: () => import('../views/student/PracticeSubmissionView.vue'), meta: { role: 'student' } },
 

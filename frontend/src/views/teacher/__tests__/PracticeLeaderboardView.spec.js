@@ -4,10 +4,11 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createWebHistory } from 'vue-router'
 import { createPinia } from 'pinia'
 
-const api = vi.hoisted(() => ({ leaderboard: vi.fn() }))
+const api = vi.hoisted(() => ({ leaderboard: vi.fn(), setOptIn: vi.fn(), getOverview: vi.fn(), getOptIn: vi.fn(), recalculate: vi.fn() }))
 const offerings = vi.hoisted(() => ({ list: vi.fn() }))
 
-vi.mock('../../../api/practice.js', () => ({ practiceAPI: api, adminPracticeAPI: {} }))
+// 批次 6 起教师页复用学生的榜单组件，走 practiceSocialAPI（快照口径 + opt-in 状态）
+vi.mock('../../../api/practice.js', () => ({ practiceAPI: {}, practiceSocialAPI: api, adminPracticeAPI: {} }))
 vi.mock('../../../api/offerings.js', () => ({ offeringsAPI: offerings }))
 
 import PracticeLeaderboardView from '../PracticeLeaderboardView.vue'
@@ -46,7 +47,7 @@ describe('PracticeLeaderboardView', () => {
   it('默认展示全平台普通测试榜且无写操作入口', async () => {
     const wrapper = await mountView()
     await flushPromises()
-    expect(api.leaderboard).toHaveBeenCalledWith({ scope: 'platform', scope_id: undefined, board: 'deterministic' })
+    expect(api.leaderboard).toHaveBeenCalledWith({ scope: 'platform', scope_id: undefined, board: 'deterministic', view: 'top' })
     expect(wrapper.text()).toContain('勤勉的海豚')
     expect(wrapper.text()).toContain('普通测试榜')
     expect(wrapper.text()).not.toContain('发布')
@@ -60,7 +61,7 @@ describe('PracticeLeaderboardView', () => {
     const aiBtn = wrapper.findAll('button').find((btn) => btn.text() === 'AI 综合榜')
     await aiBtn.trigger('click')
     await flushPromises()
-    expect(api.leaderboard).toHaveBeenLastCalledWith({ scope: 'platform', scope_id: undefined, board: 'ai' })
+    expect(api.leaderboard).toHaveBeenLastCalledWith({ scope: 'platform', scope_id: undefined, board: 'ai', view: 'top' })
   })
 
   it('切到班内榜会带上班级 id', async () => {
@@ -70,7 +71,7 @@ describe('PracticeLeaderboardView', () => {
     await offeringBtn.trigger('click')
     await flushPromises()
     // 只有一个教学班时自动选中并请求
-    expect(api.leaderboard).toHaveBeenLastCalledWith({ scope: 'offering', scope_id: 3, board: 'deterministic' })
+    expect(api.leaderboard).toHaveBeenLastCalledWith({ scope: 'offering', scope_id: 3, board: 'deterministic', view: 'top' })
   })
 
   it('还没有人完成时展示空态', async () => {

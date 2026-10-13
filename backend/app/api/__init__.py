@@ -76,3 +76,6 @@ api_router.include_router(practice_router)
 
 from .admin_practice import router as admin_practice_router  # noqa: E402
 api_router.include_router(admin_practice_router)
+
+from .practice_social import router as practice_social_router  # noqa: E402
+api_router.include_router(practice_social_router)

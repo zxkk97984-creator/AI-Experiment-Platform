@@ -52,6 +52,7 @@ const menuItems = computed(() => {
     { path: '/student/notifications', label: '通知中心', sub: 'Notifications', icon: 'notification', key: 'notifications' },
     { path: '/student/practice',      label: '自主练习', sub: 'Practice',      icon: 'code',         key: 'practice' },
     { path: '/student/practice/mine', label: '我的练习', sub: 'My Practice',   icon: 'clipboard',    key: 'practice-mine' },
+    { path: '/student/practice/leaderboard', label: '练习排行榜', sub: 'Practice Board', icon: 'trophy', key: 'practice-board-student' },
   ]
   if (auth.isTeacher) return [
     { path: '/teacher',                label: '工作台',     sub: 'Workbench',     icon: 'home',        key: 'home' },

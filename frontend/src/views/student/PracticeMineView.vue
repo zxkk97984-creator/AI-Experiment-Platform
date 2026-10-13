@@ -9,11 +9,14 @@ import AppIcon from '../../components/ui/AppIcon.vue'
 import UiStatusPill from '../../components/ui/UiStatusPill.vue'
 import StudentPagination from '../../components/student/StudentPagination.vue'
 import PracticeNotice from '../../components/practice/PracticeNotice.vue'
+import PracticeBadgeWall from '../../components/practice/PracticeBadgeWall.vue'
+import PracticeCheckinCalendar from '../../components/practice/PracticeCheckinCalendar.vue'
+import PracticeGrowthChart from '../../components/practice/PracticeGrowthChart.vue'
 import { listErrorVisible, usePracticeLoad } from '../../components/practice/usePracticeLoad.js'
 import {
   difficultyMeta, formatScore, gradingModeMeta, gradingStatusMeta, listOf, queuePositionText,
 } from '../../components/practice/practiceHelpers.js'
-import { practiceAPI } from '../../api/practice.js'
+import { practiceAPI, practiceSocialAPI } from '../../api/practice.js'
 import { formatDateTime } from '../../utils/format.js'
 
 const router = useRouter()
@@ -31,6 +34,21 @@ const { loading, error, forbidden, quotaExhausted, load } = usePracticeLoad(asyn
   total.value = Number(res.data?.total ?? history.value.length)
   return res
 }, { fallbackMessage: '练习统计加载失败，请稍后重试' })
+
+// 批次 6 激励数据：打卡日历 / 徽章墙 / 近 30 天成长曲线（独立加载，失败不拖垮历史列表）
+const incentive = ref({})
+const {
+  loading: incentiveLoading,
+  error: incentiveError,
+  forbidden: incentiveForbidden,
+  load: loadIncentive,
+} = usePracticeLoad(async () => {
+  const res = await practiceSocialAPI.getOverview()
+  incentive.value = res.data || {}
+  return res
+}, { fallbackMessage: '练习激励数据加载失败，请稍后重试' })
+
+const todayIso = new Date().toISOString().slice(0, 10)
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
 const metrics = computed(() => [
@@ -62,7 +80,10 @@ function rowScore(row) {
   return row.max_score ? `${formatScore(row.score)} / ${formatScore(row.max_score)}` : formatScore(row.score)
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadIncentive()
+})
 </script>
 
 <template>
@@ -106,6 +127,25 @@ onMounted(load)
         </div>
       </div>
       <p v-if="hasCap && !quotaExhausted" class="quota-line">{{ quotaText }}</p>
+
+      <DashboardAsyncState
+        v-if="!forbidden"
+        :loading="incentiveLoading"
+        :error="listErrorVisible(incentiveError, incentiveForbidden)"
+        :empty="false"
+        @retry="loadIncentive"
+      >
+        <div class="incentive">
+          <PracticeCheckinCalendar
+            :active-dates="incentive.checkin?.active_dates || []"
+            :days="incentive.checkin?.days || 30"
+            :streak-days="incentive.summary?.streak_days || 0"
+            :today="todayIso"
+          />
+          <PracticeBadgeWall :badges="incentive.badges || []" />
+          <PracticeGrowthChart :points="incentive.growth || []" />
+        </div>
+      </DashboardAsyncState>
 
       <DashboardAsyncState
         :loading="loading"
@@ -175,6 +215,7 @@ onMounted(load)
 <style scoped>
 .practice-mine { display: flex; flex-direction: column; gap: var(--space-4); }
 .metric .m-value small { margin-left: 2px; font-size: var(--text-sm); color: var(--muted); }
+.incentive { display: flex; flex-direction: column; gap: var(--space-4); }
 .quota-line { margin: 0; color: var(--muted); font-size: var(--text-sm); }
 .title-cell { white-space: normal; overflow-wrap: anywhere; max-width: 320px; }
 .time { color: var(--muted); }

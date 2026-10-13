@@ -134,6 +134,11 @@ def apply_guarded_update(db: Session, submission_id: int, values: dict, *,
         db.rollback()
         logger.warning("练习判题写入被栅栏拒绝（已失去认领）: id=%s", submission_id)
         return False
+    # 批次 6：终态写入与激励结算**同一事务**（统计重算 + 徽章补发，见 practice_badge_service）。
+    # 中间态（running）在结算函数内部直接返回，不做额外工作。
+    from app.services import practice_badge_service
+
+    practice_badge_service.settle_after_terminal_write(db, submission_id)
     db.commit()
     db.expire_all()
     if release_claim:
@@ -210,6 +215,10 @@ def fail_submission(
     if result.rowcount == 0:
         db.rollback()
         return
+    # 批次 6：review_required 也是终态；若保留了确定性分则同样结算激励（空分不发徽章）
+    from app.services import practice_badge_service
+
+    practice_badge_service.settle_after_terminal_write(db, submission_id)
     db.commit()
     db.expire_all()
     _forget_claim(db, submission_id)
