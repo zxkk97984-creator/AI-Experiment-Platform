@@ -21,13 +21,15 @@
    “容器 RCE 后主机控制”风险，本任务以专用主机 + 风险接受方式处理；
    远程 Runner 为独立项目，触发条件见 §5。
 
-## 2. Socket 持有者清单（2026-09-26 更新）
+## 2. Socket 持有者清单（2026-10-14 更新）
 
 | 服务 | 是否挂载 Socket | 用途 |
 | --- | --- | --- |
 | api | 是 | 同步判题路径（legacy 判题/实验执行）需要启动判题容器 |
 | worker | 是 | 确定性作业/考试队列消费者，启动判题容器 |
 | lab-worker | 是 | 实验训练、独立推理与检查容器的可信调度控制进程 |
+| kernel-worker | 是 | 独立消费异步单元格队列并接管/管理持久交互内核 |
+| practice-worker | 是 | 独立队列中的自主练习确定性 F/R 判题；AI 阶段仍由无 Socket 的 ai-worker 处理 |
 | account-worker | 否 | 账号批次与密码摘要，不执行学生代码 |
 | ai-worker | 否 | 可选 AI 队列消费者；只调用 AI 服务，不执行 Docker 判题，默认 profile 不启动 |
 | environment-builder | 是 | 环境档位镜像构建（低频管理任务） |
@@ -36,7 +38,9 @@
 守护：`backend/tests/automated/test_docker_socket_isolation.py` 断言清单
 与 `docker-compose.prod.yml` 一致（多挂少挂都失败），并明确断言 `ai-worker`
 不继承 Docker Socket、`judge-work` 或 Registry Secret。AI worker 的队列/角色隔离
-由 `test_phase4_worker_isolation.py` 一并守护。
+由 `test_phase4_worker_isolation.py` 一并守护。`kernel-worker` 与 `practice-worker`
+只获得各自运行职责所需的 Docker 权限，不共享 Redis 队列或判题容量；完整试判的 AI 阶段
+仍运行在不挂 Docker Socket 的 `ai-worker` 中。
 
 实验升级新增 `lab-worker`：它是可信调度控制进程，持有 Docker socket，用于创建训练、推理与检查容器；学生容器永不继承 socket、数据库／对象存储凭据或 AI 密钥。任务仅挂载对应公开数据或无标签测试输入，隐藏标签由容器退出后的平台评分器读取。运行目录使用有容量上限的临时卷，停止和回收必须确认容器删除后才释放资源。
 

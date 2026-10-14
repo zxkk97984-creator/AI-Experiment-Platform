@@ -102,7 +102,7 @@ AI 生产开关默认关闭。开启前必须完成 [`docs/ai-data-governance.md
 └── README.md
 ```
 
-`docs/archive/` 只保存历史调查、收口报告和已完成计划，不作为当前运行或部署依据。构建产物、依赖目录、测试截图、`.env` 和 `judge-work/` 均不应提交。
+构建产物、依赖目录、测试截图、`.env` 和 `judge-work/` 均不应提交。
 
 ## 环境要求
 
@@ -722,7 +722,6 @@ BASE_URL=http://localhost:8080 ./scripts/check_security_headers.sh
 ## 当前文档地图
 
 - [`docs/架构设计总览.md`](docs/架构设计总览.md)：当前系统怎么设计；
-- [`docs/系统完善规划.md`](docs/系统完善规划.md)：全量源码审查结论——现状速览、待修严重问题、功能需求落地设计；
 - [`docs/environment-profiles.md`](docs/environment-profiles.md)：环境 V2、迁移、Registry 和运维；
 - [`docs/demo-data.md`](docs/demo-data.md)：Demo 数据播种与验证；
 - [`docs/backup-restore.md`](docs/backup-restore.md)：备份恢复上线边界；
@@ -731,4 +730,3 @@ BASE_URL=http://localhost:8080 ./scripts/check_security_headers.sh
 - [`docs/dai-design-system-v2.md`](docs/dai-design-system-v2.md)：前端设计系统；
 - [`docs/security/`](docs/security/)：Docker socket、TLS、安全依赖和安全头；
 - [`DAI智能代码评分方案_V1.md`](DAI智能代码评分方案_V1.md)：AI 代码评分公式和 Rubric 设计方案；
-- [`docs/archive/`](docs/archive/)：历史报告和已完成计划，仅供追溯。
