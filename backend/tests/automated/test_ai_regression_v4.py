@@ -267,7 +267,10 @@ class TestOverrideScaledScore:
                                 source_hash="orp", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=now)
             db.add(rub); db.flush()
-            es = ExamSubmission(exam_id=exam.id, student_id=student.id, status="grading")
+            es = ExamSubmission(
+                exam_id=exam.id, student_id=student.id, status="grading",
+                grading_version_map={str(eq.id): {"version_id": None, "points": float(eq.points)}},
+            )
             db.add(es); db.flush()
             ea = ExamAnswer(submission_id=es.id, question_id=eq.id, code_answer="x",
                            grading_status="completed", score=4.8)
@@ -312,7 +315,10 @@ class TestOverrideScaledScore:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=now)
             db.add(rub); db.flush()
-            es = ExamSubmission(exam_id=exam.id, student_id=student.id, status="grading")
+            es = ExamSubmission(
+                exam_id=exam.id, student_id=student.id, status="grading",
+                grading_version_map={str(eq.id): {"version_id": None, "points": float(eq.points)}},
+            )
             db.add(es); db.flush()
             ea = ExamAnswer(submission_id=es.id, question_id=eq.id, code_answer="x",
                            grading_status="completed", score=15)  # 原来的折算分
@@ -364,7 +370,10 @@ class TestOverrideScaledScore:
                                 source_hash="a", source_snapshot={}, rubric_json={},
                                 model_name="m", locked_at=now)
             db.add(rub); db.flush()
-            es = ExamSubmission(exam_id=exam.id, student_id=student.id, status="grading")
+            es = ExamSubmission(
+                exam_id=exam.id, student_id=student.id, status="grading",
+                grading_version_map={str(eq.id): {"version_id": None, "points": float(eq.points)}},
+            )
             db.add(es); db.flush()
             ea = ExamAnswer(submission_id=es.id, question_id=eq.id, code_answer="x",
                            grading_status="completed", score=10)  # 旧折算分=10

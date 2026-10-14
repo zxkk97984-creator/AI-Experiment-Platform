@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -329,6 +331,9 @@ def test_retry_resumes_failed_stage_and_keeps_draft(
     _patch_ai(monkeypatch, fail_groups=False)
     response = client.post(f"{API}/setup-jobs/{job_id}/retry", headers=headers)
     assert response.status_code == 202, response.text
+    assert response.json()["stage"] == "queued"
+    first_poll = client.get(f"{API}/setup-jobs/{job_id}", headers=headers)
+    assert first_poll.status_code == 200 and first_poll.json()["stage"] == "queued"
     _run_job(db_session_factory, test_settings, redis_client, job_id)
 
     resumed = _job(db_session_factory, job_id)
@@ -407,17 +412,49 @@ def test_trial_run_creates_no_submission_and_consumes_no_attempts(
     job_id = _create_job(client, headers, world)["id"]
     _run_job(db_session_factory, test_settings, redis_client, job_id)
 
+    # Legacy drafts can omit these values; trial snapshot should fall back to
+    # the active version (or question defaults) instead of referencing an
+    # uninitialized local.
+    with db_session_factory() as db:
+        job = db.get(AiGradingSetupJob, job_id)
+        job.draft_compare_rules = None
+        job.draft_score_cap_rules = None
+        db.commit()
+
     # 另建一条真实提交作为对照样本：试判不得动它
     other_submission_id = make_submission(db_session_factory, attempt_count=3)
     before = _table_counts(db_session_factory)
 
     created = client.post(
         f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
-        json={"code": "def solve(n):\n    return n", "client_request_id": "trial-1"},
+        json={"expected_revision": _job(db_session_factory, job_id).draft_revision,
+              "code": "def solve(n):\n    return n", "client_request_id": "trial-1"},
     )
     assert created.status_code == 202, created.text
     run_id = created.json()["id"]
+    current = client.get(f"{API}/setup-jobs/{job_id}", headers=headers).json()
+    edited_rubric = copy.deepcopy(current["draft_rubric"])
+    edited_rubric["algorithm_criteria"][0]["description"] = "修改发生在试判排队之后"
+    edited = client.patch(f"{API}/setup-jobs/{job_id}/draft", headers=headers, json={
+        "expected_revision": current["draft_revision"],
+        "rubric": edited_rubric,
+        "test_groups": current["draft_test_groups"],
+        "entry_function": current["draft_entry_function"],
+        "teacher_constraints": current["draft_teacher_constraints"],
+        "compare_rules": current["draft_compare_rules"],
+        "score_cap_rules": current["draft_score_cap_rules"],
+    })
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["draft_revision"] == 2
 
+    from app.worker import judge_worker
+    monkeypatch.setattr(judge_worker, "run_test_groups", lambda *args, **kwargs: {
+        "results": {"F1": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0},
+                    "R1": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0}},
+        "system_errors": [],
+    })
+    with db_session_factory() as db:
+        setup.run_trial_deterministic(db, redis_client, test_settings, run_id)
     with db_session_factory() as db:
         setup.run_trial_run(db, redis_client, test_settings, run_id)
 
@@ -426,14 +463,23 @@ def test_trial_run_creates_no_submission_and_consumes_no_attempts(
         assert db.get(Submission, other_submission_id).attempt_count == 3
         run = db.get(RubricTrialRun, run_id)
         assert run.status == "completed", run.error_message
+        assert run.stage == "completed" and run.trial_type == "full"
+        assert run.draft_revision == 1
         assert run.algorithm_score == 20.0
         assert run.quality_score == 10.0
-        assert run.preview_score_100 == 30.0, "试判只预览 AI 维度（A+Q），不含确定性 F/R"
+        assert run.functional_score == 60.0 and run.robustness_score == 10.0
+        assert run.preview_score_100 == 100.0 and run.total_score == 100.0
+        assert run.complete is True
+        assert run.candidate_snapshot["draft_revision"] == 1
+        assert "修改发生在试判排队之后" not in str(run.candidate_snapshot["rubric"])
         assert run.ai_result["student_feedback"]["strengths"] == ["结构清晰"]
 
         detail = client.get(f"{API}/trial-runs/{run_id}", headers=headers)
         assert detail.status_code == 200
-        assert detail.json()["includes_deterministic"] is False
+        assert detail.json()["includes_deterministic"] is True
+        assert detail.json()["complete"] is True
+        assert detail.json()["stale_draft"] is True
+        assert detail.json()["current_draft_revision"] == 2
 
 
 def test_trial_run_client_request_id_is_idempotent(
@@ -445,13 +491,21 @@ def test_trial_run_client_request_id_is_idempotent(
     _run_job(db_session_factory, test_settings, redis_client, job_id)
 
     first = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
-                        json={"code": "def solve():\n    return 1",
+                        json={"expected_revision": _job(db_session_factory, job_id).draft_revision,
+                              "code": "def solve():\n    return 1",
                               "client_request_id": "same-request"})
-    second = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
-                         json={"code": "def solve():\n    return 2",
+    replay = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
+                         json={"expected_revision": _job(db_session_factory, job_id).draft_revision,
+                               "code": "def solve():\n    return 1",
                                "client_request_id": "same-request"})
-    assert first.status_code == 202 and second.status_code == 202
-    assert first.json()["id"] == second.json()["id"]
+    conflict = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
+                         json={"expected_revision": _job(db_session_factory, job_id).draft_revision,
+                               "code": "def solve():\n    return 2",
+                               "client_request_id": "same-request"})
+    assert first.status_code == 202 and replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "TRIAL_IDEMPOTENCY_CONFLICT"
     with db_session_factory() as db:
         assert db.scalar(select(func.count()).select_from(RubricTrialRun)) == 1
 
@@ -468,9 +522,185 @@ def test_trial_run_requires_draft_rubric(client, db_session_factory, world):
         job_id = job.id
     headers = _headers(client)
     response = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers,
-                           json={"code": "def solve():\n    return 1"})
+                           json={"expected_revision": 0, "code": "def solve():\n    return 1"})
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "INVALID_STATE"
+
+
+def test_setup_get_does_not_mutate_expired_job_but_worker_scan_recovers_it(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    from datetime import datetime, timedelta, timezone
+
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)["id"]
+    with db_session_factory() as db:
+        job = db.get(AiGradingSetupJob, job_id)
+        job.stage = "generating_rubric"
+        job.lease_token = "expired-lease"
+        job.lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.commit()
+    polled = client.get(f"{API}/setup-jobs/{job_id}", headers=headers)
+    assert polled.status_code == 200 and polled.json()["stage"] == "generating_rubric"
+    with db_session_factory() as db:
+        assert db.get(AiGradingSetupJob, job_id).stage == "generating_rubric"
+        stats = setup.recover_durable_setup_work(db, redis_client, include_ai=False)
+    assert stats["expired_setup_jobs"] == 1
+    recovered = client.get(f"{API}/setup-jobs/{job_id}", headers=headers)
+    assert recovered.json()["stage"] == "failed"
+    assert recovered.json()["error_code"] == "SETUP_JOB_INTERRUPTED"
+
+
+def test_persistent_scan_wakes_database_queued_setup_and_trial_work(
+    db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    redis_client.flushdb()
+    with db_session_factory() as db:
+        job, created = setup.create_or_get_job(
+            db, question_kind="assignment", question_id=world.question_id,
+            teacher_id=1, reference_solution="def solve(n): return n", generate_test_groups=True,
+        )
+        assert created
+        job_id = job.id
+        stats = setup.recover_durable_setup_work(db, redis_client, include_ai=True)
+        assert stats["setup_jobs"] == 1
+    setup_message = json.loads(redis_client.rpop(test_settings.ai_setup_queue_name))
+    assert setup_message["type"] == "ai_setup" and setup_message["id"] == job_id
+
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    with db_session_factory() as db:
+        job = db.get(AiGradingSetupJob, job_id)
+        run, created = setup.create_trial_run(
+            db, job=job, teacher_id=1, code="def solve(n): return n",
+            client_request_id="scan-trial", expected_revision=1, settings=test_settings,
+        )
+        assert created
+        run_id = run.id
+        trial_stats = setup.recover_durable_setup_work(
+            db, redis_client, deterministic_kinds={"assignment"}, include_ai=False)
+        assert trial_stats["deterministic_trials"] == 1
+    trial_message = json.loads(redis_client.rpop(test_settings.judge_queue_name))
+    assert trial_message["type"] == "trial_deterministic" and trial_message["id"] == run_id
+
+
+def test_editable_draft_saves_by_revision_and_enable_uses_saved_candidate(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)["id"]
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    current = client.get(f"{API}/setup-jobs/{job_id}", headers=headers).json()
+    assert current["draft_revision"] == 1
+    rubric = copy.deepcopy(current["draft_rubric"])
+    rubric["algorithm_criteria"][0]["description"] = "明确检查边界并解释理由"
+    groups = copy.deepcopy(current["draft_test_groups"])
+    groups[0]["tests"] = "def test_solve():\n    assert solve(2) == 2\n"
+    payload = {
+        "expected_revision": 1,
+        "rubric": rubric,
+        "test_groups": groups,
+        "entry_function": "solve",
+        "teacher_constraints": current["draft_teacher_constraints"] or {},
+        "compare_rules": current["draft_compare_rules"] or {},
+        "score_cap_rules": current["draft_score_cap_rules"] or [],
+    }
+    saved = client.patch(f"{API}/setup-jobs/{job_id}/draft", headers=headers, json=payload)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["draft_revision"] == 2
+    assert saved.json()["draft_rubric"]["algorithm_criteria"][0]["description"] == \
+        "明确检查边界并解释理由"
+    stale = client.patch(f"{API}/setup-jobs/{job_id}/draft", headers=headers, json=payload)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "DRAFT_REVISION_CONFLICT"
+
+    with db_session_factory() as db:
+        question = db.get(JudgeQuestion, world.question_id)
+        assert question.test_groups[0]["tests"] != groups[0]["tests"], \
+            "保存草稿不得提前改变题目生效配置"
+        assert versions.active_version_for(
+            db, question_kind="assignment", question_id=world.question_id) is None
+
+    missing_revision = client.post(f"{API}/setup-jobs/{job_id}/enable", headers=headers,
+                                   json={"rubric": rubric})
+    assert missing_revision.status_code == 422
+    assert missing_revision.json()["detail"]["code"] == "DRAFT_REVISION_REQUIRED"
+    stale_revision = client.post(f"{API}/setup-jobs/{job_id}/enable", headers=headers,
+                                 json={"expected_revision": 1, "rubric": rubric})
+    assert stale_revision.status_code == 409
+    assert stale_revision.json()["detail"]["code"] == "DRAFT_REVISION_CONFLICT"
+
+    enabled = client.post(f"{API}/setup-jobs/{job_id}/enable", headers=headers, json={})
+    assert enabled.status_code == 200, enabled.text
+    with db_session_factory() as db:
+        rubric_row = db.get(QuestionRubric, enabled.json()["rubric_id"])
+        assert rubric_row.rubric_json["algorithm_criteria"][0]["description"] == \
+            "明确检查边界并解释理由"
+        question = db.get(JudgeQuestion, world.question_id)
+        assert question.test_groups[0]["tests"] == groups[0]["tests"]
+
+
+def test_incomplete_deterministic_trial_has_no_total_score(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)["id"]
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    created = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers, json={
+        "expected_revision": 1, "code": "def solve(n): return n", "client_request_id": "partial-fr"})
+    assert created.status_code == 202, created.text
+    from app.worker import judge_worker
+    monkeypatch.setattr(judge_worker, "run_test_groups", lambda *args, **kwargs: {
+        "results": {"F1": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0}},
+        "system_errors": ["R group unavailable"],
+    })
+    isolated_temp_settings = test_settings.model_copy(update={
+        "judge_work_dir": "", "judge_host_work_dir": "",
+    })
+    with db_session_factory() as db:
+        setup.run_trial_deterministic(
+            db, redis_client, isolated_temp_settings, created.json()["id"])
+        run = db.get(RubricTrialRun, created.json()["id"])
+        assert run.status == "failed" and run.complete is False
+        assert run.functional_score == 60.0
+        assert run.total_score is None and run.preview_score_100 is None
+
+
+def test_ai_failure_preserves_deterministic_stage_and_never_fabricates_total(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)["id"]
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    created = client.post(f"{API}/setup-jobs/{job_id}/trial-runs", headers=headers, json={
+        "expected_revision": 1, "code": "def solve(n): return n", "client_request_id": "ai-failure"})
+    assert created.status_code == 202, created.text
+    from app.worker import judge_worker
+    monkeypatch.setattr(judge_worker, "run_test_groups", lambda *args, **kwargs: {
+        "results": {"F1": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0},
+                    "R1": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0}},
+        "system_errors": [],
+    })
+    with db_session_factory() as db:
+        setup.run_trial_deterministic(db, redis_client, test_settings, created.json()["id"])
+
+    class InvalidAIClient:
+        def __init__(self, *args, **kwargs): pass
+        def chat_json(self, *args, **kwargs): return {}
+
+    monkeypatch.setattr(setup, "DeepSeekClient", InvalidAIClient)
+    with db_session_factory() as db:
+        setup.run_trial_run(db, redis_client, test_settings, created.json()["id"])
+    with db_session_factory() as db:
+        run = db.get(RubricTrialRun, created.json()["id"])
+        assert run.status == "failed" and run.stage == "failed"
+        assert run.functional_score == 60.0 and run.robustness_score == 10.0
+        assert run.total_score is None and run.preview_score_100 is None
+        assert run.complete is False
 
 
 # ── 分值上限校验（单元层，覆盖 API schema 无法构造的越界数据） ──────
@@ -524,3 +754,62 @@ def test_setup_job_can_skip_test_group_generation(
     _run_job(db_session_factory, test_settings, redis_client, second_job)
     second_detail = client.get(f"{API}/setup-jobs/{second_job}", headers=headers).json()
     assert len(second_detail["draft_test_groups"]) == 2
+
+
+def test_enable_must_reject_revision_changed_after_api_check(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)['id']
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    current = client.get(f'{API}/setup-jobs/{job_id}', headers=headers).json()
+    old_rubric = copy.deepcopy(current['draft_rubric'])
+    new_rubric = copy.deepcopy(old_rubric)
+    new_rubric['algorithm_criteria'][0]['description'] = 'new saved revision must survive'
+    original = setup.enable_setup_job
+
+    def interleaved_enable(db, **kwargs):
+        # Preserve the ORM snapshot but release SQLite's database-wide read lock.
+        # MySQL readers permit this writer without needing the SQLite adapter.
+        job = kwargs['job']
+        db.expunge(job)
+        db.rollback()
+        # Another editor commits revision 2 after this request validated revision 1.
+        with db_session_factory() as other:
+            setup.save_setup_draft(
+                other, job_id=job_id, expected_revision=1, rubric=new_rubric,
+                test_groups=current['draft_test_groups'], entry_function='solve',
+                teacher_constraints=current['draft_teacher_constraints'] or {},
+                compare_rules=current['draft_compare_rules'] or {},
+                score_cap_rules=current['draft_score_cap_rules'] or [],
+            )
+        db.add(job)
+        return original(db, **kwargs)
+
+    monkeypatch.setattr(setup, 'enable_setup_job', interleaved_enable)
+    response = client.post(f'{API}/setup-jobs/{job_id}/enable', headers=headers,
+                           json={'expected_revision': 1, 'rubric': old_rubric})
+    assert response.status_code == 409, response.text
+
+
+def test_trial_respects_explicitly_cleared_teacher_constraints(
+    client, db_session_factory, test_settings, redis_client, world, monkeypatch,
+):
+    _patch_ai(monkeypatch)
+    headers = _headers(client)
+    job_id = _create_job(client, headers, world)['id']
+    _run_job(db_session_factory, test_settings, redis_client, job_id)
+    current = client.get(f'{API}/setup-jobs/{job_id}', headers=headers).json()
+    with db_session_factory() as db:
+        from app.models import AiGradingSetupJob
+        initial = db.get(AiGradingSetupJob, job_id)
+        initial.requested_teacher_constraints = {'requirements_text': 'old constraint removed by teacher'}
+        db.commit()
+        job = setup.save_setup_draft(
+            db, job_id=job_id, expected_revision=1, rubric=current['draft_rubric'],
+            test_groups=current['draft_test_groups'], entry_function='solve',
+            teacher_constraints={}, compare_rules={}, score_cap_rules=[],
+        )
+        candidate, _ = setup.build_trial_candidate(db, job, test_settings)
+        assert candidate['teacher_constraints'] == {}, candidate['teacher_constraints']

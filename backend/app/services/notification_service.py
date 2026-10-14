@@ -43,38 +43,39 @@ def sync_user_notifications(db: Session, user: User, now: datetime | None = None
         sync_teacher_notifications(db, user, now=now)
 
 
-def _materialize(db: Session, user: User, current: dict[str, dict]) -> None:
+def _materialize(db: Session, user: User, current: dict[str, dict], *, commit: bool = True) -> None:
     """把当前可见通知物化到库：新增/更新/隐藏，已读回执保留。"""
-    existing = db.scalars(
-        select(Notification).where(Notification.recipient_id == user.id)
-    ).all()
-    by_key = {row.dedupe_key: row for row in existing}
-
-    for key, payload in current.items():
-        row = by_key.get(key)
-        if row is None:
-            db.add(Notification(
-                recipient_id=user.id,
-                dedupe_key=key,
-                **payload,
-            ))
-            continue
-        changed = False
-        for field, value in payload.items():
-            if getattr(row, field) != value:
-                setattr(row, field, value)
-                changed = True
-        if not row.visible or changed:
-            row.visible = True
-    for key, row in by_key.items():
-        if key not in current:
-            row.visible = False
-
     try:
-        db.commit()
+        # A nested transaction lets business transitions include notification
+        # materialization without allowing a uniqueness race to roll them back.
+        with db.begin_nested():
+            existing = db.scalars(
+                select(Notification).where(Notification.recipient_id == user.id)
+            ).all()
+            by_key = {row.dedupe_key: row for row in existing}
+
+            for key, payload in current.items():
+                row = by_key.get(key)
+                if row is None:
+                    db.add(Notification(recipient_id=user.id, dedupe_key=key, **payload))
+                    continue
+                changed = False
+                for field, value in payload.items():
+                    if getattr(row, field) != value:
+                        setattr(row, field, value)
+                        changed = True
+                if not row.visible or changed:
+                    row.visible = True
+            for key, row in by_key.items():
+                if key not in current:
+                    row.visible = False
+            db.flush()
+        if commit:
+            db.commit()
     except IntegrityError:
         # 多实例同时派生时唯一键冲突视为已同步
-        db.rollback()
+        if commit:
+            db.rollback()
 
 
 def sync_teacher_notifications(db: Session, user: User, now: datetime | None = None) -> None:
@@ -120,7 +121,8 @@ def sync_teacher_notifications(db: Session, user: User, now: datetime | None = N
     _materialize(db, user, current)
 
 
-def sync_student_notifications(db: Session, user: User, now: datetime | None = None) -> None:
+def sync_student_notifications(db: Session, user: User, now: datetime | None = None,
+                               *, commit: bool = True) -> None:
     """学生通知：成绩异议进度/结果、AI 评分完成、教师改分。"""
     current: dict[str, dict] = {}
 
@@ -215,7 +217,7 @@ def sync_student_notifications(db: Session, user: User, now: datetime | None = N
             "priority": "important",
         }
 
-    _materialize(db, user, current)
+    _materialize(db, user, current, commit=commit)
 
 
 def _score_text(value) -> str:

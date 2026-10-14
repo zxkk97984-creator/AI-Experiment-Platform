@@ -159,20 +159,20 @@ def initialize_hidden_cells(manager, record, version, db, *, image_ref=None,
     独立评测环境。失败即销毁 kernel 并抛 RuntimeError（fail-closed，不留半初始化状态）。
     API 与 worker 共用本实现，保证两条路径语义一致。
     """
-    if not version:
-        return
     hidden_cells = sorted(
-        [c for c in version.cells if c.get("source_hidden") and c.get("type") == "code"],
+        [c for c in (version.cells if version else [])
+         if c.get("source_hidden") and c.get("type") == "code"],
         key=lambda c: c.get("order", 0),
     )
-    if not hidden_cells:
-        return
 
     try:
         ensure_record_kernel(manager, record, version, db, image_ref=image_ref,
                              environment_version_id=environment_version_id)
     except Exception as e:
         raise RuntimeError(f"Kernel 创建失败：{e}") from e
+
+    if not hidden_cells:
+        return
 
     version_id = record.template_version_id
     if manager.is_template_initialized(record.id, version_id):

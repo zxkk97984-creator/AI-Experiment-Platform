@@ -152,7 +152,7 @@ def _finalize(db, execution_id, token, result, status, error_code):
 
 
 def _abandon(db, execution_id, token):
-    """基础设施异常：让租约立刻过期，由 recover 重新排队（不猜结果、不写 0）。"""
+    """基础设施异常：让租约过期，由恢复器确认停机后终止本次执行。"""
     now = db.scalar(select(func.now()))
     db.execute(update(KernelExecution).where(
         KernelExecution.id == execution_id,
@@ -183,6 +183,9 @@ def process_execution(session_factory, execution_id, token, settings):
                               on_cancel=lambda: _interrupt_kernel(manager, record_id)) as guard:
             guard.assert_owned()
             _prepare_kernel(session_factory, manager, execution_id, token)
+            # Container creation/initialization can outlive the claim. Never
+            # submit student code after a lease loss during preparation.
+            guard.assert_owned()
             result = execute_kernel_code(manager, record_id, code,
                                          timeout_seconds=timeout_seconds,
                                          interrupt_event=guard.cancel_event)
@@ -199,25 +202,29 @@ def process_execution(session_factory, execution_id, token, settings):
             with session_factory() as db:
                 _finalize(db, execution_id, token, result, status, error_code)
     except LeaseLost:
-        logger.info("执行 %s 失去租约，交由恢复逻辑重新排队", execution_id)
+        logger.info("执行 %s 失去租约，交由恢复逻辑确认旧内核停止", execution_id)
     except ExecutionCancelled:
         with session_factory() as db:
             _finalize(db, execution_id, token, {"outputs": [], "message": "已中断本次执行"},
                       "cancelled", "CANCELLED")
     except Exception:
-        logger.exception("执行 %s 异常中断；由持久化恢复重试", execution_id)
+        logger.exception("执行 %s 异常中断；等待恢复器确认旧内核停止", execution_id)
         with session_factory() as db:
             execution = db.get(KernelExecution, execution_id, populate_existing=True)
             if execution is not None and execution.cancel_requested:
                 _finalize(db, execution_id, token,
                           {"outputs": [], "message": "已中断本次执行"}, "cancelled", "CANCELLED")
             else:
-                # 永不猜测结果或提前释放：让租约过期，recover 决定重排还是失败
+                # 不猜测结果或提前释放：恢复器确认旧内核停止后终止本次执行。
                 _abandon(db, execution_id, token)
 
 
 def main():
     settings = get_settings()
+    if settings.worker_role != "kernel":
+        logger.error("worker_role=%s 不是 kernel，内核 worker 退出（请设置 DAI_WORKER_ROLE=kernel）",
+                     settings.worker_role)
+        return
     logging.basicConfig(level=logging.INFO)
     client = redis.Redis.from_url(settings.redis_url, decode_responses=True,
                                   socket_connect_timeout=2, socket_timeout=3)

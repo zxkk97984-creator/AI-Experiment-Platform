@@ -52,6 +52,11 @@ class GradeAppeal(TimestampMixin, Base):
     result_revision_snapshot: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     score_before: Mapped[float | None] = mapped_column(Float, nullable=True)
     score_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The score unit is frozen with the appeal (100 for assignment/lab/practice,
+    # the attempt's frozen question points for exams).
+    score_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Exact lab run requested by this appeal; late unrelated evaluations cannot resolve it.
+    regrade_run_id: Mapped[int | None] = mapped_column(ForeignKey("lab_runs.id"), nullable=True, index=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     student_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)

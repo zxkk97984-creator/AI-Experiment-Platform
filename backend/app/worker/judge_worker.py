@@ -1662,8 +1662,13 @@ def _recover_stale(db, redis_client, owner_id: str) -> bool:
         db, stale_running_seconds=get_settings().judge_stale_running_seconds
     )
     a_stats = recover_stale_ai_grades(db, redis_client)
-    if any(v > 0 for v in j_stats.values()) or any(v > 0 for v in a_stats.values()):
-        logger.info("Grading 恢复: judge=%s ai=%s", j_stats, a_stats)
+    from app.services.ai_grading_setup_service import recover_durable_setup_work
+
+    setup_stats = recover_durable_setup_work(
+        db, redis_client, deterministic_kinds={"assignment", "exam"}, include_ai=False)
+    if (any(v > 0 for v in j_stats.values()) or any(v > 0 for v in a_stats.values())
+            or any(v > 0 for v in setup_stats.values())):
+        logger.info("Grading 恢复: judge=%s ai=%s setup=%s", j_stats, a_stats, setup_stats)
     return True
 
 
@@ -1708,6 +1713,7 @@ def run_worker_loop():
     logger.info("%s worker 启动，监听队列: %s", worker_role, queues)
 
     next_recovery = time.monotonic()
+    next_setup_recovery = time.monotonic()
     while True:
         # Redis is only a wake-up transport. Busy or unavailable queues must
         # not prevent repairing durable jobs, including on worker startup.
@@ -1722,6 +1728,21 @@ def run_worker_loop():
                 # A healthy scan and a lease owned by another worker both use
                 # the normal interval. Retry failures without pausing work.
                 next_recovery = time.monotonic() + 120
+
+        if worker_role == "ai" and time.monotonic() >= next_setup_recovery:
+            try:
+                from app.services.ai_grading_setup_service import recover_durable_setup_work
+
+                with SessionLocal() as db:
+                    setup_stats = recover_durable_setup_work(
+                        db, redis_client, deterministic_kinds=set(), include_ai=True)
+                if any(value > 0 for value in setup_stats.values()):
+                    logger.info("AI 配置/试判持久任务扫描: %s", setup_stats)
+            except Exception:
+                logger.exception("AI 配置/试判持久任务扫描失败")
+                next_setup_recovery = time.monotonic() + 5
+            else:
+                next_setup_recovery = time.monotonic() + 15
 
         try:
             result = redis_client.blpop(queues, timeout=5)
@@ -1749,7 +1770,8 @@ def run_worker_loop():
             elif worker_role == "ai":
                 expected_types = ("ai_grade",)
             else:
-                expected_types = ("exam",) if queue_name == EXAM_JUDGE_QUEUE else ("assignment",)
+                expected_types = (("exam", "trial_deterministic") if queue_name == EXAM_JUDGE_QUEUE
+                                  else ("assignment", "trial_deterministic"))
             if (msg_type not in expected_types or type(job_id) is not int or job_id <= 0
                     or ("attempt" in payload and
                         (type(payload["attempt"]) is not int or payload["attempt"] < 0))):
@@ -1777,6 +1799,14 @@ def run_worker_loop():
                     process_ai_grade(db, redis_client, settings, job_id)
             except Exception:
                 logger.exception("AI 评分异常: id=%s", job_id)
+        elif msg_type == "trial_deterministic":
+            from app.services import ai_grading_setup_service as setup_service
+
+            try:
+                with SessionLocal() as db:
+                    setup_service.run_trial_deterministic(db, redis_client, settings, job_id)
+            except Exception:
+                logger.exception("完整试判确定性阶段异常: id=%s", job_id)
         elif msg_type == "exam":
             try:
                 with SessionLocal() as db:

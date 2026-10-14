@@ -344,6 +344,25 @@ def reject_superseded_write(db, submission, *, source: str) -> None:
     raise api_error(409, "DEVICE_SUPERSEDED", "本设备已失去答题写入权限，请在新设备继续作答")
 
 
+def require_exam_device_write(db, submission, *, expected_write_generation: int,
+                              device_token: str | None, source: str) -> None:
+    """Require both the current write generation and its HttpOnly device credential."""
+    import hashlib
+    import secrets
+
+    if submission.write_generation != expected_write_generation:
+        reject_superseded_write(db, submission, source=source)
+    stored_hash = submission.active_device_token_hash
+    if not stored_hash or not device_token:
+        raise api_error(
+            409, "DEVICE_TAKEOVER_REQUIRED",
+            "本设备没有当前考试写入凭证，请使用当前密码接管后继续。",
+        )
+    actual_hash = hashlib.sha256(device_token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(stored_hash, actual_hash):
+        reject_superseded_write(db, submission, source=source)
+
+
 def start_exam(exam, student, db, *, settings=None):
     from app.services.time_utils import as_utc, utc_now
     exam = require_student_task_write(db, exam, student)
@@ -380,7 +399,7 @@ def start_exam(exam, student, db, *, settings=None):
 
 
 def save_answer(db, exam_id, question_id, student, payload, *, expected_write_generation,
-                ip_hash=None, ua_hash=None):
+                device_token=None, ip_hash=None, ua_hash=None):
     from app.services.time_utils import as_utc, utc_now
     exam = db.get(Exam, exam_id)
     if not exam:
@@ -391,9 +410,8 @@ def save_answer(db, exam_id, question_id, student, payload, *, expected_write_ge
         .with_for_update().execution_options(populate_existing=True))
     if not sub or sub.status != "started":
         raise api_error(403, "EXAM_NOT_STARTED", "考试未开始或已结束")
-    if sub.write_generation != expected_write_generation:
-        # 换机后旧设备的一切写入在此断绝：不写答案，只落一条 autosave_rejected 事件。
-        reject_superseded_write(db, sub, source="save_answer")
+    require_exam_device_write(db, sub, expected_write_generation=expected_write_generation,
+                              device_token=device_token, source="save_answer")
     now = utc_now()
     if sub.expires_at and as_utc(sub.expires_at) <= now:
         _auto_submit(sub, db, now)
@@ -445,7 +463,8 @@ def save_answer(db, exam_id, question_id, student, payload, *, expected_write_ge
     return ans
 
 
-def submit_exam(exam, student, db, *, expected_write_generation, ip_hash=None, ua_hash=None):
+def submit_exam(exam, student, db, *, expected_write_generation, device_token=None,
+                ip_hash=None, ua_hash=None):
     """交卷：CAS 认领 → 评分准备 → 入队 Redis → 汇总成绩。
 
     幂等：已 submitted/grading/graded/review_required 的提交直接返回
@@ -466,8 +485,8 @@ def submit_exam(exam, student, db, *, expected_write_generation, ip_hash=None, u
         raise api_error(403, 'EXAM_NOT_STARTED', '请先开始考试')
     if sub.status in _COMPLETED_SUBMISSION_STATUSES:
         return sub
-    if sub.write_generation != expected_write_generation:
-        reject_superseded_write(db, sub, source="submit")
+    require_exam_device_write(db, sub, expected_write_generation=expected_write_generation,
+                              device_token=device_token, source="submit")
     now = utc_now()
 
     # 截止时的交卷请求也必须幂等成功：服务端按超时原因收卷后直接返回

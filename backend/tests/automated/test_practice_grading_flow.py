@@ -158,6 +158,14 @@ def _student_ids(client, student_header, *, board="deterministic", scope="platfo
     return response.json()["items"]
 
 
+def _opt_in_and_recalculate(client, student_header, admin_header):
+    opted = client.put("/api/v1/practice/social/me/opt-in", json={"opt_in": True},
+                       headers=student_header)
+    assert opted.status_code == 200, opted.text
+    recalculated = client.post("/api/v1/practice/social/recalculate", headers=admin_header)
+    assert recalculated.status_code == 202, recalculated.text
+
+
 # ─────────────────────────────────────────────────────────────
 # 权限与隔离
 # ─────────────────────────────────────────────────────────────
@@ -221,6 +229,7 @@ def test_teacher_leaderboard_is_aggregate_only(client, db_session_factory):
     assert body["items"] == [], "还没判题就不该有成绩"
     # 判题后教师看到聚合行，但字段里没有 code/student_no/submission_id
     _grade_submission(db_session_factory, created["id"], problem["id"])
+    _opt_in_and_recalculate(client, student, admin_header)
 
     body = client.get("/api/v1/practice/leaderboard?board=deterministic&scope=platform",
                       headers=teacher).json()
@@ -265,6 +274,7 @@ def test_deterministic_grading_scores_and_board(client, db_session_factory,
 
     grade_now(db_session_factory, redis_client, submission_id, monkeypatch,
               expected_value_map(db_session_factory, problem["id"]), test_settings)
+    _opt_in_and_recalculate(client, student, admin_header)
 
     body = client.get(f"/api/v1/practice/submissions/{submission_id}",
                       headers=student).json()
@@ -373,6 +383,7 @@ def test_twenty_repeat_submissions_keep_best_score_and_charge_per_judging(
     assert first.status_code == 202
     grade_now(db_session_factory, redis_client, first.json()["id"], monkeypatch,
               expected, test_settings)
+    _opt_in_and_recalculate(client, student, admin_header)
     assert _student_ids(client, student)[0]["total_score"] == 100.0
     ledger_after_first = _ledger(db_session_factory)
     assert ledger_after_first == 1.0
@@ -397,6 +408,7 @@ def test_twenty_repeat_submissions_keep_best_score_and_charge_per_judging(
     for submission_id in ids:
         grade_now(db_session_factory, redis_client, submission_id, monkeypatch,
                   expected, test_settings)
+    _opt_in_and_recalculate(client, student, admin_header)
     with db_session_factory() as db:
         rows = db.scalar(select(func.count()).select_from(PracticeSubmission)
                          .where(PracticeSubmission.problem_id == problem["id"]))
@@ -476,6 +488,56 @@ def test_quota_still_enforced_when_redis_is_broken(client, db_session_factory,
     assert second.json()["detail"]["code"] == "QUOTA_EXHAUSTED"
 
 
+def test_ai_budget_rollback_does_not_poison_submission_admission_cache(
+    client, db_session_factory, test_settings, redis_client,
+):
+    """A rejected AI reservation rolls back in MySQL and stale Redis never blocks later work."""
+    admin, admin_header = as_admin(client, db_session_factory)
+    problem, _ = create_and_publish(client, admin_header)
+    student_user, student = as_student(client, db_session_factory, "quota-rollback-student")
+    settings = client.patch("/api/v1/admin/practice/settings",
+                            json={"daily_submission_cap_per_student": 2},
+                            headers=admin_header)
+    assert settings.status_code == 200, settings.text
+
+    first = client.post(f"/api/v1/practice/problems/{problem['id']}/submissions",
+                        json={"code": CODE, "client_request_id": "quota-first"},
+                        headers=student)
+    assert first.status_code == 202, first.text
+    _switch_ai(client, admin_header, db_session_factory, problem["id"], admin.id)
+    limited = client.patch("/api/v1/admin/practice/settings",
+                           json={"daily_ai_budget_tokens": 1}, headers=admin_header)
+    assert limited.status_code == 200, limited.text
+
+    rejected = client.post(f"/api/v1/practice/problems/{problem['id']}/submissions",
+                           json={"code": CODE, "client_request_id": "quota-ai-rejected"},
+                           headers=student)
+    assert rejected.status_code == 429, rejected.text
+    assert rejected.json()["detail"]["code"] == "QUOTA_EXHAUSTED"
+    with db_session_factory() as db:
+        used = db.scalar(select(func.sum(PracticeUsageLog.amount)).where(
+            PracticeUsageLog.metric == "submissions", PracticeUsageLog.scope == "student"))
+        assert float(used or 0) == 1.0, "AI 预算拒绝必须回滚同事务的学生提交额度"
+
+    # Switch new work to the deterministic path and corrupt the cache. MySQL's
+    # remaining one slot is still accepted; successful commit refreshes the cache.
+    deterministic = client.patch("/api/v1/admin/practice/settings",
+                                 json={"grading_mode": "deterministic"}, headers=admin_header)
+    assert deterministic.status_code == 200, deterministic.text
+    key_date = datetime.now(timezone.utc).date().isoformat()
+    cache_key = f"practice:quota:{key_date}:submissions:{student_user.id}"
+    redis_client.set(cache_key, 999)
+    ordinary = client.post(f"/api/v1/practice/problems/{problem['id']}/submissions",
+                           json={"code": CODE, "client_request_id": "quota-ordinary-after-reject"},
+                           headers=student)
+    assert ordinary.status_code == 202, ordinary.text
+    assert float(redis_client.get(cache_key)) == 2.0, "提交成功后 Redis 只反映数据库台账快照"
+    with db_session_factory() as db:
+        used = db.scalar(select(func.sum(PracticeUsageLog.amount)).where(
+            PracticeUsageLog.metric == "submissions", PracticeUsageLog.scope == "student"))
+        assert float(used or 0) == 2.0
+
+
 # ─────────────────────────────────────────────────────────────
 # 判题开关：只影响新提交，两榜不互相污染
 # ─────────────────────────────────────────────────────────────
@@ -532,6 +594,7 @@ def test_mode_switch_only_affects_new_submissions(client, db_session_factory,
     assert old_body["grading_status"] == "completed" and old_body["score"] == 100.0
     assert old_body["ai_status"] == "skipped"
 
+    _opt_in_and_recalculate(client, student, admin_header)
     det_board = _student_ids(client, student, board="deterministic")
     ai_board = _student_ids(client, student, board="ai")
     assert len(det_board) == 1 and len(ai_board) == 1
@@ -556,6 +619,8 @@ def test_problem_edit_moves_old_submissions_off_current_board(
                                 headers=student).json()["id"]
     grade_now(db_session_factory, redis_client, submission_id, monkeypatch,
               expected_value_map(db_session_factory, problem["id"]), test_settings)
+
+    _opt_in_and_recalculate(client, student, admin_header)
 
     assert len(_student_ids(client, student)) == 1
     with db_session_factory() as db:

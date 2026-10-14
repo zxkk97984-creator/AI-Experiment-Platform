@@ -370,7 +370,8 @@ def test_active_student_sample_run_executes_only_public_cases(
     response = client.post(
         f"{API}/exams/{ctx['exam_id']}/questions/{ctx['question_id']}/sample-run",
         headers=student_headers,
-        json={"code": "def add(a, b):\n    return a + b"},
+        json={"code": "def add(a, b):\n    return a + b",
+              "expected_write_generation": 1},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {
@@ -393,11 +394,11 @@ def test_exam_sample_run_requires_an_active_owned_attempt(client, db_session_fac
 
     not_started = client.post(
         f"{API}/exams/{ctx['exam_id']}/questions/{ctx['question_id']}/sample-run",
-        headers=student_headers, json={"code": "pass"},
+        headers=student_headers, json={"code": "pass", "expected_write_generation": 1},
     )
     forbidden_teacher = client.post(
         f"{API}/exams/{ctx['exam_id']}/questions/{ctx['question_id']}/sample-run",
-        headers=teacher_headers, json={"code": "pass"},
+        headers=teacher_headers, json={"code": "pass", "expected_write_generation": 1},
     )
     assert not_started.status_code == 403
     assert forbidden_teacher.status_code == 403

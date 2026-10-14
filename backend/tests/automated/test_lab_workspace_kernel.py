@@ -185,6 +185,9 @@ def test_preview_uses_profile_minimum_and_same_budget(db_session_factory, kernel
         with db_session_factory() as resources:
             assert resources.get(LabResourceLease, "kernel:-20").kind == "kernel"
         session.last_active_at = 0
+        # cleanup reads the shared cross-process activity key as authority; move
+        # both the local and shared clocks past the cutoff for this idle fixture.
+        docker.redis.set(manager._activity_key(-20), "0")
         manager.cleanup_idle(1)
         with db_session_factory() as resources:
             assert resources.get(LabResourceLease, "kernel:-20") is None

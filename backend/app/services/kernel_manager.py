@@ -34,6 +34,7 @@ KERNEL_PROBE_TIMEOUT = 8
 KERNEL_INTERRUPT_GRACE = 5
 # 执行锁租约：TTL 必须大于续期间隔（TTL/3），否则长执行中途锁会过期。
 EXEC_LOCK_TTL = 60
+KERNEL_SESSION_TTL_SECONDS = 7500
 RUNNER_PATH = "/opt/dai/kernel_runner.py"
 LEGACY_RUNNER_PATH = "/.dai/kernel_runner.py"
 
@@ -63,7 +64,8 @@ class KernelSession:
                  runner_path: str | None = None,
                  memory_mb: int = 256,
                  cpus: float = 1.0,
-                 resource_token: str | None = None):
+                 resource_token: str | None = None,
+                 last_active_at: float | None = None):
         self.record_id = record_id
         self.container_name = container_name
         self.conn_info = conn_info
@@ -75,7 +77,7 @@ class KernelSession:
         self.memory_mb = memory_mb
         self.cpus = cpus
         self.resource_token = resource_token
-        self.last_active_at = time.time()
+        self.last_active_at = float(last_active_at or time.time())
 
     @property
     def is_alive(self) -> bool:
@@ -112,6 +114,7 @@ class KernelSession:
             "memory_mb": self.memory_mb,
             "cpus": self.cpus,
             "resource_token": self.resource_token,
+            "last_active_at": self.last_active_at,
         }
 
     @classmethod
@@ -128,6 +131,7 @@ class KernelSession:
             memory_mb=data.get("memory_mb", 256),
             cpus=data.get("cpus", 1.0),
             resource_token=data.get("resource_token"),
+            last_active_at=data.get("last_active_at"),
         )
 
 
@@ -171,7 +175,70 @@ class KernelManager:
             self._reserve(session.record_id, token, session.memory_mb, session.cpus, factory)
             session.resource_token = token
             self._write_session_redis(session.record_id, session)
+        # Attaching another process to an existing kernel is not student activity.
+        self._merge_shared_activity(session)
+
+    @staticmethod
+    def _activity_key(record_id: int) -> str:
+        return f"kernel:activity:{record_id}"
+
+    def _merge_shared_activity(self, session, redis_client=None) -> float:
+        """Keep activity time monotonic across API and kernel worker processes."""
+        try:
+            import redis
+            client = redis_client or redis.from_url(self.settings.redis_url)
+            key = self._activity_key(session.record_id)
+            incoming = float(session.last_active_at)
+            with client.pipeline() as pipe:
+                while True:
+                    try:
+                        pipe.watch(key)
+                        raw = pipe.get(key)
+                        stored = max(incoming, float(raw or 0))
+                        pipe.multi()
+                        pipe.set(key, repr(stored), ex=KERNEL_SESSION_TTL_SECONDS)
+                        pipe.execute()
+                        session.last_active_at = stored
+                        break
+                    except redis.WatchError:
+                        continue
+            return session.last_active_at
+        except Exception as exc:
+            raise RuntimeError(f"Redis 内核活动时间更新失败: {exc}") from exc
+
+    def _touch_session_activity(self, session, *, strict: bool = True) -> None:
         session.last_active_at = time.time()
+        try:
+            import redis
+            client = redis.from_url(self.settings.redis_url)
+            self._merge_shared_activity(session, client)
+            client.setex(
+                f"kernel:session:{session.record_id}", KERNEL_SESSION_TTL_SECONDS,
+                json.dumps(session.to_redis_dict()),
+            )
+        except Exception:
+            if strict:
+                raise
+            logger.warning("Kernel %s 活动时间未能写入 Redis", session.record_id, exc_info=True)
+
+    def _shared_activity_at(self, record_id: int) -> float | None:
+        """Read cross-process activity, upgrading session metadata from older builds."""
+        import redis
+
+        client = redis.from_url(self.settings.redis_url)
+        activity_key = self._activity_key(record_id)
+        raw = client.get(activity_key)
+        if raw is not None:
+            return float(raw)
+        session_raw = client.get(f"kernel:session:{record_id}")
+        if not session_raw:
+            return None
+        data = json.loads(session_raw)
+        timestamp = float(data.get("last_active_at") or 0)
+        if timestamp > 0:
+            client.setex(activity_key, KERNEL_SESSION_TTL_SECONDS, repr(timestamp))
+            return timestamp
+        return None
 
     @staticmethod
     def _remove_container(container_name):
@@ -243,10 +310,9 @@ class KernelManager:
         try:
             import redis
             r = redis.from_url(self.settings.redis_url)
-            r.setex(
-                f"kernel:session:{record_id}", 3600,
-                json.dumps(session.to_redis_dict()),
-            )
+            self._merge_shared_activity(session, r)
+            r.setex(f"kernel:session:{record_id}", KERNEL_SESSION_TTL_SECONDS,
+                    json.dumps(session.to_redis_dict()))
         except Exception as e:
             raise RuntimeError(f"Redis 写入失败: {e}") from e
 
@@ -256,7 +322,11 @@ class KernelManager:
             r = redis.from_url(self.settings.redis_url)
             data_str = r.get(f"kernel:session:{record_id}")
             if data_str:
-                return KernelSession.from_redis_dict(record_id, json.loads(data_str))
+                session = KernelSession.from_redis_dict(record_id, json.loads(data_str))
+                raw_activity = r.get(self._activity_key(record_id))
+                if raw_activity is not None:
+                    session.last_active_at = max(session.last_active_at, float(raw_activity))
+                return session
         except Exception:
             logger.debug("Redis 读取 kernel session %d 失败", record_id, exc_info=True)
         return None
@@ -285,7 +355,7 @@ class KernelManager:
         try:
             import redis
             r = redis.from_url(self.settings.redis_url)
-            r.setex(f"kernel:init:{record_id}", 3600, str(version_id))
+            r.setex(f"kernel:init:{record_id}", KERNEL_SESSION_TTL_SECONDS, str(version_id))
             session.initialized_template_version_id = version_id
             self._write_session_redis(record_id, session)
         except Exception as exc:
@@ -516,6 +586,14 @@ class KernelManager:
         无响应才销毁重建，且返回 state_lost=True + 明确文案。
         返回 outcome ∈ succeeded | timeout | cancelled；异常仍抛 RuntimeError。
         """
+        def cancelled_before_start():
+            return {"outputs": [], "execution_time_ms": 0, "outcome": "cancelled",
+                    "state_lost": False,
+                    "timeout_seconds": int(timeout_seconds or KERNEL_HARD_TIMEOUT),
+                    "message": "已中断本次执行"}
+
+        if interrupt_event is not None and interrupt_event.is_set():
+            return cancelled_before_start()
         from app.services.lab_node import require_interactive_node
         require_interactive_node(self.settings)
         session = self._sessions.get(record_id)
@@ -551,6 +629,10 @@ class KernelManager:
         started = time.perf_counter()
         interrupted = False
         try:
+            # Cancellation may arrive while acquiring the execution lock.
+            if interrupt_event is not None and interrupt_event.is_set():
+                return cancelled_before_start()
+            self._touch_session_activity(session)
             # docker exec 运行 trusted runner，代码通过 stdin JSON 传入
             runner_path = session.runner_path or (
                 RUNNER_PATH if session.environment_version_id is not None
@@ -575,6 +657,12 @@ class KernelManager:
             first_call = True
             while True:
                 if interrupt_event is not None and interrupt_event.is_set() and not interrupted:
+                    if first_call:
+                        # The runner is still waiting for stdin. An interrupt
+                        # sent before the payload cannot cancel future code.
+                        proc.kill()
+                        proc.communicate(timeout=5)
+                        return cancelled_before_start()
                     interrupted = True
                     self._send_interrupt(session)
                 remaining = deadline - time.perf_counter()
@@ -626,7 +714,7 @@ class KernelManager:
                 )
             except Exception:
                 logger.debug("锁释放失败或已过期 record_id=%d", record_id, exc_info=True)
-            session.last_active_at = time.time()
+            self._touch_session_activity(session, strict=False)
 
     @staticmethod
     def _renew_exec_lock(r, lock_key, lock_token, stop_event, *, ttl=EXEC_LOCK_TTL,
@@ -729,6 +817,83 @@ class KernelManager:
             self._sessions[record_id] = session
             self._touch_resources(record_id, session)
             self._send_interrupt(session)
+            self._touch_session_activity(session, strict=False)
+
+    @staticmethod
+    def _inspect_container_running(container_name: str) -> bool | None:
+        """Return running state; None means Docker could not establish the state."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode == 0:
+            value = result.stdout.strip().lower()
+            return value == "true" if value in {"true", "false"} else None
+        if "no such object" in (result.stderr or "").lower() or \
+                "no such container" in (result.stderr or "").lower():
+            return False
+        return None
+
+    def _restore_resource_token(self, record_id: int, factory) -> None:
+        """Load an existing reservation token so confirmed container cleanup can release it."""
+        if factory is None or record_id in self._resource_tokens:
+            return
+        try:
+            from app.models.lab import LabResourceLease
+            from app.services.lab_resources import resource_key
+            key = resource_key(f"kernel:{record_id}", self.settings)
+            with factory() as db:
+                lease = db.get(LabResourceLease, key)
+                if lease is not None:
+                    self._resource_tokens[record_id] = lease.token
+        except Exception:
+            logger.warning("读取 kernel record=%s 的资源租约失败", record_id, exc_info=True)
+
+    def stop_execution_after_worker_loss(self, record_id: int, *, resource_factory=None) -> tuple[bool, bool]:
+        """Interrupt a lost worker's code and confirm the kernel is idle or stopped.
+
+        The existing kernel is retained when it answers a probe after SIGINT. A
+        hung kernel is destroyed; the caller may then mark the record state lost.
+        """
+        if resource_factory is not None:
+            self._resource_factories[record_id] = resource_factory
+        self._restore_resource_token(record_id, resource_factory)
+
+        session = self._sessions.get(record_id) or self._read_session_redis(record_id)
+        container_name = session.container_name if session else self._make_container_name(record_id)
+        running = self._inspect_container_running(container_name)
+        if running is None:
+            return False, False
+        if not running:
+            try:
+                self.destroy(record_id)
+                return True, True
+            except RuntimeError:
+                logger.warning("确认停止 kernel record=%s 失败", record_id, exc_info=True)
+                return False, False
+
+        if session is None:
+            self.recover_from_docker(record_id=record_id, resource_factory=resource_factory)
+            session = self._sessions.get(record_id) or self._read_session_redis(record_id)
+            if session is None:
+                return False, False
+
+        self._send_interrupt(session)
+        if self._probe_kernel(session):
+            session.last_active_at = time.time()
+            self._sessions[record_id] = session
+            self._touch_session_activity(session, strict=False)
+            return True, False
+
+        try:
+            self.destroy(record_id)
+            return True, True
+        except RuntimeError:
+            logger.warning("无响应 kernel record=%s 未能确认销毁", record_id, exc_info=True)
+            return False, False
 
     def restart(self, record_id: int,
                 lesson_storage_dir: str = "",
@@ -780,6 +945,7 @@ class KernelManager:
             r = redis.from_url(self.settings.redis_url)
             r.delete(f"kernel:session:{record_id}")
             r.delete(f"kernel:init:{record_id}")
+            r.delete(self._activity_key(record_id))
         except Exception:
             logger.warning("Redis 删除 kernel 记录 %d 失败", record_id, exc_info=True)
 
@@ -791,7 +957,20 @@ class KernelManager:
         """
         now = time.time()
         for rid, session in list(self._sessions.items()):
-            if now - session.last_active_at <= max_idle_seconds:
+            try:
+                shared_activity = self._shared_activity_at(rid)
+            except Exception:
+                logger.warning("读取 kernel %s 活动时间失败，跳过回收", rid, exc_info=True)
+                continue
+            if shared_activity is None:
+                logger.warning("kernel %s 缺少共享活动时间，跳过回收", rid)
+                continue
+            session.last_active_at = max(session.last_active_at, shared_activity)
+            idle_limit = self._idle_seconds_for_record(rid, max_idle_seconds, db)
+            if idle_limit is None:
+                logger.warning("kernel %s 缺少可信空闲配置，跳过回收", rid)
+                continue
+            if now - session.last_active_at <= idle_limit:
                 continue
             if self._has_in_flight_execution(rid, db):
                 logger.info("内核 %s 有在途执行，跳过空闲回收", rid)
@@ -800,6 +979,37 @@ class KernelManager:
                 self.destroy(rid)
             except RuntimeError:
                 logger.warning("空闲内核 %s 暂时无法停止，保留其资源租约", rid, exc_info=True)
+
+    def _idle_seconds_for_record(self, record_id: int, fallback: int, db=None) -> int | None:
+        # 教师草稿预览使用负 session ID，沿用全局空闲策略。
+        if record_id < 0:
+            return fallback
+        factory = self._resource_factories.get(record_id)
+        owner = db
+        close_owner = False
+        try:
+            if owner is None:
+                if factory is None:
+                    return None
+                owner = factory()
+                close_owner = True
+            from app.models import ExperimentRecord, NotebookTemplateVersion
+            record = owner.get(ExperimentRecord, record_id)
+            if record is None:
+                return None
+            version = owner.get(NotebookTemplateVersion, record.template_version_id)
+            if version is None:
+                return None
+            idle_seconds = int(version.kernel_idle_seconds)
+            if not 300 <= idle_seconds <= 7200:
+                return None
+            return idle_seconds
+        except Exception:
+            logger.warning("读取 kernel %s 发布空闲配置失败", record_id, exc_info=True)
+            return None
+        finally:
+            if close_owner and owner is not None:
+                owner.close()
 
     def _has_in_flight_execution(self, record_id: int, db=None) -> bool:
         from app.services.kernel_queue import has_in_flight_execution
@@ -820,8 +1030,11 @@ class KernelManager:
             logger.warning("在途执行检查失败 record=%s，保留内核", record_id, exc_info=True)
             return True
 
-    def recover_from_docker(self):
+    def recover_from_docker(self, *, record_id: int | None = None, resource_factory=None):
         """从 Docker label dai.record_id 恢复所有未记录的 session，重建 Redis 元数据"""
+        target_record_id = record_id
+        if target_record_id is not None and resource_factory is not None:
+            self._resource_factories[target_record_id] = resource_factory
         result = subprocess.run(
             ["docker", "ps", "-q", "--filter", "label=dai.record_id"],
             capture_output=True, text=True,
@@ -846,6 +1059,8 @@ class KernelManager:
                 try:
                     record_id = int(label_result.stdout.strip())
                 except ValueError:
+                    continue
+                if target_record_id is not None and record_id != target_record_id:
                     continue
 
                 # Phase 5（计划 9.3）：校验环境 label——缺失环境身份的旧容器不复用
@@ -901,6 +1116,8 @@ class KernelManager:
                             '{{index .Config.Labels "dai.' + label + '"}}', cid],
                             capture_output=True, text=True)
                         extra_labels[label] = extra.stdout.strip()
+                    stored = self._read_session_redis(record_id)
+                    last_active_at = stored.last_active_at if stored else time.time()
                     session = KernelSession(
                         record_id, container_name, conn_info,
                         environment_version_id=env_version_id,
@@ -909,6 +1126,7 @@ class KernelManager:
                         memory_mb=int(extra_labels["memory_mb"] or self.settings.judge_memory_limit_mb),
                         cpus=float(extra_labels["cpus"] or self.settings.judge_cpu_limit),
                         lesson_storage_dir=extra_labels["course_dir"],
+                        last_active_at=last_active_at,
                     )
                     self._sessions[record_id] = session
                     # 重建 Redis 元数据

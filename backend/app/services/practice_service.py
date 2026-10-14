@@ -275,25 +275,24 @@ def _quota_error(metric: str, limit: float, used: float) -> Exception:
     )
 
 
-def _redis_precheck(redis_client, *, today: date_cls, metric: str, scope_id: int,
-                    limit: float, amount: float) -> None:
-    """Redis 快速计数：命中上限立即拒绝；Redis 异常时保持静默（库仍是权威）。"""
-    if redis_client is None or limit <= 0:
+def _sync_quota_cache(db: Session, redis_client, today: date_cls) -> None:
+    """Refresh the Redis usage cache only after the authoritative DB commit."""
+    if redis_client is None:
         return
-    key = f"practice:quota:{today.isoformat()}:{metric}:{scope_id}"
-    try:
-        current = redis_client.incrbyfloat(key, amount)
-        if float(current) == float(amount):
-            redis_client.expire(key, 48 * 3600)
-    except Exception as exc:  # noqa: BLE001 - Redis 只做加速，故障必须降级到库
-        logger.warning("练习额度 Redis 计数不可用，降级为以库为准: %s", exc)
-        return
-    if float(current) > float(limit):
+    rows = db.execute(
+        select(PracticeUsageLog.scope, PracticeUsageLog.student_id,
+               PracticeUsageLog.metric, func.sum(PracticeUsageLog.amount))
+        .where(PracticeUsageLog.date == today)
+        .group_by(PracticeUsageLog.scope, PracticeUsageLog.student_id,
+                  PracticeUsageLog.metric)
+    ).all()
+    for scope, student_id, metric, amount in rows:
+        scope_id = int(student_id) if scope == "student" else 0
+        key = f"practice:quota:{today.isoformat()}:{metric}:{scope_id}"
         try:
-            redis_client.incrbyfloat(key, -amount)
-        except Exception:  # noqa: BLE001 - 回滚失败不影响拒绝结果
-            pass
-        raise _quota_error(metric, limit, float(current) - amount)
+            redis_client.setex(key, 48 * 3600, float(amount or 0.0))
+        except Exception as exc:  # noqa: BLE001 - the cache never decides acceptance
+            logger.warning("练习额度 Redis 缓存更新失败，数据库台账不受影响: %s", exc)
 
 
 def _ledger_consume(db: Session, *, today: date_cls, metric: str, scope: str,
@@ -336,8 +335,6 @@ def consume_quota(db: Session, redis_client, *, student_id: int,
     consumed = {"submissions": 0.0, "ai_tokens": 0.0, "ai_amount": 0.0}
 
     cap = int(settings.daily_submission_cap_per_student or 0)
-    _redis_precheck(redis_client, today=today, metric="submissions", scope_id=student_id,
-                    limit=cap, amount=1)
     _ledger_consume(db, today=today, metric="submissions", scope="student",
                     student_id=student_id, limit=cap, amount=1)
     consumed["submissions"] = 1.0
@@ -347,14 +344,10 @@ def consume_quota(db: Session, redis_client, *, student_id: int,
         amount = round(tokens / 1000.0 * float(price or 0.0), 6)
         token_budget = int(settings.daily_ai_budget_tokens or 0)
         amount_budget = float(settings.daily_ai_budget_amount or 0.0)
-        _redis_precheck(redis_client, today=today, metric="ai_tokens", scope_id=0,
-                        limit=token_budget, amount=tokens)
         _ledger_consume(db, today=today, metric="ai_tokens", scope="platform",
                         student_id=0, limit=token_budget, amount=tokens)
         consumed["ai_tokens"] = float(tokens)
         if amount > 0:
-            _redis_precheck(redis_client, today=today, metric="ai_amount", scope_id=0,
-                            limit=amount_budget, amount=amount)
             _ledger_consume(db, today=today, metric="ai_amount", scope="platform",
                             student_id=0, limit=amount_budget, amount=amount)
             consumed["ai_amount"] = amount
@@ -465,6 +458,17 @@ def create_submission(db: Session, redis_client, *, student: User, problem: Prac
         return existing, False
 
     settings = settings_row(db, for_update=True)
+    # The settings row lock serializes new admissions. Recheck the idempotency
+    # key after acquiring it so concurrent retries neither double-charge nor
+    # turn a committed request into a unique-key error.
+    existing = find_idempotent_submission(
+        db, problem_id=problem.id, student_id=student.id,
+        client_request_id=client_request_id)
+    if existing is not None:
+        if existing.request_digest != digest:
+            raise api_error(409, "PRACTICE_IDEMPOTENCY_CONFLICT",
+                            "该提交请求标识已用于另一份代码，请刷新后重试")
+        return existing, False
     mode = effective_grading_mode(problem, settings)
     version = version_for_new_submission(db, problem=problem, mode=mode)
     if version is None:
@@ -488,6 +492,7 @@ def create_submission(db: Session, redis_client, *, student: User, problem: Prac
     db.add(submission)
     problem.total_attempts = int(problem.total_attempts or 0) + 1
     db.commit()
+    _sync_quota_cache(db, redis_client, utcnow().date())
     db.refresh(submission)
     return submission, True
 

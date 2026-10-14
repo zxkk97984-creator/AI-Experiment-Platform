@@ -70,6 +70,20 @@ class Loop:
 
         self.client = SimpleNamespace(blpop=pop)
 
+        class EmptyRows:
+            @staticmethod
+            def all():
+                return []
+
+        class FakeDatabaseSession:
+            @staticmethod
+            def scalars(_statement):
+                return EmptyRows()
+
+            @staticmethod
+            def commit():
+                return None
+
         def from_url(url, **kwargs):
             self.connections.append((url, kwargs))
             return self.client
@@ -80,16 +94,18 @@ class Loop:
             session_number = self.session_calls
             self.events.append(("session_enter", self.clock.now))
             try:
-                if session_number == (1 if role == "ai" else 2) and session_failure == "enter":
+                # Judge's startup recovery scan and AI's durable setup scan are
+                # session 1; the first task-processing session is session 2.
+                if session_number == 2 and session_failure == "enter":
                     self.clock.now += process_seconds
                     raise RuntimeError("synthetic session creation failure")
-                yield object()
+                yield FakeDatabaseSession()
             except Exception:
                 self.events.append(("session_failed", self.clock.now))
                 raise
             finally:
                 self.events.append(("session_exit", self.clock.now))
-                if session_number == (1 if role == "ai" else 2) and session_failure == "exit":
+                if session_number == 2 and session_failure == "exit":
                     raise RuntimeError("synthetic session close failure")
 
         def recover(_db, client, _owner):

@@ -21,7 +21,7 @@ from app.models import (AuditEvent, Exam, ExamAnswer, ExamEvent, ExamQuestion,
 from app.services.exam_service import (retry_exam_submission, scan_expired_exams,
                                        score_choice_answer)
 from app.services.time_utils import as_utc, utc_now
-from conftest import auth_header, create_course_db, create_user, login
+from conftest import SynchronousASGIClient, auth_header, create_course_db, create_user, login
 
 from teaching_test_support import grant_course_students
 
@@ -361,7 +361,7 @@ def test_answer_scoring_is_unchanged_with_option_shuffle(client, db_session_fact
 # ── 6. 换机与写入代次 ────────────────────────────────────────
 
 
-def test_takeover_supersedes_old_device_and_fences_writes(client, db_session_factory):
+def test_takeover_supersedes_old_device_and_fences_writes(client, app, db_session_factory):
     ctx = _seed(client, db_session_factory, tag="takeover", start_delta=-5, end_delta=60)
     _publish(client, ctx)
     student_headers = auth_header(ctx["student"])
@@ -369,6 +369,12 @@ def test_takeover_supersedes_old_device_and_fences_writes(client, db_session_fac
     question_id = ctx["question_ids"][0]
     original_expires = started["submission"]["expires_at"]
     assert _generation(started) == 1
+    cookie_name = f"dai_exam_device_{ctx['exam_id']}"
+    old_cookie = client.cookies.get(cookie_name)
+    assert old_cookie
+    assert "device_token" not in started["submission"]
+
+    old_device = SynchronousASGIClient(app, cookies={cookie_name: old_cookie})
 
     first_save = client.put(
         f"{API}/exams/{ctx['exam_id']}/answers/{question_id}", headers=student_headers,
@@ -382,11 +388,30 @@ def test_takeover_supersedes_old_device_and_fences_writes(client, db_session_fac
     assert takeover.status_code == 200, takeover.text
     body = takeover.json()
     assert body["submission"]["write_generation"] == 2
-    assert body["submission"]["device_token"]
+    assert "device_token" not in body["submission"]
+    assert f"{cookie_name}=" in takeover.headers.get("set-cookie", "")
+    assert "httponly" in takeover.headers.get("set-cookie", "").lower()
+    assert client.cookies.get(cookie_name) != old_cookie
     # 剩余时间不重置（序列化格式与 session 载荷不同，比较解析后的时刻）
     assert as_utc(datetime.fromisoformat(body["submission"]["expires_at"])) == as_utc(
         datetime.fromisoformat(original_expires))
     assert [item["selected_options"] for item in body["saved_answers"]] == [["A"]]
+
+    # A stale device can refresh the current generation, but reads never mint a
+    # replacement credential and the refreshed generation alone cannot write.
+    refreshed_old = old_device.post(f"{API}/exams/{ctx['exam_id']}/start",
+                                    headers=student_headers)
+    assert refreshed_old.status_code == 201, refreshed_old.text
+    assert refreshed_old.json()["can_write"] is False
+    assert refreshed_old.json()["takeover_required"] is True
+    assert old_device.cookies.get(cookie_name) == old_cookie
+    old_with_new_generation = old_device.put(
+        f"{API}/exams/{ctx['exam_id']}/answers/{question_id}", headers=student_headers,
+        json={"selected_options": ["B"], "expected_write_generation": 2},
+    )
+    assert old_with_new_generation.status_code == 409
+    assert _error_code(old_with_new_generation) == "DEVICE_SUPERSEDED"
+    old_device.close()
 
     def snapshot():
         with db_session_factory() as db:
@@ -443,6 +468,31 @@ def test_write_generation_is_required_on_every_write_endpoint(client, db_session
     assert _error_code(missing_single) == "WRITE_GENERATION_REQUIRED"
     assert missing_batch.status_code == 422
     assert missing_submit.status_code == 422
+
+
+def test_refresh_without_device_cookie_is_read_only_and_requires_takeover(client, app,
+                                                                           db_session_factory):
+    ctx = _seed(client, db_session_factory, tag="cookie-required", start_delta=-5, end_delta=60)
+    _publish(client, ctx)
+    student_headers = auth_header(ctx["student"])
+    started = _start(client, ctx, ctx["student"])
+    exam_id = ctx["exam_id"]
+    question_id = ctx["question_ids"][0]
+    read_only_device = SynchronousASGIClient(app)
+    try:
+        refreshed = read_only_device.get(f"{API}/exams/{exam_id}/session", headers=student_headers)
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["can_write"] is False
+        assert refreshed.json()["takeover_required"] is True
+        saved = read_only_device.put(
+            f"{API}/exams/{exam_id}/answers/{question_id}", headers=student_headers,
+            json={"selected_options": ["A"],
+                  "expected_write_generation": _generation(started)},
+        )
+        assert saved.status_code == 409
+        assert _error_code(saved) == "DEVICE_TAKEOVER_REQUIRED"
+    finally:
+        read_only_device.close()
     with db_session_factory() as db:
         submission = db.scalar(select(ExamSubmission).where(ExamSubmission.exam_id == ctx["exam_id"]))
         assert submission.status == "started"

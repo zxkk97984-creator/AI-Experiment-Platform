@@ -329,7 +329,16 @@ def publish_evaluation(db, run, result):
     lock_evaluation_records(db, run)
     state = _locked_state(db, run.submission_id)
     if not state or state.current_run_id != run.id or run.cancel_requested:
+        from app.services.appeal_service import fail_lab_regrade_appeals
+
+        reason = "重评已取消" if run.cancel_requested else "重评运行已失效，未发布成绩"
+        fail_lab_regrade_appeals(db, run.id, reason)
         return None
+    prior_grade = db.scalar(select(LabGradeRevision).where(LabGradeRevision.run_id == run.id))
+    if prior_grade is not None:
+        # Publication callbacks are idempotent: the run can create at most one
+        # immutable score revision and cannot notify/resolve its appeal twice.
+        return prior_grade
     # A transaction-scoped write serializes publication with human review.
     grade = LabGradeRevision(submission_id=run.submission_id, assessment_id=run.assessment_id,
         run_id=run.id, source='automatic', total=result['total'], items=result['items'],
@@ -345,9 +354,21 @@ def publish_evaluation(db, run, result):
             run.error_code = 'LAB_PUBLICATION_SCOPE_CHANGED'
             run.error_message = '授课范围已变更或已归档，自动评分证据已保留，成绩未发布。'
             state.review_requested, state.review_reason = True, run.error_message
+            from app.services.appeal_service import fail_lab_regrade_appeals
+
+            fail_lab_regrade_appeals(db, run.id, run.error_message)
             return grade
         _activate_grade(db, state, grade)
         refresh_selected(db, db.get(ExperimentSubmission, run.submission_id).record_id)
+        from app.services.appeal_service import resolve_lab_regrade_appeals
+
+        resolve_lab_regrade_appeals(db, run.id, grade.total)
+    else:
+        # A completed sandbox run is not a completed appeal until its score is
+        # still authorized and published against the current submission.
+        from app.services.appeal_service import fail_lab_regrade_appeals
+
+        fail_lab_regrade_appeals(db, run.id, run.error_message or "重评结果未能正式发布")
     return grade
 
 

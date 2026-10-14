@@ -1,6 +1,7 @@
 """AI 智能代码评分契约——题目配置、Rubric 文档、AI 输出、教师复核"""
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,7 +19,7 @@ class TestGroup(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     dimension: Literal["F", "R"]
     max_score: float = Field(gt=0, le=60)
-    tests: str = Field(min_length=1)
+    tests: str = Field(min_length=1, max_length=20000)
 
 
 class ScoreCapRule(BaseModel):
@@ -159,11 +160,9 @@ class RubricDocument(BaseModel):
         if abs(q_total - 10) > 1e-6:
             raise ValueError(f"代码质量评分项满分之和必须为 10，当前为 {q_total}")
 
-        # Q 固定为 Q1-Q4
-        expected_q_ids = {"Q1", "Q2", "Q3", "Q4"}
-        actual_q_ids = {item.id for item in self.quality_criteria}
-        if actual_q_ids != expected_q_ids:
-            raise ValueError(f"代码质量评分项必须固定为 {expected_q_ids}")
+        criterion_ids = [item.id for item in (*self.algorithm_criteria, *self.quality_criteria)]
+        if len(criterion_ids) != len(set(criterion_ids)):
+            raise ValueError("A/Q 评分项标识不能重复")
 
         return self
 
@@ -332,8 +331,45 @@ class AISetupTrialRunCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_revision: int = Field(ge=0)
     code: str = Field(min_length=1, max_length=50000)
     client_request_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class AISetupDraftUpdate(BaseModel):
+    """Versioned editable setup draft; formal scoring stays unchanged until enable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    rubric: RubricDocument
+    test_groups: list[TestGroup] = Field(min_length=1, max_length=30)
+    entry_function: str = Field(min_length=1, max_length=120)
+    teacher_constraints: dict[str, Any] = Field(default_factory=dict)
+    compare_rules: dict[str, Any] = Field(default_factory=dict)
+    score_cap_rules: list[ScoreCapRule] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def validate_candidate(self) -> AISetupDraftUpdate:
+        if not self.entry_function.isidentifier():
+            raise ValueError("入口函数名必须是有效 Python 标识符")
+        group_ids = [group.id for group in self.test_groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("F/R 测试组标识不能重复")
+        f_total = sum(group.max_score for group in self.test_groups if group.dimension == "F")
+        r_total = sum(group.max_score for group in self.test_groups if group.dimension == "R")
+        if f_total > 60 + 1e-6 or r_total > 10 + 1e-6:
+            raise ValueError("F/R 测试组满分分别不能超过 60/10")
+        cap_ids = [rule.id for rule in self.score_cap_rules]
+        if len(cap_ids) != len(set(cap_ids)):
+            raise ValueError("封顶规则标识不能重复")
+        try:
+            json.dumps({"compare_rules": self.compare_rules,
+                        "teacher_constraints": self.teacher_constraints},
+                       ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("候选配置必须是有限、可序列化的 JSON") from exc
+        return self
 
 
 class AISetupEnableRequest(BaseModel):
@@ -341,6 +377,7 @@ class AISetupEnableRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_revision: int | None = Field(default=None, ge=1)
     rubric: RubricDocument | None = None
     test_groups: list[TestGroup] | None = None
     teacher_constraints: dict[str, Any] | None = None

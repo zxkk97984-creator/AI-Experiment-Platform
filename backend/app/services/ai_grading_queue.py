@@ -164,17 +164,15 @@ def finish_ai_grade(db: Session, code_grade_id: int, values: dict,
     from app.services import practice_badge_service
 
     practice_badge_service.settle_related_updates(db, related_updates)
+    db.expire_all()
+    # 重评异议结转、审计与通知和新评分结果必须原子提交。
+    if payload.get("status") == "completed":
+        from app.services.appeal_service import resolve_regrading_appeals
+
+        resolve_regrading_appeals(db, code_grade_id)
     db.commit()
     db.expire_all()
     _forget_ai_claim(db, code_grade_id)
-    # 重评异议收口：只有成功写入终态分数才按分数变化转 adjusted/upheld；
-    # 失败（review_required / 无分数）时保持 regrading，绝不提前关闭处理流程。
-    if payload.get("status") == "completed":
-        try:
-            from app.services.appeal_service import resolve_regrading_appeals
-            resolve_regrading_appeals(db, code_grade_id)
-        except Exception:  # noqa: BLE001 - 异议收口失败不得影响评分终态
-            logger.exception("重评异议收口失败: grade=%s", code_grade_id)
     return True
 
 

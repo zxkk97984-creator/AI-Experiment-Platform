@@ -746,8 +746,9 @@ class SampleRunResponse(BaseModel):
 
 
 class ExamSampleRunRequest(BaseModel):
-    """考试编程题公开样例自测；题目身份仅取自 URL，避免请求体歧义。"""
+    """考试编程题公开样例自测；题目身份仅取自 URL，且必须验证设备写入权限。"""
     code: str
+    expected_write_generation: int = Field(ge=1)
 
     @field_validator("code")
     @classmethod
@@ -902,6 +903,8 @@ class ExamSessionRead(BaseModel):
     saved_answers: list[dict] = Field(default_factory=list)
     visibility: dict = Field(default_factory=dict)
     server_now: datetime
+    can_write: bool = False
+    takeover_required: bool = False
 
 
 class ExamQuestionCreate(BaseModel):

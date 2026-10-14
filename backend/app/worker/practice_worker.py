@@ -317,6 +317,10 @@ def main(force: bool = False) -> None:
                 if time.monotonic() >= next_recovery:
                     with SessionLocal() as db:
                         practice_queue.recover_stale_submissions(db, client)
+                        from app.services.ai_grading_setup_service import recover_durable_setup_work
+
+                        recover_durable_setup_work(
+                            db, client, deterministic_kinds={"practice_problem"}, include_ai=False)
                     next_recovery = time.monotonic() + 60
                 claimed_any = False
                 while len(futures) < limit:
@@ -340,7 +344,19 @@ def main(force: bool = False) -> None:
                 queues.remove(queue_name)
                 queues.append(queue_name)
                 payload = json.loads(raw)
-                if payload.get("type") == "ai_grade" and settings.ai_ready:
+                if (payload.get("type") == "trial_deterministic"
+                        and type(payload.get("id")) is int and payload["id"] > 0):
+                    if len(futures) >= limit:
+                        # Student submissions already own the configured practice
+                        # capacity; leave this advisory trial queued for later.
+                        client.rpush(queue_name, raw)
+                        time.sleep(0.2)
+                        continue
+                    from app.services.ai_grading_setup_service import run_trial_deterministic
+
+                    with SessionLocal() as db:
+                        run_trial_deterministic(db, client, settings, payload["id"])
+                elif payload.get("type") == "ai_grade" and settings.ai_ready:
                     futures.add(pool.submit(process_ai_grade_message, SessionLocal,
                                             settings, int(payload["id"])))
             except redis.exceptions.RedisError:

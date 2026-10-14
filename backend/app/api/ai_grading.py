@@ -15,12 +15,12 @@ from app.dependencies import PaginationParams, get_db, get_redis_client, paginat
 from app.errors import api_error
 from app.models import (
     Assignment, CodeGrade, Course, Exam, ExamAnswer, ExamQuestion,
-    ExamSubmission, GradeOverride, JudgeGradingVersion, JudgeQuestion,
+    AiGradingSetupJob, ExamSubmission, GradeOverride, JudgeGradingVersion, JudgeQuestion,
     QuestionRubric, Submission, User,
 )
 from app.schemas import AIServiceStatus, PaginatedResponse
 from app.schemas.ai_grading import (
-    AIQuestionConfigUpdate, AISetupEnableRequest, AISetupJobCreate,
+    AIQuestionConfigUpdate, AISetupDraftUpdate, AISetupEnableRequest, AISetupJobCreate,
     AISetupTrialRunCreate, GradeOverrideCreate, RubricDocument,
     TestGroupsGenerateRequest, TestGroupsGenerateResponse,
 )
@@ -1027,9 +1027,15 @@ def _apply_grade_override(
 
     # 考试 CodeGrade：始终按题目分值重算 scaled_score（无论教师改 A/Q 还是总分）
     if cg.exam_answer_id:
-        eq = db.get(ExamQuestion, target.question_id)
-        if eq:
-            cg.scaled_score = round((cg.final_score_100 or 0) / 100 * eq.points, 4)
+        from app.services.grading_version_service import frozen_points_for_question
+
+        exam_submission = db.get(ExamSubmission, target.submission_id)
+        frozen_points = (frozen_points_for_question(exam_submission, target.question_id)
+                         if exam_submission is not None else None)
+        if frozen_points is None or frozen_points <= 0:
+            raise api_error(409, "FROZEN_POINTS_MISSING",
+                            "该考试提交缺少可信分值快照，不能修改正式成绩")
+        cg.scaled_score = round((cg.final_score_100 or 0) / 100 * frozen_points, 4)
 
     if cg.needs_teacher_review:
         cg.needs_teacher_review = False
@@ -1239,18 +1245,26 @@ def _setup_job_or_404(db: Session, job_id: int, user: User):
         raise api_error(404, "NOT_FOUND", "配置任务不存在")
     course_id = _get_course_id_for_question(db, job.question_kind, job.question_id)
     _ensure_course_teacher(db, course_id, user)
-    from app.services.ai_grading_setup_service import expire_stale_job
-
-    return expire_stale_job(db, job)
+    return job
 
 
-def _trial_run_read(run) -> dict:
+def _trial_run_read(run, job=None) -> dict:
     return {
         "id": run.id, "job_id": run.job_id, "status": run.status,
+        "stage": run.stage, "trial_type": run.trial_type,
+        "draft_revision": run.draft_revision,
+        "candidate_digest": run.candidate_digest,
         "algorithm_score": run.algorithm_score, "quality_score": run.quality_score,
+        "functional_score": run.functional_score, "robustness_score": run.robustness_score,
+        "deterministic_details": run.deterministic_details,
         "preview_score_100": run.preview_score_100,
-        # 试判不执行判题容器：F/R 确定性分不参与，绝不冒充完整成绩
-        "includes_deterministic": False,
+        "total_score": run.total_score, "score_max": run.score_max,
+        "complete": bool(run.complete),
+        "includes_deterministic": (run.trial_type == "full" and
+                                   run.functional_score is not None and
+                                   run.robustness_score is not None),
+        "current_draft_revision": job.draft_revision if job is not None else None,
+        "stale_draft": bool(job is not None and job.draft_revision != run.draft_revision),
         "ai_result": run.ai_result,
         "error_code": run.error_code, "error_message": run.error_message,
         "attempts": run.attempts,
@@ -1262,6 +1276,9 @@ def _trial_run_read(run) -> dict:
 
 def _setup_job_read(db: Session, job) -> dict:
     rubric = db.get(QuestionRubric, job.draft_rubric_id) if job.draft_rubric_id else None
+    from app.services.ai_grading_setup_service import _draft_default_values
+
+    defaults = _draft_default_values(db, job)
     return {
         "id": job.id, "question_kind": job.question_kind, "question_id": job.question_id,
         "stage": job.stage, "progress": job.progress, "attempts": job.attempts,
@@ -1270,6 +1287,17 @@ def _setup_job_read(db: Session, job) -> dict:
         "draft_rubric": rubric.rubric_json if rubric is not None else None,
         "draft_rubric_status": rubric.status if rubric is not None else None,
         "draft_test_groups": job.draft_test_groups or [],
+        "draft_revision": int(job.draft_revision or 0),
+        "draft_entry_function": job.draft_entry_function or defaults.get("draft_entry_function"),
+        "draft_teacher_constraints": (job.draft_teacher_constraints
+                                       if job.draft_teacher_constraints is not None
+                                       else defaults.get("draft_teacher_constraints", {})),
+        "draft_compare_rules": (job.draft_compare_rules
+                                if job.draft_compare_rules is not None
+                                else defaults.get("draft_compare_rules", {})),
+        "draft_score_cap_rules": (job.draft_score_cap_rules
+                                   if job.draft_score_cap_rules is not None
+                                   else defaults.get("draft_score_cap_rules", [])),
         "generate_test_groups": bool(job.generate_test_groups),
         "error_code": job.error_code, "error_message": job.error_message,
         "created_at": job.created_at.isoformat() if job.created_at else None,
@@ -1308,6 +1336,38 @@ def create_setup_job(
     payload = _setup_job_read(db, job)
     payload["reused"] = not created
     return payload
+
+
+@router.patch("/setup-jobs/{job_id}/draft")
+def save_setup_job_draft(
+    job_id: int,
+    data: AISetupDraftUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save draft edits with optimistic revision control; active scoring remains untouched."""
+    from app.services import ai_grading_setup_service as setup
+
+    _teacher_or_admin(current_user)
+    job = _setup_job_or_404(db, job_id, current_user)
+    try:
+        job = setup.save_setup_draft(
+            db, job_id=job_id, expected_revision=data.expected_revision,
+            rubric=data.rubric.model_dump(),
+            test_groups=[group.model_dump() for group in data.test_groups],
+            entry_function=data.entry_function,
+            teacher_constraints=data.teacher_constraints,
+            compare_rules=data.compare_rules,
+            score_cap_rules=[rule.model_dump() for rule in data.score_cap_rules],
+        )
+    except setup.DraftRevisionConflict as exc:
+        raise api_error(409, "DRAFT_REVISION_CONFLICT", str(exc),
+                        fields={"current_revision": job.draft_revision}) from exc
+    except setup.SetupJobError as exc:
+        raise api_error(409, "INVALID_STATE", str(exc)) from exc
+    except ValueError as exc:
+        raise api_error(422, "INVALID_DRAFT", str(exc)) from exc
+    return _setup_job_read(db, job)
 
 
 @router.get("/setup-jobs/{job_id}")
@@ -1361,12 +1421,17 @@ def create_trial_run(
         run, created = setup.create_trial_run(
             db, job=job, teacher_id=current_user.id, code=data.code,
             client_request_id=data.client_request_id,
+            expected_revision=data.expected_revision, settings=settings,
         )
+    except setup.DraftRevisionConflict as exc:
+        raise api_error(409, "DRAFT_REVISION_CONFLICT", str(exc),
+                        fields={"current_revision": job.draft_revision}) from exc
     except setup.SetupJobError as exc:
-        raise api_error(409, "INVALID_STATE", str(exc)) from exc
+        code = "TRIAL_IDEMPOTENCY_CONFLICT" if "请求标识" in str(exc) else "INVALID_STATE"
+        raise api_error(409, code, str(exc)) from exc
     if created or run.status == "queued":
         setup.enqueue_trial_run(db, redis_client, run.id)
-    payload = _trial_run_read(run)
+    payload = _trial_run_read(run, job)
     payload["reused"] = not created
     return payload
 
@@ -1385,7 +1450,8 @@ def get_trial_run(
         raise api_error(404, "NOT_FOUND", "试判任务不存在")
     course_id = _get_course_id_for_question(db, run.question_kind, run.question_id)
     _ensure_course_teacher(db, course_id, current_user)
-    return _trial_run_read(run)
+    job = db.get(AiGradingSetupJob, run.job_id)
+    return _trial_run_read(run, job)
 
 
 @router.post("/setup-jobs/{job_id}/enable")
@@ -1402,6 +1468,16 @@ def enable_setup_job(
     _teacher_or_admin(current_user)
     job = _setup_job_or_404(db, job_id, current_user)
     _ensure_assignment_scoring_editable(db, job.question_kind, job.question_id)
+    changed_fields = any(value is not None for value in (
+        data.rubric, data.test_groups, data.teacher_constraints,
+        data.score_cap_rules, data.compare_rules, data.entry_function,
+    ))
+    if changed_fields and data.expected_revision is None:
+        raise api_error(422, "DRAFT_REVISION_REQUIRED",
+                        "携带草稿修改内容时必须提供 expected_revision")
+    if data.expected_revision is not None and data.expected_revision != int(job.draft_revision or 0):
+        raise api_error(409, "DRAFT_REVISION_CONFLICT", "草稿已更新，请刷新后重试",
+                        fields={"current_revision": job.draft_revision})
     try:
         return setup.enable_setup_job(
             db, job=job, actor=current_user,
@@ -1410,7 +1486,11 @@ def enable_setup_job(
             score_cap_rules=data.score_cap_rules, compare_rules=data.compare_rules,
             entry_function=data.entry_function,
             acknowledge_in_flight=data.acknowledge_in_flight,
+            expected_revision=data.expected_revision,
         )
+    except setup.DraftRevisionConflict as exc:
+        raise api_error(409, "DRAFT_REVISION_CONFLICT", str(exc),
+                        fields={"current_revision": job.draft_revision}) from exc
     except setup.EnableScoreError as exc:
         raise api_error(422, "ENABLE_SCORE_LIMIT_EXCEEDED", str(exc),
                         fields={"violations": exc.violations}) from exc

@@ -45,6 +45,8 @@ def _appeal_read(db: Session, appeal: GradeAppeal, *, window_days: int, teacher_
         "handler_comment": appeal.handler_comment,
         "score_before": appeal.score_before,
         "score_after": appeal.score_after,
+        "score_max": appeal.score_max,
+        "regrade_run_id": appeal.regrade_run_id,
         "result_revision_snapshot": appeal.result_revision_snapshot,
         "title": title,
         "route": route,

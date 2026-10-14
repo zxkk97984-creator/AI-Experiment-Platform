@@ -260,10 +260,19 @@ def leaderboard(
     current_user: User = Depends(require_roles("student", "teacher", "admin")),
     settings: Settings = Depends(get_settings),
 ):
-    """只读排行榜：教师可看任课班级榜与全平台榜，但只见聚合与化名。"""
-    student_ids, resolved_scope = _offering_scope(
+    """Legacy response shape backed by the canonical privacy and ranking query."""
+    _student_ids, resolved_scope = _offering_scope(
         db, scope_kind=scope, scope_id=scope_id, viewer=current_user)
-    return practice_service.leaderboard(
-        db, board=board, scope_kind=scope, scope_id=resolved_scope,
-        settings=settings, viewer=current_user, student_ids=student_ids,
+    from app.services import practice_leaderboard
+
+    canonical = practice_leaderboard.board(
+        db, board_kind=board, scope_kind=scope, scope_id=resolved_scope,
+        viewer=current_user, settings=settings, view="top",
     )
+    return {
+        "items": canonical["items"],
+        "total": canonical["total"],
+        "board": board,
+        "scope": scope,
+        "generated_at": canonical["generated_at"],
+    }

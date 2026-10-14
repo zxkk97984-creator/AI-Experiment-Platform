@@ -40,13 +40,29 @@ def assert_run_owned(db, run_id, token):
         raise RunCancelled("Lab execution was cancelled")
 
 
+def _settle_unpublished_regrade(db, run_id, status, reason=None):
+    """Keep appeal state in the same transaction as an unsuccessful terminal run."""
+    if status not in {"failed", "cancelled", "needs_review"}:
+        return
+    from app.services.appeal_service import fail_lab_regrade_appeals
+
+    fail_lab_regrade_appeals(db, run_id, reason or (
+        "重评任务已取消" if status == "cancelled" else "重评运行失败或需人工复核，成绩未发布"))
+
+
 def request_cancel(db, run_id):
     """Cancel queued work atomically; running work retains its cleanup lease."""
+    run = db.get(LabRun, run_id)
+    if run and run.submission_id:
+        from app.services.lab_grading import lock_evaluation_records
+        lock_evaluation_records(db, run)
     changed = db.execute(update(LabRun).where(
         LabRun.id == run_id, LabRun.status == "queued",
     ).values(cancel_requested=True, status="cancelled", active_student_id=None,
              finished_at=func.now()).execution_options(synchronize_session=False)).rowcount
-    if not changed:
+    if changed:
+        _settle_unpublished_regrade(db, run_id, "cancelled")
+    else:
         db.execute(update(LabRun).where(
             LabRun.id == run_id, LabRun.status.in_(("running", "recovering")),
         ).values(cancel_requested=True).execution_options(synchronize_session=False))
@@ -217,6 +233,7 @@ def finish_run(db, run_id, token, status, result=None, error_code=None, error_me
     changed = db.execute(update(LabRun).where(*clauses).values(**values)).rowcount
     if changed == 1:
         release_resources(db, f"run:{run_id}", token)
+        _settle_unpublished_regrade(db, run_id, status, error_message)
     return changed == 1
 
 
@@ -280,6 +297,8 @@ def recover_runs(db, settings):
         ).values(**values)).rowcount
         if changed:
             release_resources(db, f"run:{run_id}", token)
+            if terminal:
+                _settle_unpublished_regrade(db, run_id, status, values["error_message"])
             # A failed infrastructure attempt never consumes the student's quota.
             if terminal and run.submission_id:
                 from app.models.lab import LabSubmission

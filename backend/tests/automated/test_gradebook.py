@@ -72,7 +72,8 @@ def publish(client, case, revision):
 
 
 def single_config(columns):
-    return [{'key': 'regular', 'title': 'Assessment', 'weight': '100', 'columns': columns}]
+    return [{'key': 'regular', 'title': 'Assessment', 'weight': '100',
+             'weight_mode': 'custom', 'columns': columns}]
 
 
 def column(key='main', weight='100', **extra):

@@ -29,7 +29,9 @@ class AppealHandle(BaseModel):
 
     action: Literal["uphold", "adjust", "regrade", "reject"]
     comment: str = Field(default="", max_length=2000)
-    score: float | None = Field(default=None, ge=0, le=100)
+    # Ordinary score is expressed in the target's frozen unit. The service
+    # applies the target-specific upper bound (exam questions may exceed 100).
+    score: float | None = Field(default=None, ge=0)
     functional_score: float | None = Field(default=None, ge=0, le=60)
     robustness_score: float | None = Field(default=None, ge=0, le=10)
     algorithm_score: float | None = Field(default=None, ge=0, le=20)
@@ -38,6 +40,8 @@ class AppealHandle(BaseModel):
 
     @model_validator(mode="after")
     def validate_adjust_payload(self) -> AppealHandle:
+        if self.action == "adjust" and self.score is not None and self.final_score_100 is not None:
+            raise ValueError("普通分数 score 与高级百分制 final_score_100 不能同时提交")
         if self.action == "adjust" and not any(value is not None for value in (
             self.score, self.functional_score, self.robustness_score,
             self.algorithm_score, self.quality_score, self.final_score_100,

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -64,6 +65,7 @@ class AppealTarget:
     title: str
     route: str | None
     score_before: float | None
+    score_max: float
     result_revision: int
     visible_at: datetime
     code_grade: CodeGrade | None
@@ -78,6 +80,15 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 def appeal_dedupe_key(target_kind: str, target_id: int, revision: int) -> str:
     return f"{target_kind}:{target_id}:{revision}"
+
+
+def sync_appeal_notification(db: Session, student_id: int) -> None:
+    """Materialize the student's appeal state in the caller's transaction."""
+    student = db.get(User, student_id)
+    if student is not None and student.role == "student":
+        from app.services.notification_service import sync_student_notifications
+
+        sync_student_notifications(db, student, commit=False)
 
 
 def resolve_appeal_target(
@@ -101,6 +112,7 @@ def resolve_appeal_target(
             title=(question.title if question else "作业提交"),
             route=f"/student/submissions/{submission.id}",
             score_before=grade.final_score_100 if grade is not None else submission.score,
+            score_max=100.0,
             result_revision=(grade.result_revision or 0) if grade is not None else 0,
             visible_at=visible, code_grade=grade,
             scorable=bool(grade is not None and grade.mode == "active"),
@@ -112,6 +124,12 @@ def resolve_appeal_target(
         if answer is None or parent is None or parent.student_id != student_id:
             raise api_error(404, "APPEAL_TARGET_NOT_FOUND", "成绩记录不存在")
         question = db.get(ExamQuestion, answer.question_id)
+        from app.services.grading_version_service import frozen_points_for_question
+
+        score_max = frozen_points_for_question(parent, answer.question_id)
+        if score_max is None or score_max <= 0:
+            raise api_error(409, "FROZEN_POINTS_MISSING",
+                            "该考试提交缺少可信分值快照，不能建立可处理的成绩异议")
         grade = db.scalar(select(CodeGrade).where(CodeGrade.exam_answer_id == answer.id))
         visible = (grade.finished_at if grade and grade.finished_at else None) \
             or answer.finished_at or answer.created_at
@@ -121,7 +139,9 @@ def resolve_appeal_target(
             # 直接用题目上的 exam_id 拼路由：学生请求作用域策略会过滤 Exam 读取，
             # 依赖 db.get(Exam) 会让路由在学生侧静默变成 None。
             route=f"/student/exams/{question.exam_id}" if question else None,
-            score_before=grade.scaled_score if grade is not None else answer.score,
+            score_before=(answer.score if answer.score is not None
+                          else grade.scaled_score if grade is not None else None),
+            score_max=float(score_max),
             result_revision=(grade.result_revision or 0) if grade is not None else (answer.result_revision or 0),
             visible_at=visible, code_grade=grade,
             scorable=bool(grade is not None and grade.mode == "active"),
@@ -130,7 +150,8 @@ def resolve_appeal_target(
     if target_kind == "lab_submission":
         state = db.get(LabSubmission, target_id)
         submission = db.get(ExperimentSubmission, target_id)
-        if state is None or submission is None or submission.student_id != student_id:
+        record = db.get(ExperimentRecord, submission.record_id) if submission is not None else None
+        if state is None or submission is None or record is None or record.student_id != student_id:
             raise api_error(404, "APPEAL_TARGET_NOT_FOUND", "成绩记录不存在")
         grade = db.get(LabGradeRevision, state.published_grade_id) if state.published_grade_id else None
         return AppealTarget(
@@ -138,6 +159,7 @@ def resolve_appeal_target(
             title="实验提交",
             route="/student/experiments",
             score_before=grade.total if grade is not None else None,
+            score_max=100.0,
             result_revision=state.published_grade_id or 0,
             visible_at=(_as_utc(grade.published_at) if grade is not None else None)
             or submission.submitted_at or submission.created_at,
@@ -166,6 +188,7 @@ def resolve_appeal_target(
             title=(problem.title if problem is not None else "练习题目"),
             route=f"/student/practice/submissions/{submission.id}",
             score_before=grade.final_score_100 if grade is not None else submission.score,
+            score_max=100.0,
             result_revision=(grade.result_revision or 0) if grade is not None
             else (submission.result_revision or 0),
             visible_at=visible, code_grade=grade,
@@ -228,6 +251,7 @@ def create_appeal(
         code_grade_id=target.code_grade.id if target.code_grade is not None else None,
         result_revision_snapshot=target.result_revision,
         score_before=target.score_before,
+        score_max=target.score_max,
         reason=reason,
         status="pending",
         route=target.route,
@@ -243,6 +267,7 @@ def create_appeal(
         changes={"target_kind": target_kind, "target_id": target_id,
                  "result_revision": target.result_revision, "score_before": target.score_before},
     ))
+    sync_appeal_notification(db, student.id)
     db.commit()
     db.refresh(appeal)
     return appeal
@@ -261,6 +286,7 @@ def withdraw_appeal(db: Session, *, appeal: GradeAppeal, student: User) -> Grade
         actor_id=student.id, action="appeal.withdrawn", target_type="grade_appeal",
         target_id=str(appeal.id), reason="学生撤回成绩异议",
     ))
+    sync_appeal_notification(db, student.id)
     db.commit()
     db.refresh(appeal)
     return appeal
@@ -279,6 +305,7 @@ def reply_appeal(db: Session, *, appeal: GradeAppeal, student: User, message: st
         actor_id=student.id, action="appeal.replied", target_type="grade_appeal",
         target_id=str(appeal.id), reason="学生补充异议说明",
     ))
+    sync_appeal_notification(db, student.id)
     db.commit()
     db.refresh(appeal)
     return appeal
@@ -359,6 +386,7 @@ def handle_appeal(
             target_id=str(appeal.id), reason=comment,
             changes={"score_before": appeal.score_before, "score_after": appeal.score_after},
         ))
+        sync_appeal_notification(db, appeal.student_id)
         db.commit()
         db.refresh(appeal)
         return _handle_result(appeal)
@@ -381,6 +409,8 @@ def _handle_result(appeal: GradeAppeal) -> dict:
     return {
         "ok": True, "appeal_id": appeal.id, "status": appeal.status,
         "score_before": appeal.score_before, "score_after": appeal.score_after,
+        "score_max": appeal.score_max,
+        "regrade_run_id": appeal.regrade_run_id,
     }
 
 
@@ -400,26 +430,48 @@ def _adjust_appeal(
         grade = db.get(CodeGrade, appeal.code_grade_id) if appeal.code_grade_id else None
         if grade is None:
             raise api_error(409, "APPEAL_TARGET_MISSING", "评分记录不存在，无法改分")
+        if score is not None and final_score_100 is not None:
+            raise api_error(422, "APPEAL_SCORE_FIELDS_CONFLICT",
+                            "普通分数 score 与高级百分制 final_score_100 不能同时提交")
+        if appeal.target_kind == "exam_answer" and appeal.score_max is None:
+            raise api_error(409, "FROZEN_POINTS_MISSING",
+                            "该异议没有可信冻结满分，不能修改考试成绩")
+        effective_final = final_score_100
+        if score is not None:
+            maximum = float(appeal.score_max or 100.0)
+            if not math.isfinite(float(score)) or score < 0 or score > maximum:
+                raise api_error(422, "SCORE_OUT_OF_RANGE",
+                                f"得分必须在 0 到本任务满分 {maximum:g} 分之间",
+                                fields={"score": [f"得分必须在 0 到 {maximum:g} 之间"]})
+            effective_final = float(score) / maximum * 100.0
         payload = GradeOverrideCreate(
             algorithm_score=algorithm_score, quality_score=quality_score,
             functional_score=functional_score, robustness_score=robustness_score,
-            final_score_100=final_score_100 if final_score_100 is not None else score,
+            final_score_100=effective_final,
             reason=comment,
         )
         # 既有 override 路径自带：target → CodeGrade 锁序 + 三类 409 + 清 claim_token
         # + 递增 CodeGrade.result_revision + 写 GradeOverride
         result = _apply_grade_override(db, grade.id, payload, actor)
         appeal.status = "adjusted"
-        appeal.score_after = (result.get("replacement") or {}).get("final_score_100")
+        final_after = (result.get("replacement") or {}).get("final_score_100")
+        appeal.score_after = (
+            round(float(final_after) * float(appeal.score_max) / 100.0, 2)
+            if appeal.target_kind == "exam_answer" and final_after is not None
+            else final_after
+        )
     elif appeal.target_kind == "lab_submission":
         from app.schemas.lab import LabReviewRequest
         from app.services.lab_grading import manual_review
 
         submission = db.get(ExperimentSubmission, appeal.target_id)
-        if submission is None:
+        record = db.get(ExperimentRecord, submission.record_id) if submission is not None else None
+        if submission is None or record is None or record.student_id != appeal.student_id:
             raise api_error(404, "APPEAL_TARGET_NOT_FOUND", "实验提交不存在")
-        if score is None:
+        if score is None or final_score_100 is not None:
             raise api_error(422, "APPEAL_SCORE_REQUIRED", "实验改分必须给出 0-100 的总分")
+        if not math.isfinite(float(score)) or score < 0 or score > 100:
+            raise api_error(422, "SCORE_OUT_OF_RANGE", "实验改分必须在 0 到 100 分之间")
         manual_review(db, submission, actor,
                       LabReviewRequest(score=score, feedback=comment, reason=comment))
         appeal.status = "adjusted"
@@ -436,6 +488,7 @@ def _adjust_appeal(
         changes={"score_before": appeal.score_before, "score_after": appeal.score_after,
                  "target_kind": appeal.target_kind, "target_id": appeal.target_id},
     ))
+    sync_appeal_notification(db, appeal.student_id)
     db.commit()
     db.refresh(appeal)
     return _handle_result(appeal)
@@ -479,13 +532,15 @@ def _regrade_appeal(
         state = db.get(LabSubmission, appeal.target_id)
         if submission is None or state is None:
             raise api_error(404, "APPEAL_TARGET_NOT_FOUND", "实验提交不存在")
-        enqueue_regrade(db, submission, actor, reason=f"成绩异议重评：{comment}")
+        run = enqueue_regrade(db, submission, actor, reason=f"成绩异议重评：{comment}")
+        appeal.regrade_run_id = run.id
         # 重评由实验判题 worker 异步完成，现有复核标志让教师侧能看到待办
         state.review_requested = True
         state.review_reason = f"成绩异议重评：{comment}"[:2000]
     else:
         raise api_error(409, "APPEAL_TARGET_UNSUPPORTED", "该成绩类型暂不支持重评")
 
+    sync_appeal_notification(db, appeal.student_id)
     db.commit()
     db.refresh(appeal)
     return _handle_result(appeal)
@@ -498,7 +553,7 @@ def resolve_regrading_appeals(db: Session, code_grade_id: int) -> list[int]:
     无新分数）时保持 ``regrading``，绝不提前关闭处理流程。
     """
     grade = db.get(CodeGrade, code_grade_id)
-    if grade is None or grade.status != "completed" or grade.final_score_100 is None:
+    if grade is None or grade.status != "completed":
         return []
     if grade.submission_id:
         target_kind, target_id = "submission", grade.submission_id
@@ -507,6 +562,10 @@ def resolve_regrading_appeals(db: Session, code_grade_id: int) -> list[int]:
     elif grade.practice_submission_id:
         target_kind, target_id = "practice_submission", grade.practice_submission_id
     else:
+        return []
+    after_value = (grade.scaled_score if target_kind == "exam_answer"
+                   else grade.final_score_100)
+    if after_value is None or not math.isfinite(float(after_value)):
         return []
 
     rows = db.scalars(
@@ -519,7 +578,7 @@ def resolve_regrading_appeals(db: Session, code_grade_id: int) -> list[int]:
     resolved: list[int] = []
     now = datetime.now(timezone.utc)
     for appeal in rows:
-        after = float(grade.final_score_100)
+        after = float(after_value)
         before = appeal.score_before
         changed = before is not None and abs(float(before) - after) > 1e-9
         appeal.status = "adjusted" if changed else "upheld"
@@ -533,11 +592,72 @@ def resolve_regrading_appeals(db: Session, code_grade_id: int) -> list[int]:
             changes={"score_before": before, "score_after": after,
                      "code_grade_id": code_grade_id, "result_revision": grade.result_revision},
         ))
+        sync_appeal_notification(db, appeal.student_id)
         resolved.append(appeal.id)
     if resolved:
-        db.commit()
         logger.info("appeal_regrade_resolved", extra={"appeals": resolved, "grade": code_grade_id})
     return resolved
+
+
+def resolve_lab_regrade_appeals(db: Session, run_id: int, score: float) -> list[int]:
+    """Close only appeals linked to this successfully published lab run."""
+    if not math.isfinite(float(score)):
+        return []
+    rows = db.scalars(
+        select(GradeAppeal).where(
+            GradeAppeal.target_kind == "lab_submission",
+            GradeAppeal.regrade_run_id == run_id,
+            GradeAppeal.status == "regrading",
+        ).with_for_update()
+    ).all()
+    if not rows:
+        return []
+    now = datetime.now(timezone.utc)
+    resolved = []
+    for appeal in rows:
+        before = appeal.score_before
+        changed = before is not None and abs(float(before) - float(score)) > 0.005
+        appeal.status = "adjusted" if changed else "upheld"
+        appeal.score_after = float(score)
+        appeal.resolved_at = now
+        appeal.handler_comment = appeal.handler_comment or "异议重评已发布"
+        db.add(AuditEvent(
+            actor_id=None, action=f"appeal.regrade_{appeal.status}",
+            target_type="grade_appeal", target_id=str(appeal.id),
+            reason="关联实验重评成绩已正式发布",
+            changes={"score_before": before, "score_after": appeal.score_after,
+                     "regrade_run_id": run_id},
+        ))
+        sync_appeal_notification(db, appeal.student_id)
+        resolved.append(appeal.id)
+    return resolved
+
+
+def fail_lab_regrade_appeals(db: Session, run_id: int, reason: str) -> list[int]:
+    """Return appeals to pending when their linked run fails or cannot publish."""
+    rows = db.scalars(
+        select(GradeAppeal).where(
+            GradeAppeal.target_kind == "lab_submission",
+            GradeAppeal.regrade_run_id == run_id,
+            GradeAppeal.status == "regrading",
+        ).with_for_update()
+    ).all()
+    affected = []
+    for appeal in rows:
+        appeal.status = "pending"
+        appeal.score_after = None
+        appeal.resolved_at = None
+        prior = (appeal.handler_comment or "").strip()
+        appeal.handler_comment = (f"{prior}\n重评未能发布：{reason}" if prior else
+                                  f"重评未能发布：{reason}")[:2000]
+        db.add(AuditEvent(
+            actor_id=None, action="appeal.regrade_failed", target_type="grade_appeal",
+            target_id=str(appeal.id), reason=reason[:500],
+            changes={"regrade_run_id": run_id, "status": "pending"},
+        ))
+        sync_appeal_notification(db, appeal.student_id)
+        affected.append(appeal.id)
+    return affected
 
 
 # ── 通知派生（供 notification_service 使用） ──────────────────────

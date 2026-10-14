@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -159,6 +159,47 @@ def _with_submission_aliases(session: dict) -> dict:
         "score": submission.get("score"),
     })
     return session
+
+
+def _exam_device_cookie_name(exam_id: int) -> str:
+    return f"dai_exam_device_{exam_id}"
+
+
+def _set_exam_device_cookie(response: Response, exam_id: int, token: str,
+                            settings: Settings) -> None:
+    response.set_cookie(
+        key=_exam_device_cookie_name(exam_id), value=token,
+        path=f"/api/v1/exams/{exam_id}", httponly=True,
+        secure=settings.environment == "production", samesite="strict",
+    )
+
+
+def _delete_exam_device_cookie(response: Response, exam_id: int,
+                               settings: Settings) -> None:
+    response.delete_cookie(
+        key=_exam_device_cookie_name(exam_id), path=f"/api/v1/exams/{exam_id}",
+        httponly=True, secure=settings.environment == "production", samesite="strict",
+    )
+
+
+def _with_exam_device_access(payload: dict, *, exam_id: int, request: Request,
+                             db: Session, token_override: str | None = None) -> dict:
+    submission_payload = payload.get("submission")
+    if not submission_payload or submission_payload.get("status") != "started":
+        payload["can_write"] = False
+        payload["takeover_required"] = False
+        return payload
+    submission = db.get(ExamSubmission, submission_payload.get("id"))
+    token = token_override or request.cookies.get(_exam_device_cookie_name(exam_id))
+    can_write = False
+    if submission is not None and submission.active_device_token_hash and token:
+        import hashlib
+        import secrets
+        actual = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        can_write = secrets.compare_digest(submission.active_device_token_hash, actual)
+    payload["can_write"] = can_write
+    payload["takeover_required"] = not can_write
+    return payload
 
 
 def _submitted_ids(db: Session, exams: list[Exam], student_id: int) -> set[int]:
@@ -536,6 +577,7 @@ async def import_exam_audience(
 @router.get("/{exam_id}/session", response_model=ExamSessionRead)
 def get_exam_session(
     exam_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_roles("student")),
 ):
@@ -544,7 +586,8 @@ def get_exam_session(
         raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
     if not student_in_exam_audience(db, exam, current_user.id):
         raise api_error(403, "NOT_IN_EXAM_AUDIENCE", "你不在本次考试范围内")
-    return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    payload = _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    return _with_exam_device_access(payload, exam_id=exam_id, request=request, db=db)
 
 
 @router.post(
@@ -555,6 +598,7 @@ def run_exam_public_cases(
     exam_id: int,
     question_id: int,
     payload: ExamSampleRunRequest,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
@@ -574,6 +618,12 @@ def run_exam_public_cases(
     now = utc_now()
     if not submission or submission.status != "started":
         raise api_error(403, "EXAM_NOT_STARTED", "考试未开始或已结束")
+    from app.services.exam_service import require_exam_device_write
+    require_exam_device_write(
+        db, submission, expected_write_generation=payload.expected_write_generation,
+        device_token=request.cookies.get(_exam_device_cookie_name(exam_id)),
+        source="sample_run",
+    )
     if submission.expires_at and as_utc(submission.expires_at) <= now:
         raise api_error(403, "EXAM_EXPIRED", "考试已过期")
 
@@ -636,6 +686,8 @@ def run_exam_public_cases(
 @router.post("/{exam_id}/start", response_model=ExamSessionRead, status_code=status.HTTP_201_CREATED)
 def start_exam(
     exam_id: int,
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
@@ -663,8 +715,25 @@ def start_exam(
         if exam.end_at is not None and as_utc(exam.end_at) <= now:
             raise api_error(403, "EXAM_EXPIRED", "考试已结束")
 
-    svc_start_exam(exam, current_user, db, settings=settings)
-    return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    started = svc_start_exam(exam, current_user, db, settings=settings)
+    issued_token = None
+    if existing is None:
+        # Only the request that wins first-attempt creation may bind a credential.
+        # A retry after a lost response cannot silently bind another device.
+        submission = db.scalar(select(ExamSubmission).where(
+            ExamSubmission.id == started.id).with_for_update()
+            .execution_options(populate_existing=True))
+        if submission is not None and not submission.active_device_token_hash:
+            import hashlib
+            import secrets
+            issued_token = secrets.token_urlsafe(32)
+            submission.active_device_token_hash = hashlib.sha256(
+                issued_token.encode("utf-8")).hexdigest()
+            db.commit()
+            _set_exam_device_cookie(response, exam_id, issued_token, settings)
+    result = _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    return _with_exam_device_access(result, exam_id=exam_id, request=request, db=db,
+                                    token_override=issued_token)
 
 
 @router.post("/{exam_id}/takeover", status_code=status.HTTP_200_OK)
@@ -672,6 +741,7 @@ def takeover_exam(
     exam_id: int,
     payload: ExamTakeoverRequest,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     redis=Depends(get_redis_client),
@@ -687,11 +757,18 @@ def takeover_exam(
         raise api_error(403, "NOT_IN_EXAM_AUDIENCE", "你不在本次考试范围内")
     verify_student_reauth(request, current_user, payload.current_password, redis, settings, db)
     ip_hash, ua_hash = _client_fingerprint(request, settings)
-    return takeover_exam_session(
+    result = takeover_exam_session(
         db, exam, current_user,
         expected_write_generation=payload.expected_write_generation,
         device_id=payload.device_id, ip_hash=ip_hash, ua_hash=ua_hash,
     )
+    token = result.get("submission", {}).pop("device_token", None)
+    if not token:
+        raise api_error(500, "DEVICE_CREDENTIAL_MISSING", "换机凭证未能生成，请重试")
+    _set_exam_device_cookie(response, exam_id, token, settings)
+    result["can_write"] = True
+    result["takeover_required"] = False
+    return result
 
 
 @router.post("/{exam_id}/submit", response_model=ExamSessionRead, status_code=status.HTTP_201_CREATED)
@@ -699,6 +776,7 @@ def submit_exam(
     exam_id: int,
     payload: ExamSubmitPayload,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
@@ -715,7 +793,10 @@ def submit_exam(
         historical_exam = db.scalar(select(Exam).where(Exam.id == exam_id)
                                     .execution_options(teaching_history=True))
         if historical_exam is not None:
-            return _with_submission_aliases(build_student_exam_session(historical_exam, current_user, db))
+            _delete_exam_device_cookie(response, exam_id, settings)
+            result = _with_submission_aliases(
+                build_student_exam_session(historical_exam, current_user, db))
+            return _with_exam_device_access(result, exam_id=exam_id, request=request, db=db)
     exam = require_exam(exam_id, db)
     course = db.get(Course, exam.course_id)
     if not course or not _student_exam_allowed(exam, current_user, db):
@@ -735,15 +816,17 @@ def submit_exam(
         raise api_error(403, "EXAM_NOT_STARTED", "请先开始考试")
     # 幂等：重复提交返回当前状态，不报错（review_required 不自动重试）
     if sub.status in ("submitted", "grading", "graded", "review_required"):
-        return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
-    if sub.write_generation != payload.expected_write_generation:
-        from app.services.exam_service import reject_superseded_write
-        reject_superseded_write(db, sub, source="submit")
+        _delete_exam_device_cookie(response, exam_id, settings)
+        result = _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+        return _with_exam_device_access(result, exam_id=exam_id, request=request, db=db)
     ip_hash, ua_hash = _client_fingerprint(request, settings)
     svc_submit_exam(exam, current_user, db,
                     expected_write_generation=payload.expected_write_generation,
+                    device_token=request.cookies.get(_exam_device_cookie_name(exam_id)),
                     ip_hash=ip_hash, ua_hash=ua_hash)
-    return _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    _delete_exam_device_cookie(response, exam_id, settings)
+    result = _with_submission_aliases(build_student_exam_session(exam, current_user, db))
+    return _with_exam_device_access(result, exam_id=exam_id, request=request, db=db)
 
 
 @router.post("/{exam_id}/submissions/{submission_id}/retry", response_model=ExamSubmissionRead)
@@ -1660,6 +1743,7 @@ def put_answer(exam_id: int, question_id: int, payload: dict, request: Request,
     ip_hash, ua_hash = _client_fingerprint(request, settings)
     return save_answer(db, exam_id, question_id, current_user, payload,
                        expected_write_generation=_require_write_generation(payload),
+                       device_token=request.cookies.get(_exam_device_cookie_name(exam_id)),
                        ip_hash=ip_hash, ua_hash=ua_hash)
 
 
@@ -1672,9 +1756,13 @@ def put_answers_batch(
     settings: Settings = Depends(get_settings),
     current_user: User = Depends(require_roles("student")),
 ):
-    from app.services.exam_service import reject_superseded_write
+    from app.services.exam_service import require_exam_device_write
     from app.services.time_utils import utc_now
     exam = require_exam(exam_id, db)
+    # Reject closed or unauthorized teaching scopes before revealing device
+    # credential state. The scope check is read/write-authority validation;
+    # device and generation are still checked once, before any batch item/event.
+    exam = require_student_task_write(db, exam, current_user)
     if exam.status != "published" or not can_access_course_content(exam.course, current_user, db):
         raise api_error(403, "EXAM_NOT_AVAILABLE", "考试未发布或无权参加")
     ip_hash, ua_hash = _client_fingerprint(request, settings)
@@ -1682,10 +1770,13 @@ def put_answers_batch(
         ExamSubmission.exam_id == exam_id,
         ExamSubmission.student_id == current_user.id,
     ))
-    if sub is not None and sub.status == "started" \
-            and sub.write_generation != payload.expected_write_generation:
-        # 循环前整体判定：旧设备一个字节都不落库（逐题保存各自提交，不能事后回滚）。
-        reject_superseded_write(db, sub, source="save_answer_batch")
+    if sub is not None and sub.status == "started":
+        # 循环和事件写入前整体校验，不能让旧设备部分写入批次。
+        require_exam_device_write(
+            db, sub, expected_write_generation=payload.expected_write_generation,
+            device_token=request.cookies.get(_exam_device_cookie_name(exam_id)),
+            source="save_answer_batch",
+        )
     events_recorded = 0
     if sub is not None and sub.status == "started" and payload.events:
         events_recorded = record_exam_events(
@@ -1699,6 +1790,7 @@ def put_answers_batch(
             answer = save_answer(
                 db, exam_id, item.question_id, current_user, item.model_dump(exclude_none=True),
                 expected_write_generation=payload.expected_write_generation,
+                device_token=request.cookies.get(_exam_device_cookie_name(exam_id)),
                 ip_hash=ip_hash, ua_hash=ua_hash,
             )
             results.append({

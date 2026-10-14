@@ -363,6 +363,31 @@ def test_custom_weights_keep_old_ratios_and_gate_publish_until_allocated(client,
     assert allocated['draft']['blockers'] == []
     assert allocated['draft']['rows'][0]['final_score'] == '87.00'  # 90*0.4 + 90*0.3 + 80*0.3
     assert publish(client, book, allocated['revision']).status_code == 201
+
+    # Switching the same existing columns to equal mode clears stale custom
+    # ratios and re-derives every allocation state, including old rows.
+    equal = save(client, book, [{'key': 'regular', 'title': '平时', 'weight': '100', 'weight_mode': 'equal',
+                                 'columns': [
+                                     {'key': 'manual-a', 'title': '人工一', 'weight': 40,
+                                      'source_kind': 'manual'},
+                                     {'key': 'manual-b', 'title': '人工二', 'weight': 30,
+                                      'source_kind': 'manual'},
+                                     {'key': f'assignment-{assignment_id}', 'title': '自定义比例作业',
+                                      'weight': 30, 'source_kind': 'assignment',
+                                      'source_id': assignment_id}]}], read(client, book)['revision'])
+    assert all(row['weight'] is None and row['allocation_status'] == 'allocated'
+               for row in equal['config'][0]['columns'])
+    assert not any(item['code'] == 'UNALLOCATED_WEIGHTS' for item in equal['draft']['blockers'])
+    restored_custom = save(client, book, [{'key': 'regular', 'title': '平时', 'weight': '100', 'weight_mode': 'custom',
+                                          'columns': [
+                                              {'key': 'manual-a', 'title': '人工一', 'source_kind': 'manual'},
+                                              {'key': 'manual-b', 'title': '人工二', 'source_kind': 'manual'},
+                                              {'key': f'assignment-{assignment_id}', 'title': '自定义比例作业',
+                                               'source_kind': 'assignment', 'source_id': assignment_id}]}],
+                                equal['revision'])
+    assert all(row['weight'] is None and row['allocation_status'] == 'pending'
+               for row in restored_custom['config'][0]['columns'])
+    assert any(item['code'] == 'UNALLOCATED_WEIGHTS' for item in restored_custom['draft']['blockers'])
     # 已发布快照不被改写。
     original = client.get(f"{API}/snapshots/{first_snapshot['id']}", headers=book.headers).json()
     assert original['payload_hash'] == first_snapshot['payload_hash']

@@ -318,10 +318,18 @@ def test_opt_out_hides_platform_row_but_class_board_is_unaffected(
     platform = _board(client, s1_header)
     assert platform["total"] == 2 and platform["opt_in"] is True
     assert [row["is_me"] for row in platform["items"]].count(True) == 1
+    legacy_platform = client.get("/api/v1/practice/leaderboard?scope=platform&board=deterministic",
+                                 headers=s1_header).json()
+    assert legacy_platform["total"] == platform["total"]
+    assert legacy_platform["items"] == platform["items"]
 
     class_board = _board(client, s1_header, scope="offering", scope_id=offering_id)
     assert class_board["total"] == 2, class_board
     assert class_board["anonymized"] is False
+    legacy_class = client.get(
+        f"/api/v1/practice/leaderboard?scope=offering&scope_id={offering_id}&board=deterministic",
+        headers=s1_header).json()
+    assert legacy_class["items"] == class_board["items"]
     names = {row["display_name"] for row in class_board["items"]}
     assert names == {s1_user.real_name or s1_user.username, s2_user.real_name or s2_user.username}
 
@@ -331,6 +339,11 @@ def test_opt_out_hides_platform_row_but_class_board_is_unaffected(
     assert after_platform["total"] == 1
     assert after_platform["opt_in"] is False
     assert all(not row["is_me"] for row in after_platform["items"])
+    legacy_after_opt_out = client.get(
+        "/api/v1/practice/leaderboard?scope=platform&board=deterministic",
+        headers=s1_header).json()
+    assert legacy_after_opt_out["total"] == after_platform["total"]
+    assert legacy_after_opt_out["items"] == after_platform["items"]
     after_class = _board(client, s1_header, scope="offering", scope_id=offering_id)
     assert after_class["total"] == 2, "班内榜不受 opt-out 影响"
     assert after_class["items"] == class_board["items"]
@@ -342,6 +355,10 @@ def test_opt_out_hides_platform_row_but_class_board_is_unaffected(
     teacher_platform = _board(client, teacher_header)
     assert teacher_platform["total"] == 1, "退榜学生不得出现在全平台榜"
     assert teacher_platform["opt_in"] is None
+    legacy_teacher_platform = client.get(
+        "/api/v1/practice/leaderboard?scope=platform&board=deterministic",
+        headers=teacher_header).json()
+    assert legacy_teacher_platform["items"] == teacher_platform["items"]
 
     # 对照组：另一个老师看不到别人班级
     _other, other_header = as_teacher(client, db_session_factory, "board-teacher-2")

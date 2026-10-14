@@ -53,6 +53,10 @@ def _seed_review_required(db, teacher, student):
         exam_id=exam.id, student_id=student.id, status="review_required",
         review_reason="AI 评分终止需人工复核",
         review_required_at=datetime.now(timezone.utc),
+        grading_version_map={
+            str(choice.id): {"version_id": None, "points": float(choice.points)},
+            str(code.id): {"version_id": None, "points": float(code.points)},
+        },
     )
     db.add(es)
     db.flush()

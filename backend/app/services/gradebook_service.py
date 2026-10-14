@@ -210,13 +210,15 @@ def save_config(db, offering_id, actor, payload):
             if is_new:
                 column = GradebookColumn(gradebook_id=book.id, key=col_cfg.key)
                 db.add(column)
-            column.category_id, column.title, column.weight = category.id, col_cfg.title, col_cfg.weight
-            if col_cfg.weight is not None:
-                # 教师给出栏目内比例即视为已分配，不会再退回待分配。
-                column.allocation_status = 'allocated'
-            elif is_new:
-                # 自定义比例分类下新分项等待分配；等权分类直接按分项数均分。
-                column.allocation_status = 'pending' if cfg.weight_mode == 'custom' else 'allocated'
+            column.category_id, column.title = category.id, col_cfg.title
+            # Every save derives weight and status from the selected mode. Equal
+            # mode ignores and clears stale custom ratios; custom mode marks each
+            # missing ratio pending, including columns that existed before the save.
+            column.weight = col_cfg.weight if cfg.weight_mode == 'custom' else None
+            column.allocation_status = (
+                'allocated' if cfg.weight_mode == 'equal' or col_cfg.weight is not None
+                else 'pending'
+            )
             column.source_kind, column.source_id = col_cfg.source_kind, col_cfg.source_id
             column.selection, column.position = col_cfg.selection, index
             db.flush()

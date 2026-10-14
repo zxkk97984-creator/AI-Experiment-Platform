@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from app.models import ExperimentRecord
 from app.models.kernel_exec import KernelExecution
 
 logger = logging.getLogger("dai.kernel_queue")
@@ -27,6 +28,8 @@ ACTIVE_STATUSES = ("queued", "running", "recovering")
 KERNEL_LEASE_SECONDS = 120
 KERNEL_HEARTBEAT_SECONDS = 20
 KERNEL_MAX_ATTEMPTS = 2
+KERNEL_RECOVERY_LEASE_SECONDS = 60
+KERNEL_RECOVERY_RETRY_SECONDS = 15
 
 
 class LeaseLost(RuntimeError):
@@ -229,18 +232,13 @@ def claim_execution(db, settings=None, scan: ClaimScanState | None = None):
 
 
 def _claim_execution(db, settings, scan):
-    """认领最旧的可执行任务；同一记录同时只允许一个执行在跑。"""
+    """认领最旧任务；父记录锁串行化执行与 worker-loss 恢复。"""
     now = db.scalar(select(func.now()))
-    running_records = select(KernelExecution.record_id).where(
-        KernelExecution.status == "running")
-    query = select(KernelExecution).where(
-        KernelExecution.status == "queued",
-        KernelExecution.record_id.not_in(running_records),
-    )
+    query = select(KernelExecution).where(KernelExecution.status == "queued")
     if scan.high_water is None:
         last = db.execute(query.with_only_columns(KernelExecution.created_at, KernelExecution.id)
                           .order_by(KernelExecution.created_at.desc(), KernelExecution.id.desc())
-                          .limit(1).with_for_update()).first()
+                          .limit(1)).first()
         if last is None:
             scan.reset()
             db.commit()
@@ -251,8 +249,7 @@ def _claim_execution(db, settings, scan):
     if scan.after is not None:
         query = query.where(key > scan.after)
     candidates = list(db.scalars(query.order_by(KernelExecution.created_at, KernelExecution.id)
-                                 .limit(100).with_for_update()
-                                 .execution_options(populate_existing=True)))
+                                 .limit(100)))
     if not candidates:
         scan.reset()
     claimed_records: set[int] = set()
@@ -262,24 +259,52 @@ def _claim_execution(db, settings, scan):
             scan.reset()
         if execution.record_id in claimed_records:
             continue
-        if execution.cancel_requested:
-            execution.status = "cancelled"
-            execution.finished_at = now
+        # All claim/recovery transitions lock parent then execution row. A
+        # recovering cell therefore blocks its siblings until stop is confirmed.
+        record_exists = db.scalar(select(ExperimentRecord.id).where(
+            ExperimentRecord.id == execution.record_id).with_for_update())
+        if record_exists is None:
+            continue
+        active_id = db.scalar(select(KernelExecution.id).where(
+            KernelExecution.record_id == execution.record_id,
+            KernelExecution.status.in_(("running", "recovering")),
+        ).order_by(KernelExecution.id).limit(1).with_for_update())
+        if active_id is not None:
+            continue
+        row = db.get(KernelExecution, execution.id, populate_existing=True)
+        if row is None or row.status != "queued":
+            continue
+        if row.cancel_requested:
+            changed = db.execute(update(KernelExecution).where(
+                KernelExecution.id == row.id,
+                KernelExecution.status == "queued",
+                KernelExecution.cancel_requested.is_(True),
+            ).values(status="cancelled", finished_at=now)
+            .execution_options(synchronize_session=False)).rowcount
+            if changed:
+                db.commit()
+            else:
+                db.rollback()
             continue
         token = str(uuid.uuid4())
-        execution.status = "running"
-        execution.lease_token = token
-        execution.lease_until = now + timedelta(seconds=KERNEL_LEASE_SECONDS)
-        execution.attempts = (execution.attempts or 0) + 1
-        execution.started_at = now
-        execution.finished_at = None
-        execution.error_code = None
-        execution.error_message = None
-        execution.state_lost = False
-        execution.node_id = execution_node_id(settings)
+        changed = db.execute(update(KernelExecution).where(
+            KernelExecution.id == row.id,
+            KernelExecution.status == "queued",
+            KernelExecution.cancel_requested.is_(False),
+        ).values(
+            status="running", lease_token=token,
+            lease_until=now + timedelta(seconds=KERNEL_LEASE_SECONDS),
+            attempts=KernelExecution.attempts + 1,
+            started_at=now, finished_at=None,
+            error_code=None, error_message=None, state_lost=False,
+            node_id=execution_node_id(settings),
+        ).execution_options(synchronize_session=False)).rowcount
+        if not changed:
+            db.rollback()
+            continue
         claimed_records.add(execution.record_id)
         db.commit()
-        return execution.id, token
+        return row.id, token
     db.commit()
     return None
 
@@ -318,46 +343,79 @@ def finish_execution(db, execution_id, token, status, *, outputs=None,
 
 
 def recover_executions(db, settings=None):
-    """租约过期的执行：先中断可能的残留执行，再重排队或（超过上限）落 failed。
+    """回收失联 worker，但绝不自动重放学生代码。
 
-    与 lab 不同，这里绝不销毁学生内核——内存变量是学习状态；恢复只保证旧 worker
-    永远无法再写入结果（finish 被 token 栅栏挡住），重试由新 worker 完成。
+    先用新的恢复令牌接管过期任务，再确认旧执行已停止。无法确认时保留
+    ``recovering`` 并短暂退避；确认停止后以 WORKER_LOST 终止本次执行。
     """
     now = db.scalar(select(func.now()))
     stale = list(db.execute(select(
         KernelExecution.id, KernelExecution.lease_token, KernelExecution.record_id,
-        KernelExecution.attempts, KernelExecution.cancel_requested,
+        KernelExecution.status, KernelExecution.cancel_requested,
     ).where(
         ((KernelExecution.status == "running") & (KernelExecution.lease_until <= now)) |
-        (KernelExecution.status == "recovering"),
+        ((KernelExecution.status == "recovering") &
+         (KernelExecution.lease_until.is_(None) | (KernelExecution.lease_until <= now))),
     ).limit(100)))
     db.rollback()
     recovered = 0
-    for execution_id, token, record_id, attempts, cancel_requested in stale:
-        if not token:
-            continue
+    for execution_id, token, record_id, status, _cancel_requested in stale:
         now = db.scalar(select(func.now()))
+        record_exists = db.scalar(select(ExperimentRecord.id).where(
+            ExperimentRecord.id == record_id).with_for_update())
+        if record_exists is None:
+            db.rollback()
+            continue
+        recovery_token = str(uuid.uuid4())
+        eligible = (
+            ((KernelExecution.status == "running") & (KernelExecution.lease_until <= now))
+            if status == "running" else
+            (KernelExecution.status == "recovering") &
+            (KernelExecution.lease_until.is_(None) | (KernelExecution.lease_until <= now))
+        )
         fenced = db.execute(update(KernelExecution).where(
             KernelExecution.id == execution_id,
             KernelExecution.lease_token == token,
-            ((KernelExecution.status == "running") & (KernelExecution.lease_until <= now)) |
-            (KernelExecution.status == "recovering"),
-        ).values(status="recovering").execution_options(synchronize_session=False)).rowcount
+            eligible,
+        ).values(status="recovering", lease_token=recovery_token,
+                 lease_until=now + timedelta(seconds=KERNEL_RECOVERY_LEASE_SECONDS),
+                 error_code="RECOVERY_IN_PROGRESS",
+                 error_message="正在确认旧内核执行已停止。"
+                 ).execution_options(synchronize_session=False)).rowcount
         db.commit()
         if not fenced:
+            db.rollback()
             continue
-        _interrupt_orphan(record_id)
-        terminal = bool(cancel_requested) or (attempts or 0) >= KERNEL_MAX_ATTEMPTS
-        status = "cancelled" if cancel_requested else "failed" if terminal else "queued"
-        values = dict(status=status, lease_until=None, lease_token=None,
-                      error_code="WORKER_LOST" if terminal and not cancel_requested else None,
-                      error_message=("执行服务中断，本次运行未产生结果，请重新运行。"
-                                     if terminal and not cancel_requested else None))
-        if terminal:
-            values["finished_at"] = now
+        try:
+            stopped, state_lost = _interrupt_orphan(record_id)
+        except Exception:
+            logger.exception("确认 kernel record=%s 的旧执行停止失败", record_id)
+            stopped, state_lost = False, False
+        if not stopped:
+            retry_at = db.scalar(select(func.now())) + timedelta(seconds=KERNEL_RECOVERY_RETRY_SECONDS)
+            db.execute(update(KernelExecution).where(
+                KernelExecution.id == execution_id,
+                KernelExecution.lease_token == recovery_token,
+                KernelExecution.status == "recovering",
+            ).values(lease_until=retry_at, error_code="KERNEL_RECOVERY_BLOCKED",
+                     error_message="无法确认旧内核已停止，后续单元格暂不执行。"
+                     ).execution_options(synchronize_session=False))
+            db.commit()
+            continue
+
+        row = db.get(KernelExecution, execution_id, populate_existing=True)
+        cancel_requested = bool(row.cancel_requested) if row is not None else False
+        terminal_status = "cancelled" if cancel_requested else "failed"
+        values = dict(status=terminal_status, lease_until=None, lease_token=None,
+                      error_code=None if cancel_requested else "WORKER_LOST",
+                      error_message=None if cancel_requested else
+                      ("执行服务中断，本次运行未完成；变量可能已经部分改变，请检查后重新运行。"
+                       if not state_lost else
+                       "执行服务中断，内核已重建且变量已清空；请重新运行初始化及相关单元格。"),
+                      state_lost=bool(state_lost), finished_at=func.now())
         changed = db.execute(update(KernelExecution).where(
             KernelExecution.id == execution_id,
-            KernelExecution.lease_token == token,
+            KernelExecution.lease_token == recovery_token,
             KernelExecution.status == "recovering",
         ).values(**values).execution_options(synchronize_session=False)).rowcount
         db.commit()
@@ -367,12 +425,19 @@ def recover_executions(db, settings=None):
 
 
 def _interrupt_orphan(record_id):
-    """尽力中断可能仍在旧 worker 下运行的当前执行（不销毁内核、不丢变量）。"""
+    """中断失联执行并确认内核可用；必要时销毁无响应内核。
+
+    返回 ``(stopped, state_lost)``。返回 stopped=False 时，调用方必须继续保留
+    recovering 栅栏及资源租约。
+    """
     try:
         from app.services.kernel_manager import get_kernel_manager
-        get_kernel_manager().interrupt(record_id)
+        from app.database import SessionLocal
+        return get_kernel_manager().stop_execution_after_worker_loss(
+            record_id, resource_factory=SessionLocal)
     except Exception:
         logger.warning("恢复执行时无法中断 kernel record=%s 的残留执行", record_id, exc_info=True)
+        return False, False
 
 
 class KernelLeaseGuard:
@@ -414,6 +479,7 @@ class KernelLeaseGuard:
 
     def _lost(self):
         self.lost_event.set()
+        self.cancel_event.set()
         # fail-closed：尽快中断当前执行，避免孤儿代码继续跑
         try:
             if self.on_cancel is not None:

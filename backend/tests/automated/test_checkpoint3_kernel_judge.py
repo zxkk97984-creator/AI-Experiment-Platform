@@ -183,6 +183,7 @@ def test_redis_lock_token_safe_release():
     with patch('redis.from_url', return_value=fake_redis), \
          patch('subprocess.run',
                return_value=MagicMock(returncode=0, stdout='container-id\n')), \
+         patch.object(km, '_touch_session_activity'), \
          patch('app.services.kernel_manager.subprocess.Popen',
                return_value=_RunnerProcess()):
         result = km.execute(1, "print(1)")

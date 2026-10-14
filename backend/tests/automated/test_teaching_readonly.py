@@ -120,14 +120,14 @@ def test_closed_context_rejects_student_writes_and_get_does_not_collect(client, 
     ]:
         r = client.put(path, headers=h, json=payload)
         if path.endswith('/answers'):
-            assert r.status_code == 200, r.text
-            assert r.json()['results'][0]['code'] == 'OFFERING_READ_ONLY'
+            assert r.status_code == 409, r.text
+            assert r.json()['detail']['code'] == 'OFFERING_READ_ONLY'
         else:
             assert r.status_code == 409, r.text
     assert client.post(f"/api/v1/exams/{case['exam']}/submit", headers=h,
                        json={'expected_write_generation': 1}).status_code == 409
     assert client.post(f"/api/v1/exams/{case['exam']}/questions/{case['exam_question']}/sample-run",
-                       headers=h, json={'code': 'pass'}).status_code == 409
+                       headers=h, json={'code': 'pass', 'expected_write_generation': 1}).status_code == 409
     assert client.get(f"/api/v1/exams/{case['exam']}/session", headers=h).status_code == 200
     with db_session_factory() as db:
         assert db.get(ExamSubmission, sid).status == 'started'
@@ -157,7 +157,12 @@ def test_sample_execution_releases_teaching_locks(client, db_session_factory, te
     from app.api import exams, judge
     from app.services.account_service import lock_policy
     case = teaching_case
-    add_attempt(db_session_factory, case)
+    if kind == 'assignment':
+        add_attempt(db_session_factory, case)
+    else:
+        started = client.post(f"/api/v1/exams/{case['exam']}/start",
+                              headers=case['headers']['a'])
+        assert started.status_code == 201, started.text
     with db_session_factory() as db:
         if kind == 'assignment':
             q = db.get(JudgeQuestion, case['question'])
@@ -184,6 +189,8 @@ def test_sample_execution_releases_teaching_locks(client, db_session_factory, te
     payload = {'code': 'def f(): return 1'}
     if kind == 'assignment':
         payload['question_id'] = case['question']
+    else:
+        payload['expected_write_generation'] = 1
     response = client.post(path, headers=case['headers']['a'], json=payload)
     assert response.status_code == 200, response.text
     assert executions == [True]

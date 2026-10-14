@@ -63,6 +63,14 @@ class AiGradingSetupJob(TimestampMixin, Base):
         ForeignKey("question_rubrics.id"), nullable=True
     )
     draft_test_groups: Mapped[list] = mapped_column(JSON, default=list)
+    draft_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    draft_entry_function: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    draft_teacher_constraints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    draft_compare_rules: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    draft_score_cap_rules: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # A retry is durably queued first, then the worker resumes this stage after claiming it.
+    resume_stage: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    wake_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # 失败阶段：retry 从这里续跑，已生成草稿保留
     failed_stage: Mapped[str | None] = mapped_column(String(30), nullable=True)
@@ -101,6 +109,16 @@ class RubricTrialRun(TimestampMixin, Base):
     code: Mapped[str] = mapped_column(Text, nullable=False)
     client_request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    # `trial_type=ai_only` is retained for historical A/Q previews. New runs
+    # freeze a full deterministic + AI candidate and advance through stages.
+    trial_type: Mapped[str] = mapped_column(String(20), default="full", nullable=False)
+    stage: Mapped[str] = mapped_column(
+        String(30), default="deterministic_queued", nullable=False,
+    )
+    draft_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    candidate_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    candidate_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    wake_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -108,7 +126,13 @@ class RubricTrialRun(TimestampMixin, Base):
 
     algorithm_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    functional_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    robustness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deterministic_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     preview_score_100: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
     ai_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
 

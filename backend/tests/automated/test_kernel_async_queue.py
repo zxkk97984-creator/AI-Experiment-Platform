@@ -20,10 +20,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select, update
 
-from app.models import ExperimentRecord, User
+from app.models import ExperimentRecord, NotebookTemplateVersion, User
 from app.models.kernel_exec import KernelExecution
 from app.services.kernel_manager import EXEC_LOCK_TTL, KernelManager, KernelSession
 from app.services import kernel_queue
+
 from app.services.kernel_queue import (
     KERNEL_MAX_ATTEMPTS,
     claim_execution,
@@ -52,6 +53,11 @@ class LockStubRedis:
         self.expires[key] = ex
         return True
 
+    def setex(self, key, seconds, value):
+        self.values[key] = value
+        self.expires[key] = seconds
+        return True
+
     def ttl(self, key):
         return self.expires.get(key, -2)
 
@@ -67,6 +73,38 @@ class LockStubRedis:
             self.expires.pop(key, None)
             return 1
         return 0
+
+    def pipeline(self):
+        return _LockStubPipeline(self)
+
+
+class _LockStubPipeline:
+    def __init__(self, client):
+        self.client = client
+        self.pending = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def watch(self, _key):
+        return None
+
+    def get(self, key):
+        return self.client.values.get(key)
+
+    def multi(self):
+        return None
+
+    def set(self, key, value, ex=None):
+        self.pending.append((key, value, ex))
+
+    def execute(self):
+        for key, value, expiry in self.pending:
+            self.client.set(key, value, ex=expiry)
+        self.pending.clear()
 
 
 class SlowProcess:
@@ -133,6 +171,48 @@ def _enqueue(db, case, *, client_request_id=None, cell_id="code", code="print(1)
                              context={"record_revision": 1})
 
 
+def test_worker_prepares_kernel_when_template_has_no_hidden_cells(
+        db_session_factory, kernel_case, monkeypatch):
+    from app.services import lab_workspace
+    from app.worker.kernel_worker import _prepare_kernel
+
+    record = SimpleNamespace(id=kernel_case.record_id,
+                             template_version_id=kernel_case.version_id)
+    version = SimpleNamespace(cells=[{"id": "code", "type": "code",
+                                      "source_hidden": False, "source": "print(1)"}])
+    execution = SimpleNamespace(id=88, record_id=record.id, timeout_seconds=120)
+
+    class FakeSession:
+        def get(self, model, object_id):
+            if model is KernelExecution:
+                return execution
+            if model is ExperimentRecord:
+                return record
+            if model is NotebookTemplateVersion:
+                return version
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+    calls = []
+    class FakeManager:
+        def get_or_create_session(self, record_id, **kwargs):
+            calls.append((record_id, kwargs))
+            return SimpleNamespace(record_id=record_id)
+
+    monkeypatch.setattr("app.worker.kernel_worker._resolve_run_environment",
+                        lambda db, value: (None, None))
+    session = _prepare_kernel(lambda: FakeSession(), FakeManager(), execution.id, "lease")
+
+    assert session == record.id
+    assert len(calls) == 1, "即使模板没有隐藏单元格，也必须准备 worker 的内核 session"
+    assert calls[0][0] == record.id
+
+
 def test_enqueue_is_idempotent_per_client_request_id(db_session_factory, kernel_case):
     request_id = str(uuid.uuid4())
     with db_session_factory() as db:
@@ -195,43 +275,54 @@ def test_expired_lease_cannot_heartbeat_or_finish(db_session_factory, kernel_cas
         assert finish_execution(db, execution_id, token, "succeeded") is False
 
 
-def test_recovery_requeues_without_duplicate_output(db_session_factory, kernel_case,
-                                                    test_settings, monkeypatch):
-    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: None)
+def test_recovery_never_replays_stateful_code_after_worker_loss(
+        db_session_factory, kernel_case, test_settings, monkeypatch):
+    """结果栅栏不能防止重放改变共享变量；worker 丢失后本次执行必须终止。"""
+    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: (True, False))
     with db_session_factory() as db:
         _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
-        first_id, old_token = claim_execution(db, test_settings)
-        row = db.get(KernelExecution, first_id)
+        execution_id, old_token = claim_execution(db, test_settings)
+        row = db.get(KernelExecution, execution_id)
         row.lease_until = db.scalar(select(func.now())) - timedelta(seconds=1)
         db.commit()
 
         assert recover_executions(db, test_settings) == 1
-        recovered = db.get(KernelExecution, first_id, populate_existing=True)
-        assert recovered.status == "queued" and recovered.lease_token is None
+        recovered = db.get(KernelExecution, execution_id, populate_existing=True)
+        assert recovered.status == "failed" and recovered.error_code == "WORKER_LOST"
+        assert "变量可能已经部分改变" in recovered.error_message
+        assert claim_execution(db, test_settings) is None, "worker 丢失的学生代码不得自动重放"
 
-        second_id, new_token = claim_execution(db, test_settings)
-        assert second_id == first_id
-        row = db.get(KernelExecution, first_id, populate_existing=True)
-        assert row.attempts == 2, "恢复重入队后 attempts 必须递增"
-        assert new_token != old_token
-
-        # 旧 worker 的写入被栅栏拒绝：不产生第二份输出
-        assert finish_execution(db, first_id, old_token, "succeeded",
+        # 旧 worker 写入仍被栅栏拒绝，执行保持明确的失败状态。
+        assert finish_execution(db, execution_id, old_token, "succeeded",
                                 outputs=[{"msg_type": "stream", "content": {"text": "stale"}}]) is False
-        assert finish_execution(db, first_id, new_token, "succeeded",
-                                outputs=[{"msg_type": "stream", "content": {"text": "fresh"}}],
-                                execution_time_ms=5, execution_count=1) is True
+        final = db.get(KernelExecution, execution_id, populate_existing=True)
+        assert final.status == "failed" and final.outputs == []
+
+
+def test_recovering_record_blocks_following_execution_until_stop_is_confirmed(
+        db_session_factory, kernel_case, test_settings, monkeypatch):
+    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: (False, False))
+    with db_session_factory() as db:
+        first, _ = _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
+        second, _ = _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
+        execution_id, _token = claim_execution(db, test_settings)
+        assert execution_id == first.id
+        row = db.get(KernelExecution, execution_id)
+        row.lease_until = db.scalar(select(func.now())) - timedelta(seconds=1)
         db.commit()
-        final = db.get(KernelExecution, first_id, populate_existing=True)
-        assert final.status == "succeeded"
-        assert final.outputs == [{"msg_type": "stream", "content": {"text": "fresh"}}]
-        assert final.lease_until is None
+
+        assert recover_executions(db, test_settings) == 0
+        recovering = db.get(KernelExecution, execution_id, populate_existing=True)
+        assert recovering.status == "recovering"
+        assert recovering.lease_token and recovering.lease_until
+        assert claim_execution(db, test_settings) is None
+        assert db.get(KernelExecution, second.id).status == "queued"
 
 
 
 def test_recovery_exhausts_attempts_into_failed(db_session_factory, kernel_case,
                                                 test_settings, monkeypatch):
-    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: None)
+    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: (True, False))
     with db_session_factory() as db:
         _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
         execution_id, _token = claim_execution(db, test_settings)
@@ -243,6 +334,48 @@ def test_recovery_exhausts_attempts_into_failed(db_session_factory, kernel_case,
         final = db.get(KernelExecution, execution_id, populate_existing=True)
         assert final.status == "failed" and final.error_code == "WORKER_LOST"
         assert claim_execution(db, test_settings) is None
+
+
+def test_recovery_cancels_requested_execution_after_confirmed_stop(
+        db_session_factory, kernel_case, test_settings, monkeypatch):
+    monkeypatch.setattr(kernel_queue, "_interrupt_orphan", lambda record_id: (True, False))
+    with db_session_factory() as db:
+        execution, _ = _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
+        execution_id, _token = claim_execution(db, test_settings)
+        assert execution_id == execution.id
+        row = db.get(KernelExecution, execution_id)
+        row.cancel_requested = True
+        row.lease_until = db.scalar(select(func.now())) - timedelta(seconds=1)
+        db.commit()
+
+        assert recover_executions(db, test_settings) == 1
+        final = db.get(KernelExecution, execution_id, populate_existing=True)
+        assert final.status == "cancelled"
+        assert final.error_code is None
+        assert final.finished_at is not None
+
+
+def test_worker_loss_stop_preserves_responsive_kernel_and_marks_destroyed_state_lost(
+        kernel_case, test_settings, monkeypatch):
+    manager = KernelManager(test_settings)
+    record_id = kernel_case.record_id
+    session = KernelSession(record_id, f"dai-kernel-rec-{record_id}", {"ip": "127.0.0.1"})
+    manager._sessions[record_id] = session
+    monkeypatch.setattr(manager, "_inspect_container_running", lambda _name: True)
+    monkeypatch.setattr(manager, "_send_interrupt", lambda _session: None)
+    monkeypatch.setattr(manager, "_probe_kernel", lambda _session: True)
+    monkeypatch.setattr(manager, "_touch_session_activity", lambda *_args, **_kwargs: None)
+    assert manager.stop_execution_after_worker_loss(record_id) == (True, False)
+
+    monkeypatch.setattr(manager, "_probe_kernel", lambda _session: False)
+    monkeypatch.setattr(manager, "destroy", lambda _record_id: None)
+    assert manager.stop_execution_after_worker_loss(record_id) == (True, True)
+
+    def fail_destroy(_record_id):
+        raise RuntimeError("cannot confirm stop")
+
+    monkeypatch.setattr(manager, "destroy", fail_destroy)
+    assert manager.stop_execution_after_worker_loss(record_id) == (False, False)
 
 
 def test_cancel_queued_and_running(db_session_factory, kernel_case, test_settings):
@@ -308,8 +441,13 @@ def test_lease_guard_renews_lease_while_long_execution_runs(
 
 
 def test_cleanup_idle_keeps_in_flight_kernel_and_reclaims_after_finish(
-        db_session_factory, kernel_case, test_settings):
+        db_session_factory, kernel_case, test_settings, monkeypatch):
     """对照组：在途执行的 kernel 不被回收；同一 kernel 完成后超阈值即被回收。"""
+    import fakeredis
+    import redis
+
+    client = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: client)
     record_id = kernel_case.record_id
     with db_session_factory() as db:
         _enqueue(db, kernel_case, client_request_id=str(uuid.uuid4()))
@@ -321,6 +459,8 @@ def test_cleanup_idle_keeps_in_flight_kernel_and_reclaims_after_finish(
                                             {"ip": "127.0.0.1"})
     km._sessions[record_id].last_active_at = 0  # 早已超过空闲阈值
     km._resource_factories[record_id] = db_session_factory
+    km._write_session_redis(record_id, km._sessions[record_id])
+    client.set(km._activity_key(record_id), "0")
     destroyed = []
     km.destroy = lambda rid: destroyed.append(rid)
 
@@ -343,6 +483,45 @@ def test_cleanup_idle_keeps_in_flight_kernel_and_reclaims_after_finish(
     destroyed.clear()
     km.cleanup_idle(1)
     assert destroyed == [], "排队等待执行的 kernel 也不得被回收"
+
+
+def test_idle_cleanup_uses_published_timeout_and_shared_monotonic_activity(
+        db_session_factory, kernel_case, test_settings, monkeypatch):
+    import fakeredis
+    import redis
+
+    client = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: client)
+    now = time.time()
+    rid = kernel_case.record_id
+    km = KernelManager(test_settings)
+    newer = KernelSession(rid, f"dai-kernel-rec-{rid}", {"ip": "127.0.0.1"},
+                          last_active_at=now - 1000)
+    km._sessions[rid] = newer
+    km._resource_factories[rid] = db_session_factory
+    km._write_session_redis(rid, newer)
+
+    stale = KernelSession(rid, f"dai-kernel-rec-{rid}", {"ip": "127.0.0.1"},
+                          last_active_at=now - 4000)
+    km._write_session_redis(rid, stale)
+    restored = km._read_session_redis(rid)
+    assert restored is not None
+    assert restored.last_active_at >= now - 1000, "旧进程不能覆盖较新的共享活动时间"
+    assert client.ttl(f"kernel:session:{rid}") >= 7490
+
+    destroyed = []
+    km.destroy = lambda record_id: destroyed.append(record_id)
+    with db_session_factory() as db:
+        version = db.get(NotebookTemplateVersion, kernel_case.version_id)
+        version.kernel_idle_seconds = 7200
+        db.commit()
+        km.cleanup_idle(max_idle_seconds=900, db=db)
+        assert destroyed == [], "已空闲 1000 秒的内核不应被 7200 秒模板阈值回收"
+
+        version.kernel_idle_seconds = 300
+        db.commit()
+        km.cleanup_idle(max_idle_seconds=900, db=db)
+        assert destroyed == [rid], "空闲回收必须使用当前记录发布版本的 300 秒阈值"
 
 
 def test_exec_lock_renewal_is_cas_guarded_and_outlives_ttl():
@@ -412,3 +591,86 @@ def test_in_flight_check_fails_closed_without_database(kernel_case, test_setting
     km.destroy = lambda rid: destroyed.append(rid)
     km.cleanup_idle(1)
     assert destroyed == []
+
+def test_lease_loss_during_preparation_never_executes_student_code(
+    db_session_factory, kernel_case, test_settings, monkeypatch,
+):
+    from app.worker import kernel_worker
+
+    with db_session_factory() as db:
+        _enqueue(db, kernel_case)
+        db.commit()
+        execution_id, token = claim_execution(db, test_settings)
+    guards = []
+
+    class PreparationGuard(kernel_queue.KernelLeaseGuard):
+        def __enter__(self):
+            guards.append(self)
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    state = {"student_side_effects": 0}
+    monkeypatch.setattr(kernel_worker, "KernelLeaseGuard", PreparationGuard)
+    monkeypatch.setattr("app.services.kernel_manager.get_kernel_manager", lambda: object())
+    monkeypatch.setattr(kernel_worker, "_interrupt_kernel", lambda *_: None)
+    monkeypatch.setattr(kernel_worker, "_prepare_kernel", lambda *_: guards[0]._lost())
+
+    def execute(*args, **kwargs):
+        state["student_side_effects"] += 1
+        return {"outcome": "succeeded", "outputs": []}
+
+    monkeypatch.setattr("app.services.lab_workspace.execute_kernel_code", execute)
+    kernel_worker.process_execution(db_session_factory, execution_id, token, test_settings)
+    assert state["student_side_effects"] == 0
+    assert guards[0].cancel_event.is_set()
+    with db_session_factory() as db:
+        assert db.get(KernelExecution, execution_id).status == "running"
+
+
+def test_pre_cancelled_kernel_execution_never_starts_runner(test_settings, monkeypatch):
+    manager = KernelManager(test_settings)
+    event = threading.Event()
+    event.set()
+    monkeypatch.setattr("subprocess.Popen", lambda *_a, **_k: pytest.fail("cancelled code started"))
+    result = manager.execute(123, "state += 1", interrupt_event=event)
+    assert result["outcome"] == "cancelled"
+    assert result["state_lost"] is False
+
+
+def test_cancellation_before_payload_does_not_send_student_code(test_settings, monkeypatch):
+    manager = KernelManager(test_settings)
+    manager._sessions[123] = KernelSession(123, "cancelled-runner", {"ip": "127.0.0.1"})
+    monkeypatch.setattr("subprocess.run", lambda *_a, **_k:
+                        SimpleNamespace(returncode=0, stdout="cid\n", stderr=""))
+    monkeypatch.setattr(manager, "_touch_resources", lambda *_: None)
+    monkeypatch.setattr(manager, "_touch_session_activity", lambda *_a, **_k: None)
+    event = threading.Event()
+    client = LockStubRedis()
+    monkeypatch.setattr("redis.from_url", lambda *_a, **_k: client)
+    inputs = []
+
+    class WaitingRunner:
+        returncode = 0
+        killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def communicate(self, input=None, timeout=None):
+            inputs.append(input)
+            return '{"outputs":[]}', ""
+
+    proc = WaitingRunner()
+    def start(*_a, **_k):
+        event.set()  # Lease lost after runner starts, before code reaches stdin.
+        return proc
+
+    monkeypatch.setattr("subprocess.Popen", start)
+    monkeypatch.setattr(manager, "_send_interrupt", lambda *_: None)
+    result = manager.execute(123, "state += 1", interrupt_event=event)
+    assert result["outcome"] == "cancelled"
+    assert all(payload is None for payload in inputs)
+    assert proc.killed
+    assert client.values.get("kernel:lock:123") is None

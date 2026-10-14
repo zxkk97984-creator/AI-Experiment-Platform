@@ -83,7 +83,10 @@ class LabSubmission(TimestampMixin, Base):
 
 class LabGradeRevision(TimestampMixin, Base):
     __tablename__ = "lab_grade_revisions"
-    __table_args__ = (CheckConstraint("total >= 0 AND total <= 100", name="ck_lab_grade_range"),)
+    __table_args__ = (
+        CheckConstraint("total >= 0 AND total <= 100", name="ck_lab_grade_range"),
+        UniqueConstraint("run_id", name="uq_lab_grade_revision_run"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     submission_id: Mapped[int] = mapped_column(ForeignKey("experiment_submissions.id"), index=True)
     assessment_id: Mapped[int] = mapped_column(ForeignKey("lab_assessments.id"))
