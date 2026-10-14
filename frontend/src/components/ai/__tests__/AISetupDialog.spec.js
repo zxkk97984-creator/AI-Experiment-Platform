@@ -6,6 +6,7 @@ import { createPinia } from 'pinia'
 const api = vi.hoisted(() => ({
   createSetupJob: vi.fn(),
   getSetupJob: vi.fn(),
+  saveSetupDraft: vi.fn(),
   retrySetupJob: vi.fn(),
   createTrialRun: vi.fn(),
   getTrialRun: vi.fn(),
@@ -18,6 +19,8 @@ import AISetupDialog from '../AISetupDialog.vue'
 
 const READY_JOB = {
   id: 11, question_kind: 'assignment', question_id: 7, stage: 'draft_ready', progress: 100,
+  draft_revision: 1, draft_entry_function: 'solve', draft_teacher_constraints: { requirements_text: '边界条件' },
+  draft_compare_rules: {}, draft_score_cap_rules: [],
   draft_rubric_id: 3, draft_rubric_status: 'draft',
   draft_rubric: {
     rubric_version: 1,
@@ -101,9 +104,10 @@ describe('AISetupDialog 一键 AI 判题', () => {
 
     expect(api.getSetupJob).toHaveBeenCalledWith(11)
     expect(wrapper.text()).toContain('待确认启用')
-    expect(wrapper.text()).toContain('预览草稿')
-    expect(wrapper.text()).toContain('A · 正确性（10 分）')
-    expect(wrapper.text()).toContain('F · 功能（60 分）')
+    expect(wrapper.text()).toContain('编辑评分草稿')
+    expect(wrapper.findAll('.criterion-section')[0].findAll('.draft-row')[0].findAll('input')[1].element.value)
+      .toBe('正确性')
+    expect(wrapper.text()).toContain('F 功能')
     expect(wrapper.text()).toContain('评分标准状态：草稿')
   })
 
@@ -149,22 +153,23 @@ describe('AISetupDialog 一键 AI 判题', () => {
 
     await wait(POLL_WAIT)
     await flushPromises()
-    expect(wrapper.text()).toContain('预览草稿')
+    expect(wrapper.text()).toContain('编辑评分草稿')
   })
 
-  it('试判走 trial-runs 且明确标注不含确定性 F/R 分', async () => {
+  it('试判走 trial-runs 并展示完整 F/A/R/Q 结果', async () => {
     api.createSetupJob.mockResolvedValue({ data: READY_JOB })
     api.createTrialRun.mockResolvedValue({ data: { id: 21, status: 'running' } })
     api.getTrialRun.mockResolvedValue({
       data: { id: 21, status: 'completed', algorithm_score: 20, quality_score: 10,
-              preview_score_100: 30, includes_deterministic: false, error_message: null },
+              functional_score: 60, robustness_score: 10, preview_score_100: 100,
+              total_score: 100, score_max: 100, complete: true, trial_type: 'full',
+              draft_revision: 1, current_draft_revision: 2, stale_draft: true,
+              includes_deterministic: true, error_message: null },
     })
     const wrapper = mountDialog()
     await openAndStart(wrapper)
 
-    expect(wrapper.text()).toContain('不包含 F/R 确定性分')
-
-    await wrapper.find('.setup-code').setValue('def solve(n):\n    return n')
+    await wrapper.find('.trial-code').setValue('def solve(n):\n    return n')
     const trialButton = wrapper.findAll('button').find((node) => node.text() === '运行试判')
     await trialButton.trigger('click')
     await flushPromises()
@@ -174,11 +179,48 @@ describe('AISetupDialog 一键 AI 判题', () => {
     expect(api.createTrialRun).toHaveBeenCalledTimes(1)
     const [jobId, payload] = api.createTrialRun.mock.calls[0]
     expect(jobId).toBe(11)
+    expect(payload.expected_revision).toBe(1)
     expect(payload.code).toBe('def solve(n):\n    return n')
     expect(typeof payload.client_request_id).toBe('string')
     expect(api.getTrialRun).toHaveBeenCalledWith(21)
-    expect(wrapper.text()).toContain('试判不包含确定性 F/R 分')
-    expect(wrapper.text()).toContain('预览 AI 维度合计 30 分')
+    expect(wrapper.text()).toContain('F 60 / R 10 / A 20 / Q 10')
+    expect(wrapper.text()).toContain('总分 100 / 100')
+    expect(wrapper.text()).toContain('对应旧草稿修订 1')
+  })
+
+  it('评分项修改显示未保存并先按修订号保存', async () => {
+    api.createSetupJob.mockResolvedValue({ data: READY_JOB })
+    api.saveSetupDraft.mockImplementation((_id, payload) => Promise.resolve({
+      data: { ...READY_JOB, draft_revision: 2, draft_rubric: payload.rubric,
+              draft_test_groups: payload.test_groups, draft_entry_function: payload.entry_function,
+              draft_teacher_constraints: payload.teacher_constraints,
+              draft_compare_rules: payload.compare_rules, draft_score_cap_rules: payload.score_cap_rules },
+    }))
+    api.enableSetupJob.mockResolvedValue({
+      data: { ok: true, job_id: 11, rubric_id: 3, version_id: 9, version: 2, status: 'active' },
+    })
+    const wrapper = mountDialog()
+    await openAndStart(wrapper)
+    const aSection = wrapper.findAll('.criterion-section')[0]
+    await aSection.find('.draft-heading button').trigger('click')
+    const rows = aSection.findAll('.draft-row')
+    expect(rows).toHaveLength(3)
+    await rows[0].findAll('input')[2].setValue('9')
+    await rows[2].findAll('input')[1].setValue('新增的边界评分项')
+    await rows[2].findAll('input')[2].setValue('1')
+    expect(wrapper.text()).toContain('未保存修改')
+
+    await wrapper.find('.draft-save').trigger('click')
+    await flushPromises()
+    expect(api.saveSetupDraft).toHaveBeenCalledTimes(1)
+    expect(api.saveSetupDraft.mock.calls[0][0]).toBe(11)
+    expect(api.saveSetupDraft.mock.calls[0][1]).toMatchObject({ expected_revision: 1 })
+    expect(api.saveSetupDraft.mock.calls[0][1].rubric.algorithm_criteria).toHaveLength(3)
+    expect(wrapper.text()).not.toContain('未保存修改')
+
+    await wrapper.findAll('button').find((node) => node.text().includes('保存并启用')).trigger('click')
+    await flushPromises()
+    expect(api.enableSetupJob).toHaveBeenCalledWith(11, {})
   })
 
   it('考试题入口同样可用（kind=exam）', async () => {

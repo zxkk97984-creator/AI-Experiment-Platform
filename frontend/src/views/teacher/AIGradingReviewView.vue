@@ -176,7 +176,7 @@
                     <span class="cell-main">{{ targetKindMap[appeal.target_kind] || appeal.target_kind }} #{{ appeal.target_id }}</span>
                     <div class="cell-sub">{{ appeal.title || '—' }}<template v-if="appeal.created_at"> · {{ formatDateTime(appeal.created_at) }}</template></div>
                   </td>
-                  <td class="cell-num">{{ displayScore(appeal.score_before) }}</td>
+                  <td class="cell-num">{{ displayScore(appeal.score_before) }} / {{ displayScore(appeal.score_max) }}</td>
                   <td class="appeal-reason">{{ appeal.reason }}</td>
                   <td><span class="badge" :class="appealBadgeClass(appeal.status)"><span class="dot"></span>{{ appealStatusMap[appeal.status] || appeal.status }}</span></td>
                   <td class="col-actions">
@@ -202,12 +202,12 @@
         <div class="handle-card">
           <header>
             <h2>{{ handleActionMap[handleAction] }}成绩异议 #{{ handleTarget.id }}</h2>
-            <p class="cell-sub">{{ targetKindMap[handleTarget.target_kind] }} #{{ handleTarget.target_id }} · 申请时分数 {{ displayScore(handleTarget.score_before) }}</p>
+            <p class="cell-sub">{{ targetKindMap[handleTarget.target_kind] }} #{{ handleTarget.target_id }} · 申请时分数 {{ displayScore(handleTarget.score_before) }} / {{ displayScore(handleTarget.score_max) }}</p>
           </header>
           <p class="handle-reason">{{ handleTarget.reason }}</p>
           <label v-if="handleAction === 'adjust'" class="field">
-            <span>改分后总分（0-100）</span>
-            <input v-model.number="adjustScore" type="number" min="0" max="100" step="0.5" class="input" />
+            <span>改分后总分（0-{{ displayScore(handleTarget.score_max ?? 100) }}）</span>
+            <input v-model.number="adjustScore" type="number" min="0" :max="handleTarget.score_max ?? 100" step="0.01" class="input" />
           </label>
           <label class="field">
             <span>处理说明（必填）</span>
@@ -405,7 +405,12 @@ async function submitHandle() {
   if (handleAction.value === 'adjust') {
     if (!payload.comment) { handleError.value = '改分必须填写处理说明'; return }
     if (adjustScore.value == null || Number.isNaN(adjustScore.value)) { handleError.value = '请填写改分后的总分'; return }
-    payload.final_score_100 = Number(adjustScore.value)
+    const maximum = Number(handleTarget.value.score_max ?? 100)
+    if (adjustScore.value < 0 || adjustScore.value > maximum) {
+      handleError.value = `分数必须在 0 到 ${maximum} 之间`
+      return
+    }
+    payload.score = Number(adjustScore.value)
   }
   handleBusy.value = true
   handleError.value = ''

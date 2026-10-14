@@ -14,7 +14,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('../../../api/exams.js', () => ({
   examsAPI: {
-    getSession: vi.fn(), saveAnswers: vi.fn(), submit: vi.fn(), start: vi.fn(), sampleRun: vi.fn(),
+    getSession: vi.fn(), saveAnswers: vi.fn(), submit: vi.fn(), start: vi.fn(), takeover: vi.fn(), sampleRun: vi.fn(),
   },
 }))
 
@@ -34,6 +34,8 @@ function sessionFor(status, extra = {}) {
   const active = status === 'started'
   return {
     server_now: SERVER_NOW,
+    can_write: active,
+    takeover_required: false,
     exam: { id: 3, title: '期中考试', duration_minutes: 60, max_score: 60, student_status: active ? 'in_progress' : 'graded', ...extra.exam },
     submission: {
       id: 7, status, score: null, score_visible: false,
@@ -43,6 +45,7 @@ function sessionFor(status, extra = {}) {
     questions: active || extra.visibility?.questions ? (extra.questions || QUESTIONS) : [],
     saved_answers: extra.saved_answers || [],
     visibility: { score: false, questions: false, answers: false, review_released: false, ...extra.visibility },
+    ...extra.access,
   }
 }
 
@@ -174,6 +177,45 @@ describe('ExamView 安全状态与结果展示', () => {
     expect(wrapper.find('.workspace').exists()).toBe(true)
     expect(wrapper.find('input[aria-label="填空 blank1"]').exists()).toBe(true)
     expect(wrapper.html()).not.toContain('v-html')
+    wrapper.unmount()
+  })
+
+  it('缺少设备 Cookie 时显示接管要求并保持只读', async () => {
+    vi.useFakeTimers()
+    const wrapper = await mountExam('started', { access: { can_write: false, takeover_required: true } })
+    expect(wrapper.text()).toContain('本设备需要重新验证')
+    expect(wrapper.findAll('input, textarea').every(node => node.element.disabled)).toBe(true)
+    expect(wrapper.get('.submit-button').element.disabled).toBe(true)
+    await wrapper.get('input[type="radio"]').trigger('change')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    expect(examsAPI.saveAnswers).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('密码接管由浏览器 Cookie 保存凭证，不写入 localStorage', async () => {
+    const wrapper = await mountExam('started', { access: { can_write: false, takeover_required: true } })
+    examsAPI.takeover.mockResolvedValue({
+      data: { submission: { write_generation: 2 }, can_write: true, takeover_required: false },
+    })
+    examsAPI.getSession.mockResolvedValueOnce({
+      data: sessionFor('started', {
+        submission: { write_generation: 2 },
+        access: { can_write: true, takeover_required: false },
+      }),
+    })
+    await wrapper.get('.integrity-banner button').trigger('click')
+    await wrapper.get('[data-testid="takeover-password"]').setValue('Passw0rd!')
+    await wrapper.get('[data-testid="takeover-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(examsAPI.takeover).toHaveBeenCalledWith(3, {
+      current_password: 'Passw0rd!',
+      expected_write_generation: 1,
+      device_id: expect.any(String),
+    })
+    expect(localStorage.getItem('exam-device-token:3:7')).toBeNull()
+    expect(wrapper.get('input[type="radio"]').element.disabled).toBe(false)
     wrapper.unmount()
   })
 

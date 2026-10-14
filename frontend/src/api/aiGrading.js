@@ -21,6 +21,7 @@ export const aiGradingAPI = {
   // ── 一键 AI 配置（批次 2）：异步生成草稿 → 可选试判 → 保存并启用 ──
   createSetupJob(data) { return client.post('/ai-grading/setup-jobs', data) },
   getSetupJob(id) { return client.get(`/ai-grading/setup-jobs/${id}`) },
+  saveSetupDraft(id, data) { return client.patch(`/ai-grading/setup-jobs/${id}/draft`, data) },
   retrySetupJob(id) { return client.post(`/ai-grading/setup-jobs/${id}/retry`) },
   createTrialRun(id, data) { return client.post(`/ai-grading/setup-jobs/${id}/trial-runs`, data) },
   getTrialRun(id) { return client.get(`/ai-grading/trial-runs/${id}`) },

@@ -31,6 +31,8 @@ export function examSessionPayload({
       started_at: examServerNow, expires_at: '2026-10-13T02:30:00Z',
       last_saved_at: null, write_generation: writeGeneration,
     },
+    can_write: status === 'started',
+    takeover_required: false,
     questions: status === 'started' ? questions : [],
     saved_answers: [],
     visibility: { score: false, questions: false, answers: false, review_released: false },

@@ -186,16 +186,22 @@ if pid_alive api; then
 elif port_busy "$API_PORT"; then
     fail "端口 $API_PORT 已被其他进程占用。排查: ss -ltnp | grep ':$API_PORT '"
 else
-    launch api "$PROJECT_DIR/backend" "$PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$API_PORT"
+    launch api "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=judge "$PY" -m uvicorn app.main:app --host 0.0.0.0 --port "$API_PORT"
 fi
 echo "$API_PORT" >"$RUN_DIR/api.port"
 
-launch judge "$PROJECT_DIR/backend" "$PY" -m app.worker.judge_worker
-launch envbuilder "$PROJECT_DIR/backend" "$PY" -m app.worker.environment_builder_worker
-launch accounts "$PROJECT_DIR/backend" "$PY" -m app.worker.account_worker
+launch judge "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=judge "$PY" -m app.worker.judge_worker
+launch envbuilder "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=judge "$PY" -m app.worker.environment_builder_worker
+launch accounts "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=judge "$PY" -m app.worker.account_worker
+launch kernel "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=kernel "$PY" -m app.worker.kernel_worker
+launch practice "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=practice "$PY" -m app.worker.practice_worker
 LAB_ENABLED="$(cd "$PROJECT_DIR/backend" && "$PY" -c 'from app.config import get_settings; print(int(get_settings().lab_enabled))')"
 if [ "$LAB_ENABLED" = "1" ]; then
-    launch lab "$PROJECT_DIR/backend" "$PY" -m app.worker.lab_worker
+    launch lab "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=judge "$PY" -m app.worker.lab_worker
+fi
+AI_ENABLED="$(cd "$PROJECT_DIR/backend" && "$PY" -c 'from app.config import get_settings; print(int(get_settings().ai_enabled))')"
+if [ "$AI_ENABLED" = "1" ]; then
+    launch ai "$PROJECT_DIR/backend" env DAI_WORKER_ROLE=ai "$PY" -m app.worker.judge_worker
 fi
 
 # Worker 没有 HTTP 健康接口，至少确认启动后仍持续存活。
@@ -203,7 +209,10 @@ sleep 1
 check_alive judge
 check_alive envbuilder
 check_alive accounts
+check_alive kernel
+check_alive practice
 if [ "$LAB_ENABLED" = "1" ]; then check_alive lab; fi
+if [ "$AI_ENABLED" = "1" ]; then check_alive ai; fi
 
 # ── 6. 前端 ───────────────────────────────────────────────────
 cd "$PROJECT_DIR/frontend"

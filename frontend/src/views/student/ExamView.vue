@@ -42,7 +42,6 @@ const currentQuestion = ref(null)
 const allowLeave = ref(false)
 // 写入代次：换机接管后旧设备停留在旧代次，服务端 409 DEVICE_SUPERSEDED 拒绝其写入。
 const writeGeneration = ref(1)
-const deviceToken = ref('')
 const deviceSuperseded = ref(false)
 const takeoverError = ref('')
 const takeoverBusy = ref(false)
@@ -64,11 +63,11 @@ const TERMINAL_STATUSES = ['submitted', 'grading', 'graded', 'review_required']
 
 const queueKey = computed(() => `exam-answer-queue:${examId}:${submission.value?.id || 'pending'}`)
 const codeRunKey = computed(() => `exam-code-runs:${examId}:${submission.value?.id || 'pending'}`)
-const deviceTokenKey = computed(() => `exam-device-token:${examId}:${submission.value?.id || 'pending'}`)
 const active = computed(() => submission.value?.status === 'started' && exam.value?.student_status === 'in_progress')
 const completed = computed(() => Boolean(submission.value && submission.value.status !== 'started'))
+const canWrite = computed(() => !active.value || session.value?.can_write === true)
 const scoreVisible = computed(() => Boolean(submission.value?.score_visible && submission.value?.score != null))
-const canEdit = computed(() => active.value && !locked.value && !deviceSuperseded.value && !secondaryTab.value && !autoSubmitting.value)
+const canEdit = computed(() => active.value && canWrite.value && !locked.value && !deviceSuperseded.value && !secondaryTab.value && !autoSubmitting.value)
 // 时间模式文案：统一时间交卷 vs 进入后完整时长（后者 end_at 只是最晚可开考时间）
 const timingMode = computed(() => exam.value?.timing_mode || 'unified')
 const timingNote = computed(() => timingMode.value === 'per_student'
@@ -229,6 +228,10 @@ function hydrate(payload, { mergeQueue = true, syncOnly = false } = {}) {
   }
   session.value = payload
   if (payload.submission) writeGeneration.value = Number(payload.submission.write_generation || 1)
+  if (payload.submission?.id) {
+    // Older builds stored device tokens in localStorage; new credentials stay in HttpOnly cookies.
+    try { localStorage.removeItem(`exam-device-token:${examId}:${payload.submission.id}`) } catch { /* storage may be unavailable */ }
+  }
   const nextVersions = {}
   for (const saved of payload.saved_answers || []) {
     nextVersions[saved.question_id] = saved.version || 0
@@ -389,6 +392,7 @@ async function drainPending() {
   if ((!Object.keys(pending.value).length && !queuedEvents.length) || !active.value || secondaryTab.value) {
     return { ok: true }
   }
+  if (!canWrite.value) return { ok: false, takeoverRequired: true }
   if (deviceSuperseded.value) return { ok: false, superseded: true }
   if (!entryIds.length && !queuedEvents.length) {
     // 只剩冲突题：停止自动重试，等学生明确选择
@@ -615,7 +619,9 @@ async function runCode(question) {
     return
   }
   try {
-    const response = await examsAPI.sampleRun(examId, question.id, { code })
+    const response = await examsAPI.sampleRun(examId, question.id, {
+      code, expected_write_generation: writeGeneration.value,
+    })
     codeRunVersions.value = { ...codeRunVersions.value, [question.id]: versions.value[question.id] || 0 }
     persistCodeRuns()
     codeRuns.value = { ...codeRuns.value, [question.id]: { running: false, result: response.data } }
@@ -660,6 +666,10 @@ async function startExam() {
 
 async function submitExam({ forced = false, confirmed = false } = {}) {
   if (autoSubmitting.value || completed.value) return
+  if (active.value && !canWrite.value) {
+    app.showToast('本设备没有当前考试写入凭证，请先验证密码接管', 'error')
+    return
+  }
   if (!forced && !confirmed) { dialog.value = { kind: hasUnanswered.value ? 'submit-incomplete' : 'submit' }; return }
   dialog.value = null
   autoSubmitting.value = true
@@ -780,8 +790,6 @@ async function confirmTakeover() {
     })
     const payload = response.data
     writeGeneration.value = Number(payload.submission?.write_generation || writeGeneration.value)
-    deviceToken.value = payload.submission?.device_token || ''
-    try { localStorage.setItem(deviceTokenKey.value, deviceToken.value) } catch { /* 存储不可用时忽略 */ }
     deviceSuperseded.value = false
     locked.value = false
     dialog.value = null
@@ -912,6 +920,12 @@ onBeforeUnmount(() => {
         <button type="button" class="btn btn-ghost" @click="openTakeover">在这台设备重新接管</button>
       </section>
 
+      <section v-else-if="active && session?.takeover_required" class="integrity-banner danger" role="alert">
+        <strong>本设备需要重新验证</strong>
+        <span>此浏览器没有本场考试的写入凭证。已保存答案和剩余时间会保留，验证当前密码后可在本设备继续。</span>
+        <button type="button" class="btn btn-ghost" @click="openTakeover">验证密码并接管</button>
+      </section>
+
       <section v-if="active" class="integrity-note" aria-label="考试秩序与隐私告知">
         <div>
           <strong>{{ timingMode === 'per_student' ? '进入后完整时长' : '统一时间交卷' }}</strong>
@@ -921,7 +935,7 @@ onBeforeUnmount(() => {
           <strong>监考记录说明</strong>
           <p>本场考试会记录切屏次数、离开时长、换机事件与设备标识摘要（IP / 浏览器标识仅保存不可逆摘要），供教师了解考试过程。<b>不会自动认定作弊，也不会自动扣分。</b></p>
         </div>
-        <button v-if="!deviceSuperseded" type="button" class="btn btn-ghost" @click="openTakeover">换台设备继续</button>
+        <button v-if="canWrite && !deviceSuperseded" type="button" class="btn btn-ghost" @click="openTakeover">换台设备继续</button>
       </section>
 
       <section v-if="secondaryTab && active" class="tab-warning">
@@ -996,7 +1010,7 @@ onBeforeUnmount(() => {
           <nav class="question-nav" aria-label="题目导航">
             <button v-for="(question, index) in questions" :key="question.id" type="button" :class="{ answered: isAnswered(question, answers[question.id]), current: currentQuestion === question.id }" @click="scrollToQuestion(question.id)">{{ index + 1 }}</button>
           </nav>
-          <button type="button" class="submit-button" :disabled="autoSubmitting || secondaryTab" @click="submitExam()">{{ autoSubmitting ? '正在交卷…' : '提交试卷' }}</button>
+          <button type="button" class="submit-button" :disabled="autoSubmitting || secondaryTab || !canWrite" @click="submitExam()">{{ autoSubmitting ? '正在交卷…' : '提交试卷' }}</button>
           <small>交卷前会先同步待保存答案</small>
         </aside>
 

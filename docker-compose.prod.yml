@@ -266,6 +266,81 @@ services:
       - lab_data:/app/storage/lab
       - app_logs:/app/logs
 
+  # Notebook kernel 执行与 API 分离，但连接同一 Docker daemon 和工作目录。
+  # 共享节点配置、存储卷及内核镜像必须与 API 一致，才能接管已有 session。
+  kernel-worker:
+    build: *backend-build
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.kernel_worker"]
+    logging: *api_logging
+    environment:
+      <<: *api_environment
+      DAI_WORKER_ROLE: kernel
+      DAI_AI_ENABLED: "false"
+      DAI_AI_API_KEY: ""
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 2g
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${DAI_JUDGE_HOST_WORK_DIR:?DAI_JUDGE_HOST_WORK_DIR 必须设置}:/judge-work"
+      - studio_data:/app/storage/studio
+      - lab_data:/app/storage/lab
+      - app_logs:/app/logs
+    secrets:
+      - source: dai_env_registry_docker_config
+        target: config.json
+
+  # 自主练习有独立队列和并发上限；它不消费正式 judge 队列。
+  practice-worker:
+    build: *backend-build
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker.practice_worker"]
+    logging: *api_logging
+    environment:
+      <<: *api_environment
+      DAI_WORKER_ROLE: practice
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 3g
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "${DAI_JUDGE_HOST_WORK_DIR:?DAI_JUDGE_HOST_WORK_DIR 必须设置}:/judge-work"
+      - app_logs:/app/logs
+    secrets:
+      - source: dai_env_registry_docker_config
+        target: config.json
+
   account-worker:
     build: *backend-build
     restart: unless-stopped

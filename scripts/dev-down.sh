@@ -95,7 +95,7 @@ stop_pid() {
 }
 
 # ── 1. 根据 pidfile 停止 ──────────────────────────────────────
-for name in frontend api judge envbuilder accounts lab; do
+for name in frontend api judge envbuilder accounts lab kernel practice ai; do
     pidfile="$RUN_DIR/$name.pid"
     if [ ! -f "$pidfile" ]; then
         log "[跳过] $name 无 PID 文件"
@@ -129,7 +129,7 @@ for proc in /proc/[0-9]*; do
 
     cmd="$(proc_cmdline "$pid")"
     case "$cmd" in
-        *"uvicorn app.main:app"*|*"app.worker.judge_worker"*|*"app.worker.environment_builder_worker"*|*"npm run dev"*|*"node_modules/.bin/vite"*|*" vite "*)
+        *"uvicorn app.main:app"*|*"app.worker.judge_worker"*|*"app.worker.kernel_worker"*|*"app.worker.practice_worker"*|*"app.worker.lab_worker"*|*"app.worker.environment_builder_worker"*|*"app.worker.account_worker"*|*"npm run dev"*|*"node_modules/.bin/vite"*|*" vite "*)
             pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
             if [[ "$pgid" =~ ^[0-9]+$ ]]; then
                 residual_pgids["$pgid"]=1
